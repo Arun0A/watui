@@ -3,7 +3,10 @@ package whatsapp
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/skip2/go-qrcode"
@@ -168,16 +171,91 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		return domain.Message{}, fmt.Errorf("failed to send message: %w", err)
 	}
 
+	senderID := ""
+	if a.client.Store.ID != nil {
+		senderID = a.client.Store.ID.ToNonAD().String()
+	}
+
 	return domain.Message{
-		ID:        resp.ID,
-		ChatID:    chatID,
-		Sender:    a.client.Store.ID.ToNonAD().String(),
-		Timestamp: resp.Timestamp,
-		IsFromMe:  true,
-		Type:      domain.MessageTypeText,
-		Body:      text,
-		Status:    domain.MessageStatusSent,
+		ID:         resp.ID,
+		ChatID:     chatID,
+		Sender:     senderID,
+		SenderName: "Me",
+		Timestamp:  resp.Timestamp,
+		IsFromMe:   true,
+		Type:       domain.MessageTypeText,
+		Body:       text,
+		Status:     domain.MessageStatusSent,
 	}, nil
+}
+
+// GetContacts retrieves all known contacts from the local session database.
+func (a *Adapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
+	if a.client == nil || a.client.Store == nil || a.client.Store.Contacts == nil {
+		return nil, nil
+	}
+
+	rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get contacts: %w", err)
+	}
+
+	var list []domain.Contact
+	for jid, info := range rawMap {
+		if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {
+			continue
+		}
+
+		name := strings.TrimSpace(info.FullName)
+		if name == "" {
+			name = strings.TrimSpace(info.BusinessName)
+		}
+		if name == "" {
+			name = strings.TrimSpace(info.PushName)
+		}
+		if name == "" {
+			name = jid.User
+		}
+
+		list = append(list, domain.Contact{
+			JID:          jid.String(),
+			Name:         name,
+			PushName:     info.PushName,
+			BusinessName: info.BusinessName,
+		})
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name)
+	})
+
+	return list, nil
+}
+
+// MarkRead sends a read receipt to WhatsApp for the given message IDs.
+func (a *Adapter) MarkRead(ctx context.Context, chatID string, senderID string, messageIDs []string) error {
+	if len(messageIDs) == 0 || a.client == nil {
+		return nil
+	}
+
+	cJID, err := types.ParseJID(chatID)
+	if err != nil {
+		return fmt.Errorf("invalid chat JID %q: %w", chatID, err)
+	}
+
+	sJID := cJID
+	if senderID != "" && senderID != chatID {
+		if parsed, err := types.ParseJID(senderID); err == nil {
+			sJID = parsed
+		}
+	}
+
+	waMsgIDs := make([]types.MessageID, len(messageIDs))
+	for i, id := range messageIDs {
+		waMsgIDs[i] = types.MessageID(id)
+	}
+
+	return a.client.MarkRead(ctx, waMsgIDs, time.Now(), cJID, sJID)
 }
 
 // handleEvent processes internal whatsmeow events and maps them to clean domain models.
@@ -250,15 +328,21 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) domain.Message {
 		}
 	}
 
+	senderName := evt.Info.PushName
+	if senderName == "" {
+		senderName = evt.Info.Sender.User
+	}
+
 	return domain.Message{
-		ID:        evt.Info.ID,
-		ChatID:    evt.Info.Chat.String(),
-		Sender:    evt.Info.Sender.String(),
-		Timestamp: evt.Info.Timestamp,
-		IsFromMe:  evt.Info.IsFromMe,
-		Type:      msgType,
-		Body:      body,
-		Status:    domain.MessageStatusDelivered,
+		ID:         evt.Info.ID,
+		ChatID:     evt.Info.Chat.String(),
+		Sender:     evt.Info.Sender.String(),
+		SenderName: senderName,
+		Timestamp:  evt.Info.Timestamp,
+		IsFromMe:   evt.Info.IsFromMe,
+		Type:       msgType,
+		Body:       body,
+		Status:     domain.MessageStatusDelivered,
 	}
 }
 
@@ -277,3 +361,4 @@ func (a *Adapter) renderQRInTerminal(code string) {
 	fmt.Print(qr.ToSmallString(false))
 	fmt.Println("=======================================================")
 }
+

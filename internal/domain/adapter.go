@@ -42,4 +42,10 @@ type WhatsAppAdapter interface {
 
 	// SendTextMessage sends a plain text message to a given chat JID.
 	SendTextMessage(ctx context.Context, chatID string, text string) (Message, error)
+
+	// GetContacts retrieves all known contacts from local store.
+	GetContacts(ctx context.Context) ([]Contact, error)
+
+	// MarkRead sends a read receipt to WhatsApp for the given message IDs.
+	MarkRead(ctx context.Context, chatID string, senderID string, messageIDs []string) error
 }
