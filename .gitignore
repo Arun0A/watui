@@ -1,0 +1,13 @@
+# Binaries
+/watui
+*.exe
+
+# SQLite databases & temp files
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Go build cache & tooling
+.envrc
+.direnv/
