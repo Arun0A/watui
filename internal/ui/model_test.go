@@ -29,6 +29,7 @@ func (m *mockAdapter) GetContacts(ctx context.Context) ([]domain.Contact, error)
 	}, nil
 }
 func (m *mockAdapter) MarkRead(ctx context.Context, c, s string, ids []string) error { return nil }
+func (m *mockAdapter) OnContactsUpdated(h func([]domain.Contact))                     {}
 
 func TestUnreadModelLifecycle(t *testing.T) {
 	adapter := &mockAdapter{}

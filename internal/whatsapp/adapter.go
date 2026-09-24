@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ import (
 // Config holds configuration for the WhatsApp adapter.
 type Config struct {
 	DBPath   string
+	LogFile  string
 	LogLevel string
 }
 
@@ -32,12 +34,20 @@ type Config struct {
 type Adapter struct {
 	client    *whatsmeow.Client
 	container *sqlstore.Container
+	localDB   *sql.DB
 	config    Config
 
 	mu              sync.RWMutex
 	messageHandlers []domain.MessageHandler
 	statusHandlers  []domain.StatusHandler
 	currentStatus   domain.ConnectionStatus
+
+	contactsMu       sync.RWMutex
+	cachedContacts   []domain.Contact
+	contactsLoaded   bool
+	contactsHandlers []func([]domain.Contact)
+	refreshMu        sync.Mutex
+	isRefreshing     bool
 }
 
 // NewAdapter creates and initializes a WhatsApp adapter instance.
@@ -45,9 +55,18 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	if cfg.DBPath == "" {
 		cfg.DBPath = "watui.db"
 	}
+	if cfg.LogFile == "" {
+		cfg.LogFile = "watui.log"
+	}
 
-	dbLog := waLog.Stdout("Database", cfg.LogLevel, true)
-	clientLog := waLog.Stdout("Client", cfg.LogLevel, true)
+	dbLog, err := NewFileLogger(cfg.LogFile, "Database", cfg.LogLevel)
+	if err != nil {
+		dbLog = waLog.Noop
+	}
+	clientLog, err := NewFileLogger(cfg.LogFile, "Client", cfg.LogLevel)
+	if err != nil {
+		clientLog = waLog.Noop
+	}
 
 	container, err := sqlstore.New(ctx, "sqlite3", "file:"+cfg.DBPath+"?_foreign_keys=on", dbLog)
 	if err != nil {
@@ -61,9 +80,18 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 
+	localDB, _ := sql.Open("sqlite3", "file:"+cfg.DBPath+"?_foreign_keys=on")
+	if localDB != nil {
+		_, _ = localDB.Exec(`CREATE TABLE IF NOT EXISTS watui_groups (
+			jid TEXT PRIMARY KEY,
+			name TEXT
+		);`)
+	}
+
 	adapter := &Adapter{
 		client:        client,
 		container:     container,
+		localDB:       localDB,
 		config:        cfg,
 		currentStatus: domain.StatusDisconnected,
 	}
@@ -152,6 +180,9 @@ func (a *Adapter) Disconnect() {
 	if a.client != nil {
 		a.client.Disconnect()
 	}
+	if a.localDB != nil {
+		_ = a.localDB.Close()
+	}
 	a.setStatus(domain.StatusDisconnected)
 }
 
@@ -209,39 +240,89 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 	}, nil
 }
 
-// GetContacts retrieves all known contacts and joined groups from local store/WhatsApp.
+// GetContacts retrieves contacts from in-memory cache if available, or falls back to fast local SQLite.
 func (a *Adapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
-	if a.client == nil || a.client.Store == nil {
-		return nil, nil
+	a.contactsMu.RLock()
+	if a.contactsLoaded && len(a.cachedContacts) > 0 {
+		res := make([]domain.Contact, len(a.cachedContacts))
+		copy(res, a.cachedContacts)
+		a.contactsMu.RUnlock()
+		return res, nil
 	}
+	a.contactsMu.RUnlock()
 
-	var list []domain.Contact
+	// If not preloaded yet, do an instant local SQLite read (contacts + cached groups)
+	contacts := a.fetchLocalContacts(ctx)
 
-	// 1. Fetch joined groups
-	groups, err := a.client.GetJoinedGroups(ctx)
-	if err == nil {
-		for _, g := range groups {
-			name := strings.TrimSpace(g.GroupName.Name)
-			if name == "" {
-				name = "Group (" + g.JID.User + ")"
-			}
-			list = append(list, domain.Contact{
-				JID:     g.JID.String(),
+	// Refresh cache in background (including network groups from WhatsApp)
+	go a.refreshContactsCache(context.Background())
+
+	return contacts, nil
+}
+
+func (a *Adapter) getLocalGroups() []domain.Contact {
+	if a.localDB == nil {
+		return nil
+	}
+	rows, err := a.localDB.Query("SELECT jid, name FROM watui_groups ORDER BY name ASC")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var groups []domain.Contact
+	for rows.Next() {
+		var jid, name string
+		if err := rows.Scan(&jid, &name); err == nil {
+			groups = append(groups, domain.Contact{
+				JID:     jid,
 				Name:    name,
 				IsGroup: true,
 			})
 		}
 	}
+	return groups
+}
 
-	// 2. Fetch contacts from store
-	if a.client.Store.Contacts != nil {
+func (a *Adapter) saveLocalGroups(groups []*types.GroupInfo) {
+	if a.localDB == nil || len(groups) == 0 {
+		return
+	}
+	tx, err := a.localDB.Begin()
+	if err != nil {
+		return
+	}
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)")
+	if err != nil {
+		_ = tx.Rollback()
+		return
+	}
+	defer stmt.Close()
+
+	for _, g := range groups {
+		name := strings.TrimSpace(g.GroupName.Name)
+		if name == "" {
+			name = "Group (" + g.JID.User + ")"
+		}
+		_, _ = stmt.Exec(g.JID.String(), name)
+	}
+	_ = tx.Commit()
+}
+
+func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
+	var list []domain.Contact
+
+	// 1. Instantly read cached groups from local SQLite
+	list = append(list, a.getLocalGroups()...)
+
+	// 2. Read contacts from whatsmeow SQLite store
+	if a.client != nil && a.client.Store != nil && a.client.Store.Contacts != nil {
 		rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
 		if err == nil {
 			for jid, info := range rawMap {
 				if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {
 					continue
 				}
-
 				name := strings.TrimSpace(info.FullName)
 				if name == "" {
 					name = strings.TrimSpace(info.BusinessName)
@@ -252,7 +333,6 @@ func (a *Adapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
 				if name == "" {
 					name = jid.User
 				}
-
 				list = append(list, domain.Contact{
 					JID:          jid.String(),
 					Name:         name,
@@ -264,25 +344,93 @@ func (a *Adapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
 		}
 	}
 
+	sortContacts(list)
+	return list
+}
+
+func (a *Adapter) refreshContactsCache(ctx context.Context) {
+	if a.client == nil {
+		return
+	}
+
+	a.refreshMu.Lock()
+	if a.isRefreshing {
+		a.refreshMu.Unlock()
+		return
+	}
+	a.isRefreshing = true
+	a.refreshMu.Unlock()
+
+	defer func() {
+		a.refreshMu.Lock()
+		a.isRefreshing = false
+		a.refreshMu.Unlock()
+	}()
+
+	// Wait up to 10 seconds for socket connection to complete
+	if !a.client.WaitForConnection(10 * time.Second) {
+		return
+	}
+
+	// 1. Fetch joined groups from WhatsApp over WebSocket
+	groups, err := a.client.GetJoinedGroups(ctx)
+	if err == nil && len(groups) > 0 {
+		a.saveLocalGroups(groups)
+	}
+
+	// 2. Re-read combined local list
+	combined := a.fetchLocalContacts(ctx)
+
 	// Deduplicate by JID
 	seen := make(map[string]bool)
 	var deduped []domain.Contact
-	for _, c := range list {
+	for _, c := range combined {
 		if !seen[c.JID] {
 			seen[c.JID] = true
 			deduped = append(deduped, c)
 		}
 	}
 
-	sort.Slice(deduped, func(i, j int) bool {
-		// Put groups first, then contacts by name
-		if deduped[i].IsGroup != deduped[j].IsGroup {
-			return deduped[i].IsGroup
-		}
-		return strings.ToLower(deduped[i].Name) < strings.ToLower(deduped[j].Name)
-	})
+	sortContacts(deduped)
 
-	return deduped, nil
+	a.contactsMu.Lock()
+	a.cachedContacts = deduped
+	a.contactsLoaded = true
+	var handlers []func([]domain.Contact)
+	if len(a.contactsHandlers) > 0 {
+		handlers = make([]func([]domain.Contact), len(a.contactsHandlers))
+		copy(handlers, a.contactsHandlers)
+	}
+	a.contactsMu.Unlock()
+
+	for _, h := range handlers {
+		h(deduped)
+	}
+}
+
+// OnContactsUpdated registers a callback triggered whenever contacts or groups are updated in background.
+func (a *Adapter) OnContactsUpdated(handler func([]domain.Contact)) {
+	a.contactsMu.Lock()
+	a.contactsHandlers = append(a.contactsHandlers, handler)
+	var cached []domain.Contact
+	if a.contactsLoaded && len(a.cachedContacts) > 0 {
+		cached = make([]domain.Contact, len(a.cachedContacts))
+		copy(cached, a.cachedContacts)
+	}
+	a.contactsMu.Unlock()
+
+	if len(cached) > 0 {
+		go handler(cached)
+	}
+}
+
+func sortContacts(list []domain.Contact) {
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].IsGroup != list[j].IsGroup {
+			return list[i].IsGroup
+		}
+		return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name)
+	})
 }
 
 // MarkRead sends a read receipt to WhatsApp for the given message IDs.
@@ -316,6 +464,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
 		a.setStatus(domain.StatusConnected)
+		go a.refreshContactsCache(context.Background())
 
 	case *events.LoggedOut:
 		a.setStatus(domain.StatusLoggedOut)

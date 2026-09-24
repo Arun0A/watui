@@ -48,4 +48,7 @@ type WhatsAppAdapter interface {
 
 	// MarkRead sends a read receipt to WhatsApp for the given message IDs.
 	MarkRead(ctx context.Context, chatID string, senderID string, messageIDs []string) error
+
+	// OnContactsUpdated registers a listener for when contacts/groups are updated in background.
+	OnContactsUpdated(handler func([]Contact))
 }

@@ -8,6 +8,10 @@
 *.db-shm
 *.db-journal
 
+# Logs
+*.log
+
 # Go build cache & tooling
 .envrc
 .direnv/
+

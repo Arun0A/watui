@@ -107,6 +107,8 @@ func (m *Model) Init() tea.Cmd {
 		textinput.Blink,
 		m.waitForMessages(),
 		m.waitForStatus(),
+		m.loadContacts(),
+		m.waitForContactsUpdated(),
 	)
 }
 
@@ -135,6 +137,20 @@ func (m *Model) waitForStatus() tea.Cmd {
 		})
 		s := <-statusChan
 		return statusChangeMsg(s)
+	}
+}
+
+func (m *Model) waitForContactsUpdated() tea.Cmd {
+	return func() tea.Msg {
+		cChan := make(chan []domain.Contact, 1)
+		m.adapter.OnContactsUpdated(func(contacts []domain.Contact) {
+			select {
+			case cChan <- contacts:
+			default:
+			}
+		})
+		c := <-cChan
+		return contactsLoadedMsg(c)
 	}
 }
 
@@ -169,8 +185,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case contactsLoadedMsg:
 		m.contacts = []domain.Contact(msg)
-		m.filterContacts("")
+		m.filterContacts(m.contactSearch.Value())
 		m.loadingContact = false
+		cmds = append(cmds, m.waitForContactsUpdated()) // re-listen for live updates
 
 	case messageSentMsg:
 		sent := domain.Message(msg)
@@ -309,8 +326,13 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		m.contactSearch.Reset()
 		m.contactSearch.Focus()
 		m.contactCursor = 0
-		m.loadingContact = true
-		return tea.Batch(textinput.Blink, m.loadContacts())
+		m.filterContacts("")
+		if len(m.contacts) == 0 {
+			m.loadingContact = true
+			return tea.Batch(textinput.Blink, m.loadContacts())
+		}
+		m.loadingContact = false
+		return textinput.Blink
 	}
 	return nil
 }
@@ -419,7 +441,11 @@ func (m *Model) filterContacts(query string) {
 	trimmed := strings.TrimSpace(query)
 	q := strings.ToLower(trimmed)
 	if q == "" {
-		m.filteredList = m.contacts
+		if len(m.contacts) > 40 {
+			m.filteredList = m.contacts[:40]
+		} else {
+			m.filteredList = m.contacts
+		}
 		return
 	}
 
@@ -439,11 +465,15 @@ func (m *Model) filterContacts(query string) {
 		})
 	}
 
+	maxMatches := 40
 	for _, c := range m.contacts {
 		if strings.Contains(strings.ToLower(c.Name), q) ||
 			strings.Contains(strings.ToLower(c.PushName), q) ||
-			strings.Contains(strings.ToLower(c.JID), q) {
+			strings.Contains(c.JID, q) {
 			res = append(res, c)
+			if len(res) >= maxMatches {
+				break
+			}
 		}
 	}
 	m.filteredList = res

@@ -19,6 +19,7 @@ import (
 
 func main() {
 	dbPath := flag.String("db", "watui.db", "Path to SQLite session and cache database")
+	logFile := flag.String("log-file", "watui.log", "File to write protocol and network logs to (or 'none' to disable)")
 	logLevel := flag.String("log", "WARN", "Protocol log level (DEBUG, INFO, WARN, ERROR)")
 	cliMode := flag.Bool("cli", false, "Run in headless CLI mode instead of interactive TUI")
 	jsonOutput := flag.Bool("json", false, "Print extracted messages as raw JSON (used with -cli)")
@@ -34,6 +35,7 @@ func main() {
 	// 2. Initialize WhatsApp Adapter (Encapsulated Protocol Layer)
 	adapter, err := whatsapp.NewAdapter(ctx, whatsapp.Config{
 		DBPath:   *dbPath,
+		LogFile:  *logFile,
 		LogLevel: *logLevel,
 	})
 	if err != nil {
