@@ -155,11 +155,31 @@ func (a *Adapter) Disconnect() {
 	a.setStatus(domain.StatusDisconnected)
 }
 
-// SendTextMessage sends a basic text message to a WhatsApp chat JID.
+// NormalizeJID parses or normalizes a raw chat target (full JID, phone number with +, etc.)
+func NormalizeJID(chatID string) (types.JID, error) {
+	chatID = strings.TrimSpace(chatID)
+	if strings.Contains(chatID, "@") {
+		return types.ParseJID(chatID)
+	}
+
+	var digits strings.Builder
+	for _, r := range chatID {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	num := digits.String()
+	if num == "" {
+		return types.JID{}, fmt.Errorf("invalid empty phone number %q", chatID)
+	}
+	return types.NewJID(num, types.DefaultUserServer), nil
+}
+
+// SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number.
 func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text string) (domain.Message, error) {
-	recipientJID, err := types.ParseJID(chatID)
+	recipientJID, err := NormalizeJID(chatID)
 	if err != nil {
-		return domain.Message{}, fmt.Errorf("invalid recipient JID %q: %w", chatID, err)
+		return domain.Message{}, fmt.Errorf("invalid recipient %q: %w", chatID, err)
 	}
 
 	msg := &waE2E.Message{
@@ -178,7 +198,7 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 
 	return domain.Message{
 		ID:         resp.ID,
-		ChatID:     chatID,
+		ChatID:     recipientJID.String(),
 		Sender:     senderID,
 		SenderName: "Me",
 		Timestamp:  resp.Timestamp,
@@ -189,47 +209,80 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 	}, nil
 }
 
-// GetContacts retrieves all known contacts from the local session database.
+// GetContacts retrieves all known contacts and joined groups from local store/WhatsApp.
 func (a *Adapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
-	if a.client == nil || a.client.Store == nil || a.client.Store.Contacts == nil {
+	if a.client == nil || a.client.Store == nil {
 		return nil, nil
 	}
 
-	rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get contacts: %w", err)
-	}
-
 	var list []domain.Contact
-	for jid, info := range rawMap {
-		if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {
-			continue
-		}
 
-		name := strings.TrimSpace(info.FullName)
-		if name == "" {
-			name = strings.TrimSpace(info.BusinessName)
+	// 1. Fetch joined groups
+	groups, err := a.client.GetJoinedGroups(ctx)
+	if err == nil {
+		for _, g := range groups {
+			name := strings.TrimSpace(g.GroupName.Name)
+			if name == "" {
+				name = "Group (" + g.JID.User + ")"
+			}
+			list = append(list, domain.Contact{
+				JID:     g.JID.String(),
+				Name:    name,
+				IsGroup: true,
+			})
 		}
-		if name == "" {
-			name = strings.TrimSpace(info.PushName)
-		}
-		if name == "" {
-			name = jid.User
-		}
-
-		list = append(list, domain.Contact{
-			JID:          jid.String(),
-			Name:         name,
-			PushName:     info.PushName,
-			BusinessName: info.BusinessName,
-		})
 	}
 
-	sort.Slice(list, func(i, j int) bool {
-		return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name)
+	// 2. Fetch contacts from store
+	if a.client.Store.Contacts != nil {
+		rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
+		if err == nil {
+			for jid, info := range rawMap {
+				if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {
+					continue
+				}
+
+				name := strings.TrimSpace(info.FullName)
+				if name == "" {
+					name = strings.TrimSpace(info.BusinessName)
+				}
+				if name == "" {
+					name = strings.TrimSpace(info.PushName)
+				}
+				if name == "" {
+					name = jid.User
+				}
+
+				list = append(list, domain.Contact{
+					JID:          jid.String(),
+					Name:         name,
+					PushName:     info.PushName,
+					BusinessName: info.BusinessName,
+					IsGroup:      jid.Server == types.GroupServer,
+				})
+			}
+		}
+	}
+
+	// Deduplicate by JID
+	seen := make(map[string]bool)
+	var deduped []domain.Contact
+	for _, c := range list {
+		if !seen[c.JID] {
+			seen[c.JID] = true
+			deduped = append(deduped, c)
+		}
+	}
+
+	sort.Slice(deduped, func(i, j int) bool {
+		// Put groups first, then contacts by name
+		if deduped[i].IsGroup != deduped[j].IsGroup {
+			return deduped[i].IsGroup
+		}
+		return strings.ToLower(deduped[i].Name) < strings.ToLower(deduped[j].Name)
 	})
 
-	return list, nil
+	return deduped, nil
 }
 
 // MarkRead sends a read receipt to WhatsApp for the given message IDs.
@@ -238,14 +291,14 @@ func (a *Adapter) MarkRead(ctx context.Context, chatID string, senderID string, 
 		return nil
 	}
 
-	cJID, err := types.ParseJID(chatID)
+	cJID, err := NormalizeJID(chatID)
 	if err != nil {
 		return fmt.Errorf("invalid chat JID %q: %w", chatID, err)
 	}
 
 	sJID := cJID
 	if senderID != "" && senderID != chatID {
-		if parsed, err := types.ParseJID(senderID); err == nil {
+		if parsed, err := NormalizeJID(senderID); err == nil {
 			sJID = parsed
 		}
 	}
@@ -268,7 +321,11 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		a.setStatus(domain.StatusLoggedOut)
 
 	case *events.Message:
-		domainMsg := a.extractDomainMessage(evt)
+		domainMsg, ok := a.extractDomainMessage(evt)
+		if !ok {
+			// Internal protocol, sender-key-distribution, or empty control message; do not leak to UI
+			return
+		}
 
 		a.mu.RLock()
 		handlers := append([]domain.MessageHandler(nil), a.messageHandlers...)
@@ -281,51 +338,66 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 }
 
 // extractDomainMessage extracts semantic fields from the raw wire message event.
-func (a *Adapter) extractDomainMessage(evt *events.Message) domain.Message {
+// Returns ok=false for purely internal protocol/key-distribution packets.
+func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, bool) {
+	m := evt.Message
+	if m == nil {
+		return domain.Message{}, false
+	}
+
 	msgType := domain.MessageTypeText
 	body := ""
 
-	m := evt.Message
-	if m != nil {
-		if m.Conversation != nil && *m.Conversation != "" {
-			body = *m.Conversation
-			msgType = domain.MessageTypeText
-		} else if m.ExtendedTextMessage != nil && m.ExtendedTextMessage.Text != nil {
-			body = *m.ExtendedTextMessage.Text
-			msgType = domain.MessageTypeText
-		} else if m.ImageMessage != nil {
-			msgType = domain.MessageTypeImage
-			if m.ImageMessage.Caption != nil {
-				body = *m.ImageMessage.Caption
-			} else {
-				body = "[Image]"
-			}
-		} else if m.AudioMessage != nil {
-			msgType = domain.MessageTypeAudio
-			body = "[Audio / Voice Note]"
-		} else if m.VideoMessage != nil {
-			msgType = domain.MessageTypeVideo
-			if m.VideoMessage.Caption != nil {
-				body = *m.VideoMessage.Caption
-			} else {
-				body = "[Video]"
-			}
-		} else if m.DocumentMessage != nil {
-			msgType = domain.MessageTypeDocument
-			if m.DocumentMessage.FileName != nil {
-				body = fmt.Sprintf("[Document: %s]", *m.DocumentMessage.FileName)
-			} else {
-				body = "[Document]"
-			}
-		} else if m.ReactionMessage != nil {
-			msgType = domain.MessageTypeReaction
-			if m.ReactionMessage.Text != nil {
-				body = *m.ReactionMessage.Text
-			}
+	if m.Conversation != nil && *m.Conversation != "" {
+		body = *m.Conversation
+		msgType = domain.MessageTypeText
+	} else if m.ExtendedTextMessage != nil && m.ExtendedTextMessage.Text != nil && *m.ExtendedTextMessage.Text != "" {
+		body = *m.ExtendedTextMessage.Text
+		msgType = domain.MessageTypeText
+	} else if m.ImageMessage != nil {
+		msgType = domain.MessageTypeImage
+		if m.ImageMessage.Caption != nil && *m.ImageMessage.Caption != "" {
+			body = *m.ImageMessage.Caption
 		} else {
-			msgType = domain.MessageTypeUnknown
-			body = "[Unsupported or Service Message]"
+			body = "[Image]"
 		}
+	} else if m.AudioMessage != nil {
+		msgType = domain.MessageTypeAudio
+		body = "[Audio / Voice Note]"
+	} else if m.VideoMessage != nil {
+		msgType = domain.MessageTypeVideo
+		if m.VideoMessage.Caption != nil && *m.VideoMessage.Caption != "" {
+			body = *m.VideoMessage.Caption
+		} else {
+			body = "[Video]"
+		}
+	} else if m.DocumentMessage != nil {
+		msgType = domain.MessageTypeDocument
+		if m.DocumentMessage.FileName != nil && *m.DocumentMessage.FileName != "" {
+			body = fmt.Sprintf("[Document: %s]", *m.DocumentMessage.FileName)
+		} else {
+			body = "[Document]"
+		}
+	} else if m.StickerMessage != nil {
+		msgType = domain.MessageTypeImage
+		body = "[Sticker]"
+	} else if m.LocationMessage != nil {
+		msgType = domain.MessageTypeText
+		body = "[Location]"
+	} else if m.ContactMessage != nil {
+		msgType = domain.MessageTypeText
+		body = "[Contact Card]"
+	} else if m.ReactionMessage != nil {
+		msgType = domain.MessageTypeReaction
+		if m.ReactionMessage.Text != nil && *m.ReactionMessage.Text != "" {
+			body = fmt.Sprintf("[Reaction: %s]", *m.ReactionMessage.Text)
+		} else {
+			// Removed reaction
+			return domain.Message{}, false
+		}
+	} else {
+		// Purely internal control/key-distribution/protocol message with no visible content
+		return domain.Message{}, false
 	}
 
 	senderName := evt.Info.PushName
@@ -343,7 +415,7 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) domain.Message {
 		Type:       msgType,
 		Body:       body,
 		Status:     domain.MessageStatusDelivered,
-	}
+	}, true
 }
 
 // renderQRInTerminal prints a clear ANSI/UTF-8 QR code for WhatsApp companion linking.

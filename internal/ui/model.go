@@ -70,6 +70,10 @@ type incomingMsg domain.Message
 type statusChangeMsg domain.ConnectionStatus
 type contactsLoadedMsg []domain.Contact
 type messageSentMsg domain.Message
+type sendErrMsg struct {
+	ChatID string
+	Err    error
+}
 
 // NewModel initializes the TUI model.
 func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
@@ -79,7 +83,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
 	ti.Width = 60
 
 	si := textinput.New()
-	si.Placeholder = "Search contact name or number..."
+	si.Placeholder = "Search contact name, group, or type phone number..."
 	si.CharLimit = 100
 	si.Width = 50
 
@@ -172,6 +176,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		sent := domain.Message(msg)
 		if m.activeChatID == sent.ChatID {
 			m.activeMsgs = append(m.activeMsgs, sent)
+		}
+
+	case sendErrMsg:
+		if m.activeChatID == msg.ChatID {
+			m.activeMsgs = append(m.activeMsgs, domain.Message{
+				ID:         "err-" + time.Now().Format("150405"),
+				ChatID:     msg.ChatID,
+				Sender:     "system",
+				SenderName: "System Error",
+				Timestamp:  time.Now(),
+				IsFromMe:   false,
+				Type:       domain.MessageTypeText,
+				Body:       fmt.Sprintf("[Failed to send: %v]", msg.Err),
+				Status:     domain.MessageStatusFailed,
+			})
 		}
 
 	case tea.KeyMsg:
@@ -329,7 +348,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		return func() tea.Msg {
 			sentMsg, err := m.adapter.SendTextMessage(m.ctx, chatID, text)
 			if err != nil {
-				return nil
+				return sendErrMsg{ChatID: chatID, Err: err}
 			}
 			return messageSentMsg(sentMsg)
 		}
@@ -372,6 +391,17 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.view = ViewChat
 			return textinput.Blink
 		}
+		// Direct input fallback (user typed a raw phone number or JID)
+		rawInput := strings.TrimSpace(m.contactSearch.Value())
+		if rawInput != "" {
+			m.activeChatID = rawInput
+			m.activeName = rawInput
+			m.activeMsgs = nil
+			m.input.Reset()
+			m.input.Focus()
+			m.view = ViewChat
+			return textinput.Blink
+		}
 		return nil
 	}
 
@@ -386,12 +416,29 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m *Model) filterContacts(query string) {
-	q := strings.ToLower(strings.TrimSpace(query))
+	trimmed := strings.TrimSpace(query)
+	q := strings.ToLower(trimmed)
 	if q == "" {
 		m.filteredList = m.contacts
 		return
 	}
+
 	var res []domain.Contact
+
+	// If query looks like a phone number (5+ digits), offer direct message at top of list
+	var digits strings.Builder
+	for _, r := range trimmed {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	if digits.Len() >= 5 {
+		res = append(res, domain.Contact{
+			JID:  trimmed,
+			Name: fmt.Sprintf("💬 Direct message to %s", trimmed),
+		})
+	}
+
 	for _, c := range m.contacts {
 		if strings.Contains(strings.ToLower(c.Name), q) ||
 			strings.Contains(strings.ToLower(c.PushName), q) ||
@@ -601,10 +648,15 @@ func (m *Model) renderContactPickerView() string {
 		for i := start; i < end; i++ {
 			c := m.filteredList[i]
 			label := c.Name
-			if c.PushName != "" && c.PushName != c.Name {
+			if c.IsGroup {
+				label = "👥 [Group] " + c.Name
+			} else if c.PushName != "" && c.PushName != c.Name && !strings.HasPrefix(c.Name, "💬") {
 				label += fmt.Sprintf(" (%s)", c.PushName)
 			}
-			phone := strings.Split(c.JID, "@")[0]
+			phone := c.JID
+			if strings.Contains(c.JID, "@") {
+				phone = strings.Split(c.JID, "@")[0]
+			}
 
 			if i == m.contactCursor {
 				b.WriteString(fmt.Sprintf("> %s  %s\n",

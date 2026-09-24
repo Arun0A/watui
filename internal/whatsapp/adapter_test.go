@@ -104,12 +104,15 @@ func TestExtractDomainMessage(t *testing.T) {
 				},
 			},
 			expectedType: domain.MessageTypeReaction,
-			expectedBody: "🚀",
+			expectedBody: "[Reaction: 🚀]",
 		},
 	}
 
 	for _, tc := range tests {
-		msg := adapter.extractDomainMessage(tc.evt)
+		msg, ok := adapter.extractDomainMessage(tc.evt)
+		if !ok {
+			t.Fatalf("[%s] Expected ok=true, got false", tc.name)
+		}
 		if msg.Type != tc.expectedType {
 			t.Errorf("[%s] Expected type %q, got %q", tc.name, tc.expectedType, msg.Type)
 		}
@@ -119,5 +122,23 @@ func TestExtractDomainMessage(t *testing.T) {
 		if msg.ID != tc.evt.Info.ID {
 			t.Errorf("[%s] Expected ID %q, got %q", tc.name, tc.evt.Info.ID, msg.ID)
 		}
+	}
+
+	// Test protocol / sender key distribution message is dropped
+	protocolEvt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:   testChatJID,
+				Sender: testSenderJID,
+			},
+			ID: "PROTO1",
+		},
+		Message: &waE2E.Message{
+			SenderKeyDistributionMessage: &waE2E.SenderKeyDistributionMessage{},
+		},
+	}
+	_, ok := adapter.extractDomainMessage(protocolEvt)
+	if ok {
+		t.Errorf("Expected SenderKeyDistributionMessage to be filtered out (ok=false), but got ok=true")
 	}
 }
