@@ -101,6 +101,27 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			is_from_me BOOLEAN
 		);`)
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN chat_name TEXT;")
+
+		// Migrate any existing @lid unread messages to phone JIDs if mapped in whatsmeow_lid_map
+		rows, err := localDB.Query(`SELECT DISTINCT m.chat_id, l.pn FROM watui_unread_messages m 
+			JOIN whatsmeow_lid_map l ON (m.chat_id = l.lid || '@lid' OR m.chat_id LIKE l.lid || ':%@lid')`)
+		if err == nil {
+			type lidUpdate struct {
+				oldChatID string
+				newChatID string
+			}
+			var updates []lidUpdate
+			for rows.Next() {
+				var oldID, pn string
+				if err := rows.Scan(&oldID, &pn); err == nil && pn != "" {
+					updates = append(updates, lidUpdate{oldChatID: oldID, newChatID: pn + "@s.whatsapp.net"})
+				}
+			}
+			rows.Close()
+			for _, u := range updates {
+				_, _ = localDB.Exec("UPDATE watui_unread_messages SET chat_id = ? WHERE chat_id = ?", u.newChatID, u.oldChatID)
+			}
+		}
 	}
 
 	adapter := &Adapter{
@@ -218,7 +239,36 @@ func NormalizeJID(chatID string) (types.JID, error) {
 	if num == "" {
 		return types.JID{}, fmt.Errorf("invalid empty phone number %q", chatID)
 	}
+	if strings.HasPrefix(num, "120363") {
+		return types.NewJID(num, types.GroupServer), nil
+	}
 	return types.NewJID(num, types.DefaultUserServer), nil
+}
+
+// ResolveLIDToPhone maps an internal WhatsApp LID user to its real phone number using SQLite cache.
+func (a *Adapter) ResolveLIDToPhone(lidUser string) string {
+	if a.localDB == nil || lidUser == "" {
+		return ""
+	}
+	if idx := strings.Index(lidUser, ":"); idx != -1 {
+		lidUser = lidUser[:idx]
+	}
+	var pn string
+	_ = a.localDB.QueryRow("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", lidUser).Scan(&pn)
+	return pn
+}
+
+// ResolvePhoneToLID maps a phone number user to its internal WhatsApp LID using SQLite cache.
+func (a *Adapter) ResolvePhoneToLID(phoneUser string) string {
+	if a.localDB == nil || phoneUser == "" {
+		return ""
+	}
+	if idx := strings.Index(phoneUser, ":"); idx != -1 {
+		phoneUser = phoneUser[:idx]
+	}
+	var lid string
+	_ = a.localDB.QueryRow("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", phoneUser).Scan(&lid)
+	return lid
 }
 
 // SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number.
@@ -335,8 +385,14 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 		rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
 		if err == nil {
 			for jid, info := range rawMap {
-				if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {
+				if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer && jid.Server != "lid" {
 					continue
+				}
+				actualJID := jid
+				if jid.Server == "lid" {
+					if pn := a.ResolveLIDToPhone(jid.User); pn != "" {
+						actualJID = types.NewJID(pn, types.DefaultUserServer)
+					}
 				}
 				name := strings.TrimSpace(info.FullName)
 				if name == "" {
@@ -346,14 +402,14 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 					name = strings.TrimSpace(info.PushName)
 				}
 				if name == "" {
-					name = jid.User
+					name = actualJID.User
 				}
 				list = append(list, domain.Contact{
-					JID:          jid.String(),
+					JID:          actualJID.String(),
 					Name:         name,
 					PushName:     info.PushName,
 					BusinessName: info.BusinessName,
-					IsGroup:      jid.Server == types.GroupServer,
+					IsGroup:      actualJID.Server == types.GroupServer,
 				})
 			}
 		}
@@ -576,6 +632,18 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 			m.Timestamp = time.Unix(ts, 0)
 			m.Type = domain.MessageType(tStr)
 			m.Status = domain.MessageStatusDelivered
+			if strings.HasSuffix(m.ChatID, "@lid") {
+				lidUser := strings.TrimSuffix(m.ChatID, "@lid")
+				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+					m.ChatID = pn + "@s.whatsapp.net"
+				}
+			}
+			if strings.HasSuffix(m.Sender, "@lid") {
+				lidUser := strings.TrimSuffix(m.Sender, "@lid")
+				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+					m.Sender = pn + "@s.whatsapp.net"
+				}
+			}
 			msgs = append(msgs, m)
 		}
 	}
@@ -591,7 +659,21 @@ func (a *Adapter) DismissUnread(ctx context.Context, chatID string) error {
 	if parsed, err := NormalizeJID(chatID); err == nil {
 		nonAD = parsed.ToNonAD().String()
 	}
-	_, err := a.localDB.ExecContext(ctx, "DELETE FROM watui_unread_messages WHERE chat_id = ? OR chat_id = ?", chatID, nonAD)
+
+	var altTarget string
+	if strings.HasSuffix(nonAD, "@s.whatsapp.net") {
+		user := strings.TrimSuffix(nonAD, "@s.whatsapp.net")
+		if lid := a.ResolvePhoneToLID(user); lid != "" {
+			altTarget = lid + "@lid"
+		}
+	} else if strings.HasSuffix(nonAD, "@lid") {
+		user := strings.TrimSuffix(nonAD, "@lid")
+		if pn := a.ResolveLIDToPhone(user); pn != "" {
+			altTarget = pn + "@s.whatsapp.net"
+		}
+	}
+
+	_, err := a.localDB.ExecContext(ctx, "DELETE FROM watui_unread_messages WHERE chat_id = ? OR chat_id = ? OR chat_id = ?", chatID, nonAD, altTarget)
 	return err
 }
 
@@ -735,6 +817,11 @@ func extractMessageContent(m *waE2E.Message) (string, domain.MessageType, bool) 
 
 func (a *Adapter) resolveChatName(chat types.JID) string {
 	chatNonAD := chat.ToNonAD()
+	if chatNonAD.Server == "lid" {
+		if pn := a.ResolveLIDToPhone(chatNonAD.User); pn != "" {
+			chatNonAD = types.NewJID(pn, types.DefaultUserServer)
+		}
+	}
 	chatStr := chatNonAD.String()
 
 	if chatNonAD.Server == types.GroupServer {
@@ -787,6 +874,19 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 	}
 
 	chatJID := evt.Info.Chat.ToNonAD()
+	if chatJID.Server == "lid" {
+		if pn := a.ResolveLIDToPhone(chatJID.User); pn != "" {
+			chatJID = types.NewJID(pn, types.DefaultUserServer)
+		}
+	}
+
+	senderJID := evt.Info.Sender.ToNonAD()
+	if senderJID.Server == "lid" {
+		if pn := a.ResolveLIDToPhone(senderJID.User); pn != "" {
+			senderJID = types.NewJID(pn, types.DefaultUserServer)
+		}
+	}
+
 	chatName := a.resolveChatName(chatJID)
 	if chatName == "" && !evt.Info.IsGroup {
 		chatName = senderName
@@ -796,7 +896,7 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 		ID:         evt.Info.ID,
 		ChatID:     chatJID.String(),
 		ChatName:   chatName,
-		Sender:     evt.Info.Sender.ToNonAD().String(),
+		Sender:     senderJID.String(),
 		SenderName: senderName,
 		Timestamp:  evt.Info.Timestamp,
 		IsFromMe:   evt.Info.IsFromMe,
@@ -828,7 +928,25 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 	}
 
 	chatJID, _ := types.ParseJID(chatID)
-	chatName := a.resolveChatName(chatJID.ToNonAD())
+	chatJID = chatJID.ToNonAD()
+	if chatJID.Server == "lid" {
+		if pn := a.ResolveLIDToPhone(chatJID.User); pn != "" {
+			chatJID = types.NewJID(pn, types.DefaultUserServer)
+			chatID = chatJID.String()
+		}
+	}
+
+	senderJID, err := types.ParseJID(sender)
+	if err == nil {
+		senderJID = senderJID.ToNonAD()
+		if senderJID.Server == "lid" {
+			if pn := a.ResolveLIDToPhone(senderJID.User); pn != "" {
+				sender = types.NewJID(pn, types.DefaultUserServer).String()
+			}
+		}
+	}
+
+	chatName := a.resolveChatName(chatJID)
 	if chatName == "" && !strings.Contains(chatID, "@g.us") {
 		chatName = senderName
 	}

@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"watui/internal/config"
 	"watui/internal/domain"
 	"watui/internal/ui"
 	"watui/internal/whatsapp"
@@ -23,7 +24,15 @@ func main() {
 	logLevel := flag.String("log", "WARN", "Protocol log level (DEBUG, INFO, WARN, ERROR)")
 	cliMode := flag.Bool("cli", false, "Run in headless CLI mode instead of interactive TUI")
 	jsonOutput := flag.Bool("json", false, "Print extracted messages as raw JSON (used with -cli)")
+	configFile := flag.String("config", "", "Path to optional YAML or JSON config file (default: ./watui.yaml or ~/.config/watui/config.yaml)")
 	flag.Parse()
+
+	// Load optional declarative configuration
+	appCfg, err := config.Load(*configFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		os.Exit(1)
+	}
 
 	// 1. Set up context and termination signal handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -90,9 +99,15 @@ func main() {
 	if *cliMode {
 		fmt.Println("───────────────────────────────────────────────────────")
 		fmt.Println(" watui - Stream CLI Mode (Listening for messages)")
+		if appCfg.SourcePath != "" {
+			fmt.Printf(" Loaded configuration from %s\n", appCfg.SourcePath)
+		}
 		fmt.Println("───────────────────────────────────────────────────────")
 
 		adapter.OnMessage(func(msg domain.Message) {
+			if appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+				return
+			}
 			fmt.Println("\n================ [ NEW MESSAGE RECEIVED ] ================")
 			if *jsonOutput {
 				data, _ := json.MarshalIndent(msg, "", "  ")
@@ -117,7 +132,7 @@ func main() {
 
 	// 5. Launch Minimal Unread TUI
 	p := tea.NewProgram(
-		ui.NewModel(ctx, adapter),
+		ui.NewModel(ctx, adapter, appCfg),
 		tea.WithAltScreen(),
 	)
 

@@ -1,0 +1,25 @@
+# watui.yaml - Declarative configuration for watui
+#
+# Place this file at ./watui.yaml or ~/.config/watui/config.yaml,
+# or pass it explicitly with: watui -config /path/to/watui.yaml
+
+# 1. Pinned chats / groups
+# Pinned chats always appear at the top of the main screen with a [PIN] badge.
+# Even with 0 unread messages, you can immediately select them with [Enter]
+# to start messaging upfront without having to search contacts.
+# You can specify contact names, group names, phone numbers, or WhatsApp JIDs.
+pin:
+  - "Work Team"
+  - "Alice Smith"
+  # - "+1234567890"
+  # - "120363311130744191@g.us"
+
+# 2. Muted chats / groups
+# Muted chats are completely excluded from the unread inbox list.
+# Useful for spammy or low-priority groups and numbers.
+# Matches contact names, group subjects (case-insensitive substring), phone numbers, or JIDs.
+mute:
+  - "Announcements"
+  - "Deals & Offers"
+  # - "+18005550199"
+  # - "120363000000000000@g.us"

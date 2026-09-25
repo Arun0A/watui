@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"watui/internal/config"
 	"watui/internal/domain"
 )
 
@@ -23,11 +25,12 @@ const (
 	ViewContactPicker
 )
 
-// UnreadChat represents a conversation with pending unread messages.
+// UnreadChat represents a conversation with pending unread messages or a pinned chat.
 type UnreadChat struct {
 	ChatID       string
 	Name         string
 	IsGroup      bool
+	IsPinned     bool
 	Sender       string
 	Messages     []domain.Message
 	LastReceived time.Time
@@ -37,13 +40,14 @@ type UnreadChat struct {
 type Model struct {
 	adapter domain.WhatsAppAdapter
 	ctx     context.Context
+	cfg     *config.Config
 
 	view ViewState
 
 	// Unread state
 	mu          sync.RWMutex
 	unreadChats map[string]*UnreadChat // chatID -> UnreadChat
-	chatOrder   []string               // sorted by LastReceived desc
+	chatOrder   []string               // pinned chats first, then sorted by LastReceived desc
 	cursor      int
 
 	// Active conversation view
@@ -86,7 +90,7 @@ type sendErrMsg struct {
 }
 
 // NewModel initializes the TUI model.
-func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
+func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*config.Config) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "Type a message... (Enter to send, Esc to back)"
 	ti.CharLimit = 1000
@@ -97,9 +101,17 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
 	si.CharLimit = 100
 	si.Width = 50
 
+	var cfg *config.Config
+	if len(cfgs) > 0 && cfgs[0] != nil {
+		cfg = cfgs[0]
+	} else {
+		cfg = &config.Config{}
+	}
+
 	m := &Model{
 		adapter:       adapter,
 		ctx:           ctx,
+		cfg:           cfg,
 		view:          ViewUnreadList,
 		unreadChats:   make(map[string]*UnreadChat),
 		chatOrder:     make([]string, 0),
@@ -111,6 +123,8 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
 		dismissChan:   make(chan string, 50),
 		contactsChan:  make(chan []domain.Contact, 10),
 	}
+
+	m.initPinnedChats()
 
 	adapter.OnMessage(func(msg domain.Message) {
 		select {
@@ -252,6 +266,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterContacts(m.contactSearch.Value())
 		m.loadingContact = false
 		m.updateUnreadChatNames()
+		m.syncPinnedChats()
 		cmds = append(cmds, m.waitForContactsUpdated())
 
 	case messageSentMsg:
@@ -260,6 +275,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeMsgs = append(m.activeMsgs, sent)
 			m.chatScrollOffset = 0
 		}
+		m.mu.Lock()
+		if chat, exists := m.unreadChats[sent.ChatID]; exists && chat.IsPinned {
+			chat.Messages = []domain.Message{sent}
+			chat.LastReceived = sent.Timestamp
+		}
+		m.mu.Unlock()
 
 	case sendErrMsg:
 		if m.activeChatID == msg.ChatID {
@@ -336,10 +357,191 @@ func (m *Model) resolveChatName(chatID string, msgChatName string, fallback stri
 	return baseUser, false
 }
 
+func (m *Model) getChatMatchNames(chatID string, explicitNames ...string) []string {
+	names := append([]string(nil), explicitNames...)
+	cleanID := chatID
+	if idx := strings.Index(cleanID, ":"); idx != -1 {
+		if atIdx := strings.Index(cleanID, "@"); atIdx != -1 {
+			cleanID = cleanID[:idx] + cleanID[atIdx:]
+		}
+	}
+	baseUser := strings.Split(cleanID, "@")[0]
+	for _, c := range m.contacts {
+		cBase := strings.Split(c.JID, "@")[0]
+		if c.JID == cleanID || cBase == baseUser {
+			if c.Name != "" {
+				names = append(names, c.Name)
+			}
+			if c.PushName != "" {
+				names = append(names, c.PushName)
+			}
+			if c.BusinessName != "" {
+				names = append(names, c.BusinessName)
+			}
+			if c.JID != "" && c.JID != chatID {
+				names = append(names, c.JID)
+			}
+		}
+	}
+	return names
+}
+
+func (m *Model) isMuted(chatID string, chatNames ...string) bool {
+	if m.cfg == nil {
+		return false
+	}
+	allNames := m.getChatMatchNames(chatID, chatNames...)
+	if m.isPinned(chatID, allNames...) {
+		return false
+	}
+	return m.cfg.IsMuted(chatID, allNames...)
+}
+
+func (m *Model) isPinned(chatID string, chatNames ...string) bool {
+	if m.cfg == nil {
+		return false
+	}
+	allNames := m.getChatMatchNames(chatID, chatNames...)
+	return m.cfg.IsPinned(chatID, allNames...)
+}
+
+func (m *Model) initPinnedChats() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, rule := range m.cfg.GetPinned() {
+		chatID := rule
+		if !strings.Contains(chatID, "@") {
+			digits := config.DigitsOnly(chatID)
+			if len(digits) >= 6 && digits == chatID {
+				if strings.HasPrefix(digits, "120363") {
+					chatID = digits + "@g.us"
+				} else {
+					chatID = digits + "@s.whatsapp.net"
+				}
+			}
+		}
+		name, isGroup := m.resolveChatName(chatID, rule, rule)
+		chat := &UnreadChat{
+			ChatID:   chatID,
+			Name:     name,
+			IsGroup:  isGroup,
+			IsPinned: true,
+		}
+		m.unreadChats[chatID] = chat
+	}
+	m.sortChatOrderLocked()
+}
+
+func (m *Model) syncPinnedChats() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncPinnedChatsLocked()
+}
+
+func (m *Model) syncPinnedChatsLocked() {
+	for _, rule := range m.cfg.GetPinned() {
+		var matchedID string
+		for id, chat := range m.unreadChats {
+			if config.MatchTarget(rule, id, chat.Name) {
+				matchedID = id
+				chat.IsPinned = true
+				break
+			}
+		}
+
+		var matchedContact *domain.Contact
+		for i := range m.contacts {
+			c := &m.contacts[i]
+			if config.MatchTarget(rule, c.JID, c.Name, c.PushName, c.BusinessName) {
+				matchedContact = c
+				break
+			}
+		}
+
+		if matchedContact != nil {
+			if matchedID != "" && matchedID != matchedContact.JID {
+				chat := m.unreadChats[matchedID]
+				delete(m.unreadChats, matchedID)
+				chat.ChatID = matchedContact.JID
+				chat.Name = matchedContact.Name
+				chat.IsGroup = matchedContact.IsGroup
+				chat.IsPinned = true
+				m.unreadChats[matchedContact.JID] = chat
+			} else if matchedID != "" {
+				chat := m.unreadChats[matchedID]
+				chat.Name = matchedContact.Name
+				chat.IsGroup = matchedContact.IsGroup
+				chat.IsPinned = true
+			} else {
+				m.unreadChats[matchedContact.JID] = &UnreadChat{
+					ChatID:   matchedContact.JID,
+					Name:     matchedContact.Name,
+					IsGroup:  matchedContact.IsGroup,
+					IsPinned: true,
+				}
+			}
+		}
+	}
+	m.sortChatOrderLocked()
+}
+
+func (m *Model) sortChatOrderLocked() {
+	var pinned []string
+	var unpinned []string
+
+	pinnedRules := m.cfg.GetPinned()
+	used := make(map[string]bool)
+
+	// 1. Pinned chats matching config order
+	for _, rule := range pinnedRules {
+		for id, chat := range m.unreadChats {
+			if chat != nil && chat.IsPinned && !used[id] {
+				if config.MatchTarget(rule, id, chat.Name) {
+					pinned = append(pinned, id)
+					used[id] = true
+					break
+				}
+			}
+		}
+	}
+	// 2. Any other pinned chats
+	for id, chat := range m.unreadChats {
+		if chat != nil && chat.IsPinned && !used[id] {
+			pinned = append(pinned, id)
+			used[id] = true
+		}
+	}
+
+	// 3. Unpinned chats
+	for id, chat := range m.unreadChats {
+		if chat != nil && !chat.IsPinned && !used[id] {
+			unpinned = append(unpinned, id)
+			used[id] = true
+		}
+	}
+
+	// Sort unpinned by LastReceived desc
+	sort.SliceStable(unpinned, func(i, j int) bool {
+		c1 := m.unreadChats[unpinned[i]]
+		c2 := m.unreadChats[unpinned[j]]
+		if c1 == nil || c2 == nil {
+			return false
+		}
+		return c1.LastReceived.After(c2.LastReceived)
+	})
+
+	m.chatOrder = append(pinned, unpinned...)
+
+	if m.cursor >= len(m.chatOrder) {
+		m.cursor = max(0, len(m.chatOrder)-1)
+	}
+}
+
 func (m *Model) updateUnreadChatNames() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, chat := range m.unreadChats {
+	for id, chat := range m.unreadChats {
 		lastMsgName := ""
 		if len(chat.Messages) > 0 {
 			lastMsgName = chat.Messages[len(chat.Messages)-1].ChatName
@@ -347,95 +549,145 @@ func (m *Model) updateUnreadChatNames() {
 		name, isGroup := m.resolveChatName(chat.ChatID, lastMsgName, chat.Name)
 		chat.Name = name
 		chat.IsGroup = isGroup
+
+		if !chat.IsPinned && m.isMuted(chat.ChatID, chat.Name) {
+			delete(m.unreadChats, id)
+		}
 	}
+	m.sortChatOrderLocked()
 }
 
 func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.unreadChats = make(map[string]*UnreadChat)
-	m.chatOrder = nil
+	// Retain pinned chats, resetting their message slice
+	newUnreadChats := make(map[string]*UnreadChat)
+	for id, chat := range m.unreadChats {
+		if chat.IsPinned {
+			chat.Messages = nil
+			newUnreadChats[id] = chat
+		}
+	}
+	m.unreadChats = newUnreadChats
 
 	for _, msg := range msgs {
+		if m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+			continue
+		}
+
 		chat, exists := m.unreadChats[msg.ChatID]
+		if !exists {
+			for _, existing := range m.unreadChats {
+				if existing.IsPinned && config.MatchTarget(existing.ChatID, msg.ChatID, msg.ChatName) {
+					chat = existing
+					exists = true
+					break
+				}
+			}
+		}
+
+		isPinned := m.isPinned(msg.ChatID, msg.ChatName)
 		if !exists {
 			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 			chat = &UnreadChat{
 				ChatID:       msg.ChatID,
 				Name:         name,
 				IsGroup:      isGroup,
+				IsPinned:     isPinned,
 				Sender:       msg.Sender,
 				Messages:     []domain.Message{msg},
 				LastReceived: msg.Timestamp,
 			}
 			m.unreadChats[msg.ChatID] = chat
-			m.chatOrder = append([]string{msg.ChatID}, m.chatOrder...)
 		} else {
 			chat.Messages = append(chat.Messages, msg)
 			chat.LastReceived = msg.Timestamp
+			if isPinned {
+				chat.IsPinned = true
+			}
 			if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
 				name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
 				chat.Name = name
 				chat.IsGroup = isGroup
 			}
-			m.reorderChatToTop(msg.ChatID)
 		}
 	}
 
-	if m.cursor >= len(m.chatOrder) {
-		m.cursor = max(0, len(m.chatOrder)-1)
-	}
+	m.sortChatOrderLocked()
 }
 
 func (m *Model) handleIncomingMessage(msg domain.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// If currently viewing this chat, append directly
+	// 1. Check if muted
+	if m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+		if m.view == ViewChat && m.activeChatID == msg.ChatID {
+			m.activeMsgs = append(m.activeMsgs, msg)
+			m.chatScrollOffset = 0
+			go func() {
+				_ = m.adapter.MarkRead(m.ctx, msg.ChatID, msg.Sender, []string{msg.ID})
+			}()
+		}
+		return
+	}
+
+	// 2. If currently viewing this chat, append directly
 	if m.view == ViewChat && m.activeChatID == msg.ChatID {
 		m.activeMsgs = append(m.activeMsgs, msg)
 		m.chatScrollOffset = 0
 		go func() {
 			_ = m.adapter.MarkRead(m.ctx, msg.ChatID, msg.Sender, []string{msg.ID})
 		}()
+		if chat, exists := m.unreadChats[msg.ChatID]; exists && chat.IsPinned {
+			chat.Messages = []domain.Message{msg}
+			chat.LastReceived = msg.Timestamp
+		}
 		return
 	}
 
 	chat, exists := m.unreadChats[msg.ChatID]
+	if !exists {
+		for id, existing := range m.unreadChats {
+			if existing.IsPinned && config.MatchTarget(id, msg.ChatID, msg.ChatName) {
+				delete(m.unreadChats, id)
+				existing.ChatID = msg.ChatID
+				m.unreadChats[msg.ChatID] = existing
+				chat = existing
+				exists = true
+				break
+			}
+		}
+	}
+
+	isPinned := m.isPinned(msg.ChatID, msg.ChatName)
 	if !exists {
 		name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 		chat = &UnreadChat{
 			ChatID:       msg.ChatID,
 			Name:         name,
 			IsGroup:      isGroup,
+			IsPinned:     isPinned,
 			Sender:       msg.Sender,
 			Messages:     []domain.Message{msg},
 			LastReceived: msg.Timestamp,
 		}
 		m.unreadChats[msg.ChatID] = chat
-		m.chatOrder = append([]string{msg.ChatID}, m.chatOrder...)
 	} else {
 		chat.Messages = append(chat.Messages, msg)
 		chat.LastReceived = msg.Timestamp
+		if isPinned {
+			chat.IsPinned = true
+		}
 		if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
 			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
 			chat.Name = name
 			chat.IsGroup = isGroup
 		}
-		m.reorderChatToTop(msg.ChatID)
 	}
-}
 
-func (m *Model) reorderChatToTop(chatID string) {
-	var newOrder []string
-	newOrder = append(newOrder, chatID)
-	for _, id := range m.chatOrder {
-		if id != chatID {
-			newOrder = append(newOrder, id)
-		}
-	}
-	m.chatOrder = newOrder
+	m.sortChatOrderLocked()
 }
 
 func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
@@ -508,14 +760,31 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 
 func (m *Model) dismissUnread(chatID string) {
 	m.mu.Lock()
-	delete(m.unreadChats, chatID)
+	defer m.mu.Unlock()
 
+	chat, exists := m.unreadChats[chatID]
 	baseID := chatID
 	if idx := strings.Index(chatID, ":"); idx != -1 {
 		if atIdx := strings.Index(chatID, "@"); atIdx != -1 && atIdx > idx {
 			baseID = chatID[:idx] + chatID[atIdx:]
-			delete(m.unreadChats, baseID)
+			if !exists {
+				chat = m.unreadChats[baseID]
+			}
 		}
+	}
+
+	go func(id string) {
+		_ = m.adapter.DismissUnread(m.ctx, id)
+	}(chatID)
+
+	if chat != nil && chat.IsPinned {
+		chat.Messages = nil
+		return
+	}
+
+	delete(m.unreadChats, chatID)
+	if baseID != chatID {
+		delete(m.unreadChats, baseID)
 	} else {
 		for k := range m.unreadChats {
 			if strings.HasPrefix(k, baseID+":") || (strings.Contains(baseID, "@") && strings.HasPrefix(k, strings.Split(baseID, "@")[0]+":")) {
@@ -534,11 +803,6 @@ func (m *Model) dismissUnread(chatID string) {
 	if m.cursor >= len(m.chatOrder) {
 		m.cursor = max(0, len(m.chatOrder)-1)
 	}
-	m.mu.Unlock()
-
-	go func(id string) {
-		_ = m.adapter.DismissUnread(m.ctx, id)
-	}(chatID)
 }
 
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
@@ -689,7 +953,7 @@ func (m *Model) filterContacts(query string) {
 	if digits.Len() >= 5 {
 		res = append(res, domain.Contact{
 			JID:  trimmed,
-			Name: fmt.Sprintf("💬 Direct message to %s", trimmed),
+			Name: fmt.Sprintf("Direct message to %s", trimmed),
 		})
 	}
 
@@ -745,6 +1009,12 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#11111B")).
 			Background(lipgloss.Color("#FAB387")).
+			Padding(0, 1)
+
+	pinBadgeStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#11111B")).
+			Background(lipgloss.Color("#F9E2AF")).
 			Padding(0, 1)
 
 	selectedTitleStyle = lipgloss.NewStyle().
@@ -844,8 +1114,13 @@ func (m *Model) renderUnreadListView() []string {
 	cw := m.contentWidth()
 	var lines []string
 
-	// Header
-	unreadCount := len(m.chatOrder)
+	// Header: count chats that actually have unread messages
+	unreadCount := 0
+	for _, chat := range m.unreadChats {
+		if len(chat.Messages) > 0 {
+			unreadCount++
+		}
+	}
 	statusText := string(m.status)
 	if m.status == domain.StatusConnected {
 		statusText = fmt.Sprintf("connected · %d unread", unreadCount)
@@ -858,8 +1133,8 @@ func (m *Model) renderUnreadListView() []string {
 	divider := dividerStyle.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
 
-	if unreadCount == 0 {
-		lines = append(lines, "  ✓ Inbox Zero")
+	if len(m.chatOrder) == 0 {
+		lines = append(lines, "  Inbox Zero")
 		lines = append(lines, "")
 		lines = append(lines, "  No unread messages.")
 		lines = append(lines, "")
@@ -876,11 +1151,20 @@ func (m *Model) renderUnreadListView() []string {
 		for i := start; i < end; i++ {
 			chatID := m.chatOrder[i]
 			chat := m.unreadChats[chatID]
-			badge := badgeStyle.Render(fmt.Sprintf("%d", len(chat.Messages)))
+
+			var badge string
+			if len(chat.Messages) > 0 {
+				badge = badgeStyle.Render(fmt.Sprintf("%d", len(chat.Messages)))
+			} else if chat.IsPinned {
+				badge = pinBadgeStyle.Render("PIN")
+			}
 
 			name := chat.Name
 			if chat.IsGroup || strings.Contains(chat.ChatID, "@g.us") {
-				name = "👥 " + chat.Name
+				name = "[Group] " + chat.Name
+			}
+			if chat.IsPinned {
+				name = "* " + name
 			}
 			maxNameLen := max(10, cw-22)
 			rName := []rune(name)
@@ -910,25 +1194,45 @@ func (m *Model) renderUnreadListView() []string {
 				}
 
 				lastMsg = clean
-				maxMsgLen := max(15, cw-10)
-				rMsg := []rune(lastMsg)
-				if len(rMsg) > maxMsgLen {
-					lastMsg = string(rMsg[:maxMsgLen-3]) + "..."
-				}
+			} else if chat.IsPinned {
+				lastMsg = "(pinned · press enter to chat)"
 			}
 
-			timeStr := chat.LastReceived.Format("15:04")
+			maxMsgLen := max(15, cw-10)
+			rMsg := []rune(lastMsg)
+			if len(rMsg) > maxMsgLen {
+				lastMsg = string(rMsg[:maxMsgLen-3]) + "..."
+			}
+
+			timeStr := ""
+			if !chat.LastReceived.IsZero() {
+				timeStr = chat.LastReceived.Format("15:04")
+			} else if chat.IsPinned {
+				timeStr = "pin"
+			}
+
+			cursorPrefix := "  "
+			if i == m.cursor {
+				cursorPrefix = "> "
+			}
+
+			badgePrefix := ""
+			if badge != "" {
+				badgePrefix = badge + " "
+			}
 
 			if i == m.cursor {
-				lines = append(lines, fmt.Sprintf("> %s %s  %s",
-					badge,
+				lines = append(lines, fmt.Sprintf("%s%s%s  %s",
+					cursorPrefix,
+					badgePrefix,
 					selectedTitleStyle.Render(name),
 					statusStyle.Render(timeStr),
 				))
 				lines = append(lines, snippetStyle.Render("    "+lastMsg))
 			} else {
-				lines = append(lines, fmt.Sprintf("  %s %s  %s",
-					badge,
+				lines = append(lines, fmt.Sprintf("%s%s%s  %s",
+					cursorPrefix,
+					badgePrefix,
 					normalTitleStyle.Render(name),
 					statusStyle.Render(timeStr),
 				))
@@ -1077,7 +1381,7 @@ func (m *Model) renderContactPickerView() []string {
 				if idx := strings.Index(phone, "@"); idx != -1 {
 					phone = phone[:idx]
 				}
-				if c.PushName != "" && c.PushName != c.Name && !strings.HasPrefix(c.Name, "💬") {
+				if c.PushName != "" && c.PushName != c.Name && !strings.HasPrefix(c.Name, "Direct message to ") {
 					label += fmt.Sprintf(" (%s)", c.PushName)
 				}
 			}
@@ -1118,7 +1422,7 @@ func (m *Model) renderContactPickerView() []string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, helpStyle.Render("[↑/↓] Navigate · [Enter] Select & Compose · [Esc] Cancel"))
+	lines = append(lines, helpStyle.Render("[Up/Down] Navigate · [Enter] Select & Compose · [Esc] Cancel"))
 
 	return lines
 }

@@ -99,12 +99,12 @@ func TestExtractDomainMessage(t *testing.T) {
 				},
 				Message: &waE2E.Message{
 					ReactionMessage: &waE2E.ReactionMessage{
-						Text: proto.String("🚀"),
+						Text: proto.String("+1"),
 					},
 				},
 			},
 			expectedType: domain.MessageTypeReaction,
-			expectedBody: "[Reaction: 🚀]",
+			expectedBody: "[Reaction: +1]",
 		},
 	}
 
