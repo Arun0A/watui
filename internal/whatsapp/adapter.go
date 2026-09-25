@@ -85,6 +85,16 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		_, _ = localDB.Exec(`CREATE TABLE IF NOT EXISTS watui_groups (
 			jid TEXT PRIMARY KEY,
 			name TEXT
+		);
+		CREATE TABLE IF NOT EXISTS watui_unread_messages (
+			id TEXT PRIMARY KEY,
+			chat_id TEXT NOT NULL,
+			sender TEXT NOT NULL,
+			sender_name TEXT,
+			timestamp INTEGER NOT NULL,
+			body TEXT,
+			type TEXT,
+			is_from_me BOOLEAN
 		);`)
 	}
 
@@ -433,8 +443,10 @@ func sortContacts(list []domain.Contact) {
 	})
 }
 
-// MarkRead sends a read receipt to WhatsApp for the given message IDs.
+// MarkRead sends a read receipt to WhatsApp for the given message IDs and clears from unread persistence.
 func (a *Adapter) MarkRead(ctx context.Context, chatID string, senderID string, messageIDs []string) error {
+	_ = a.DismissUnread(ctx, chatID)
+
 	if len(messageIDs) == 0 || a.client == nil {
 		return nil
 	}
@@ -459,6 +471,62 @@ func (a *Adapter) MarkRead(ctx context.Context, chatID string, senderID string, 
 	return a.client.MarkRead(ctx, waMsgIDs, time.Now(), cJID, sJID)
 }
 
+func (a *Adapter) saveUnreadMessage(msg domain.Message) {
+	if a.localDB == nil {
+		return
+	}
+	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_unread_messages
+		(id, chat_id, sender, sender_name, timestamp, body, type, is_from_me)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.ChatID, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe,
+	)
+}
+
+func (a *Adapter) deleteUnreadMessageIDs(ids []types.MessageID) {
+	if a.localDB == nil || len(ids) == 0 {
+		return
+	}
+	for _, id := range ids {
+		_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", string(id))
+	}
+}
+
+// GetUnreadMessages returns all unread messages persisted in local SQLite.
+func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, error) {
+	if a.localDB == nil {
+		return nil, nil
+	}
+	rows, err := a.localDB.QueryContext(ctx, `SELECT id, chat_id, sender, sender_name, timestamp, body, type, is_from_me
+		FROM watui_unread_messages ORDER BY timestamp ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []domain.Message
+	for rows.Next() {
+		var m domain.Message
+		var ts int64
+		var tStr string
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe); err == nil {
+			m.Timestamp = time.Unix(ts, 0)
+			m.Type = domain.MessageType(tStr)
+			m.Status = domain.MessageStatusDelivered
+			msgs = append(msgs, m)
+		}
+	}
+	return msgs, nil
+}
+
+// DismissUnread removes unread messages for a given chat from local SQLite.
+func (a *Adapter) DismissUnread(ctx context.Context, chatID string) error {
+	if a.localDB == nil {
+		return nil
+	}
+	_, err := a.localDB.ExecContext(ctx, "DELETE FROM watui_unread_messages WHERE chat_id = ?", chatID)
+	return err
+}
+
 // handleEvent processes internal whatsmeow events and maps them to clean domain models.
 func (a *Adapter) handleEvent(rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
@@ -469,11 +537,21 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 	case *events.LoggedOut:
 		a.setStatus(domain.StatusLoggedOut)
 
+	case *events.Receipt:
+		// If read on phone/companion, remove those messages from unread persistence
+		if evt.IsFromMe && (evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf) {
+			a.deleteUnreadMessageIDs(evt.MessageIDs)
+		}
+
 	case *events.Message:
 		domainMsg, ok := a.extractDomainMessage(evt)
 		if !ok {
 			// Internal protocol, sender-key-distribution, or empty control message; do not leak to UI
 			return
+		}
+
+		if !domainMsg.IsFromMe {
+			a.saveUnreadMessage(domainMsg)
 		}
 
 		a.mu.RLock()

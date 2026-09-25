@@ -70,6 +70,7 @@ type incomingMsg domain.Message
 type statusChangeMsg domain.ConnectionStatus
 type contactsLoadedMsg []domain.Contact
 type messageSentMsg domain.Message
+type unreadsLoadedMsg []domain.Message
 type sendErrMsg struct {
 	ChatID string
 	Err    error
@@ -101,15 +102,26 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
 	return m
 }
 
-// Init sets up subscriptions for incoming WhatsApp events.
+// Init sets up subscriptions for incoming WhatsApp events and restores persisted unread state.
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
 		m.waitForMessages(),
 		m.waitForStatus(),
+		m.loadPersistedUnread(),
 		m.loadContacts(),
 		m.waitForContactsUpdated(),
 	)
+}
+
+func (m *Model) loadPersistedUnread() tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := m.adapter.GetUnreadMessages(m.ctx)
+		if err != nil {
+			return nil
+		}
+		return unreadsLoadedMsg(msgs)
+	}
 }
 
 func (m *Model) waitForMessages() tea.Cmd {
@@ -208,6 +220,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Body:       fmt.Sprintf("[Failed to send: %v]", msg.Err),
 				Status:     domain.MessageStatusFailed,
 			})
+		}
+
+	case unreadsLoadedMsg:
+		for _, msg := range msg {
+			m.handleIncomingMessage(msg)
 		}
 
 	case tea.KeyMsg:
@@ -333,6 +350,12 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		}
 		m.loadingContact = false
 		return textinput.Blink
+
+	case "R", "ctrl+r": // manual refresh unreads and contacts
+		return tea.Batch(
+			m.loadPersistedUnread(),
+			m.loadContacts(),
+		)
 	}
 	return nil
 }
@@ -349,6 +372,9 @@ func (m *Model) dismissUnread(chatID string) {
 	if m.cursor >= len(m.chatOrder) && m.cursor > 0 {
 		m.cursor--
 	}
+	go func(id string) {
+		_ = m.adapter.DismissUnread(m.ctx, id)
+	}(chatID)
 }
 
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
@@ -599,7 +625,7 @@ func (m *Model) renderUnreadListView() string {
 	}
 
 	// Bottom Keybindings
-	footer := helpStyle.Render("[Enter] Open · [r] Dismiss/Read · [n] New Message · [q] Quit")
+	footer := helpStyle.Render("[Enter] Open · [r] Dismiss/Read · [n] New Message · [R] Refresh · [q] Quit")
 	b.WriteString(footer)
 
 	return b.String()

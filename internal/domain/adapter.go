@@ -51,4 +51,10 @@ type WhatsAppAdapter interface {
 
 	// OnContactsUpdated registers a listener for when contacts/groups are updated in background.
 	OnContactsUpdated(handler func([]Contact))
+
+	// GetUnreadMessages retrieves all unread messages persisted in local SQLite across restarts.
+	GetUnreadMessages(ctx context.Context) ([]Message, error)
+
+	// DismissUnread deletes unread messages for the given chat from local persistence.
+	DismissUnread(ctx context.Context, chatID string) error
 }
