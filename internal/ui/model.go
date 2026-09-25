@@ -217,8 +217,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.Width = max(20, msg.Width-10)
-		m.contactSearch.Width = max(20, msg.Width-10)
+		cw := m.contentWidth()
+		m.input.Width = max(20, cw-6)
+		m.contactSearch.Width = max(20, cw-6)
 
 	case statusChangeMsg:
 		m.status = domain.ConnectionStatus(msg)
@@ -643,20 +644,47 @@ var (
 			Padding(1, 2)
 )
 
+func (m *Model) contentWidth() int {
+	if m.width <= 0 {
+		return 76
+	}
+	return min(76, max(36, m.width-4))
+}
+
 func (m *Model) View() string {
+	var content string
 	switch m.view {
 	case ViewUnreadList:
-		return m.renderUnreadListView()
+		content = m.renderUnreadListView()
 	case ViewChat:
-		return m.renderChatView()
+		content = m.renderChatView()
 	case ViewContactPicker:
-		return m.renderContactPickerView()
+		content = m.renderContactPickerView()
 	default:
 		return ""
 	}
+
+	if m.width <= 0 || m.height <= 0 {
+		return content
+	}
+
+	cw := m.contentWidth()
+	container := lipgloss.NewStyle().
+		Width(cw).
+		Align(lipgloss.Left).
+		Render(content)
+
+	return lipgloss.Place(
+		m.width,
+		m.height,
+		lipgloss.Center,
+		lipgloss.Center,
+		container,
+	)
 }
 
 func (m *Model) renderUnreadListView() string {
+	cw := m.contentWidth()
 	var b strings.Builder
 
 	// Top Bar
@@ -670,11 +698,11 @@ func (m *Model) renderUnreadListView() string {
 		titleStyle.Render("watui"),
 		statusStyle.Render("· "+statusText),
 	)
-	b.WriteString(headerStyle.Render(header) + "\n\n")
+	b.WriteString(headerStyle.Copy().Width(cw - 2).Render(header) + "\n\n")
 
 	// Center unread queue
 	if unreadCount == 0 {
-		emptyBox := boxStyle.Render(
+		emptyBox := boxStyle.Copy().Width(cw - 6).Render(
 			titleStyle.Render("✓ Inbox Zero") + "\n\n" +
 				"No unread messages.\n\n" +
 				statusStyle.Render("Press [n] to compose to a contact, or wait for incoming messages."),
@@ -689,8 +717,9 @@ func (m *Model) renderUnreadListView() string {
 			if len(chat.Messages) > 0 {
 				last := chat.Messages[len(chat.Messages)-1]
 				lastMsg = last.Body
-				if len(lastMsg) > 55 {
-					lastMsg = lastMsg[:55] + "..."
+				maxLen := max(20, cw-20)
+				if len(lastMsg) > maxLen {
+					lastMsg = lastMsg[:maxLen] + "..."
 				}
 			}
 
@@ -723,6 +752,7 @@ func (m *Model) renderUnreadListView() string {
 }
 
 func (m *Model) renderChatView() string {
+	cw := m.contentWidth()
 	var b strings.Builder
 
 	// Header
@@ -731,13 +761,21 @@ func (m *Model) renderChatView() string {
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89B4FA")).Render(m.activeName),
 		statusStyle.Render("· [Esc] Back to unread"),
 	)
-	b.WriteString(headerStyle.Render(header) + "\n\n")
+	b.WriteString(headerStyle.Copy().Width(cw - 2).Render(header) + "\n\n")
 
-	// Message history in current session
-	if len(m.activeMsgs) == 0 {
+	// Message history in current session (scrolled to latest messages that fit)
+	msgsToShow := m.activeMsgs
+	if m.height > 12 {
+		maxMsgs := max(3, (m.height-10)/3)
+		if len(msgsToShow) > maxMsgs {
+			msgsToShow = msgsToShow[len(msgsToShow)-maxMsgs:]
+		}
+	}
+
+	if len(msgsToShow) == 0 {
 		b.WriteString(statusStyle.Render("  (No messages in this session yet. Type below to send.)\n\n"))
 	} else {
-		for _, msg := range m.activeMsgs {
+		for _, msg := range msgsToShow {
 			timeStr := msg.Timestamp.Format("15:04")
 			if msg.IsFromMe {
 				line := fmt.Sprintf("  %s %s\n    %s",
@@ -769,13 +807,14 @@ func (m *Model) renderChatView() string {
 }
 
 func (m *Model) renderContactPickerView() string {
+	cw := m.contentWidth()
 	var b strings.Builder
 
 	header := fmt.Sprintf("%s  %s",
 		titleStyle.Render("Send Message Upfront"),
 		statusStyle.Render("· Select contact without loading history"),
 	)
-	b.WriteString(headerStyle.Render(header) + "\n\n")
+	b.WriteString(headerStyle.Copy().Width(cw - 2).Render(header) + "\n\n")
 
 	// Search bar
 	b.WriteString(m.contactSearch.View() + "\n\n")
@@ -785,7 +824,10 @@ func (m *Model) renderContactPickerView() string {
 	} else if len(m.filteredList) == 0 {
 		b.WriteString(statusStyle.Render("  No contacts found matching search.\n\n"))
 	} else {
-		maxItems := 12
+		maxItems := 10
+		if m.height > 12 {
+			maxItems = max(5, m.height-12)
+		}
 		start := 0
 		if m.contactCursor >= maxItems {
 			start = m.contactCursor - maxItems + 1

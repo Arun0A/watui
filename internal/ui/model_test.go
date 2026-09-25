@@ -2,8 +2,11 @@ package ui
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"watui/internal/domain"
 )
@@ -141,4 +144,31 @@ func TestRebuildUnreadChats(t *testing.T) {
 		t.Errorf("Expected 0 unread chats after rebuild with empty messages, got %d", len(model.chatOrder))
 	}
 }
+
+func TestCenteredResponsiveView(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// Window resize to 120x40
+	m, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	updated := m.(*Model)
+
+	if updated.width != 120 || updated.height != 40 {
+		t.Errorf("Expected 120x40 dimensions, got %dx%d", updated.width, updated.height)
+	}
+
+	viewStr := updated.View()
+	if viewStr == "" {
+		t.Fatalf("View output should not be empty")
+	}
+
+	// Should contain watui header and inbox zero
+	if !strings.Contains(viewStr, "watui") {
+		t.Errorf("Expected view to contain 'watui'")
+	}
+	if !strings.Contains(viewStr, "Inbox Zero") {
+		t.Errorf("Expected view to contain 'Inbox Zero'")
+	}
+}
+
 
