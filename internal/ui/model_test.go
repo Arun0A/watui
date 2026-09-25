@@ -34,6 +34,8 @@ func (m *mockAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, 
 	return nil, nil
 }
 func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error { return nil }
+func (m *mockAdapter) Sync(ctx context.Context) error                         { return nil }
+func (m *mockAdapter) OnChatDismissed(h func(chatID string))                   {}
 
 func TestUnreadModelLifecycle(t *testing.T) {
 	adapter := &mockAdapter{}
@@ -115,3 +117,28 @@ func TestContactFiltering(t *testing.T) {
 		t.Errorf("Expected Alice Smith, got %v", model.filteredList)
 	}
 }
+
+func TestRebuildUnreadChats(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// Add an unread chat
+	model.handleIncomingMessage(domain.Message{
+		ID:         "M1",
+		ChatID:     "alice@s.whatsapp.net",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Timestamp:  time.Now(),
+		Body:       "Hello",
+	})
+	if len(model.chatOrder) != 1 {
+		t.Fatalf("Expected 1 unread chat, got %d", len(model.chatOrder))
+	}
+
+	// Now simulate refresh after marking read on WhatsApp Web: unread list is empty
+	model.rebuildUnreadChats([]domain.Message{})
+	if len(model.chatOrder) != 0 || len(model.unreadChats) != 0 {
+		t.Errorf("Expected 0 unread chats after rebuild with empty messages, got %d", len(model.chatOrder))
+	}
+}
+

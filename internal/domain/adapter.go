@@ -57,4 +57,11 @@ type WhatsAppAdapter interface {
 
 	// DismissUnread deletes unread messages for the given chat from local persistence.
 	DismissUnread(ctx context.Context, chatID string) error
+
+	// Sync explicitly pulls server updates (such as read state mutations) from WhatsApp.
+	Sync(ctx context.Context) error
+
+	// OnChatDismissed registers a listener triggered when a chat has been marked read remotely.
+	OnChatDismissed(handler func(chatID string))
 }
+

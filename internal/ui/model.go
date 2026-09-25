@@ -63,6 +63,11 @@ type Model struct {
 	width  int
 	height int
 	err    error
+
+	msgChan      chan domain.Message
+	statusChan   chan domain.ConnectionStatus
+	dismissChan  chan string
+	contactsChan chan []domain.Contact
 }
 
 // Msg types for Tea event loop
@@ -71,6 +76,7 @@ type statusChangeMsg domain.ConnectionStatus
 type contactsLoadedMsg []domain.Contact
 type messageSentMsg domain.Message
 type unreadsLoadedMsg []domain.Message
+type chatDismissedMsg string
 type sendErrMsg struct {
 	ChatID string
 	Err    error
@@ -97,7 +103,36 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
 		input:         ti,
 		contactSearch: si,
 		status:        domain.StatusConnecting,
+		msgChan:       make(chan domain.Message, 100),
+		statusChan:    make(chan domain.ConnectionStatus, 10),
+		dismissChan:   make(chan string, 50),
+		contactsChan:  make(chan []domain.Contact, 10),
 	}
+
+	adapter.OnMessage(func(msg domain.Message) {
+		select {
+		case m.msgChan <- msg:
+		default:
+		}
+	})
+	adapter.OnStatus(func(s domain.ConnectionStatus) {
+		select {
+		case m.statusChan <- s:
+		default:
+		}
+	})
+	adapter.OnChatDismissed(func(chatID string) {
+		select {
+		case m.dismissChan <- chatID:
+		default:
+		}
+	})
+	adapter.OnContactsUpdated(func(contacts []domain.Contact) {
+		select {
+		case m.contactsChan <- contacts:
+		default:
+		}
+	})
 
 	return m
 }
@@ -108,6 +143,7 @@ func (m *Model) Init() tea.Cmd {
 		textinput.Blink,
 		m.waitForMessages(),
 		m.waitForStatus(),
+		m.waitForChatDismissed(),
 		m.loadPersistedUnread(),
 		m.loadContacts(),
 		m.waitForContactsUpdated(),
@@ -124,44 +160,41 @@ func (m *Model) loadPersistedUnread() tea.Cmd {
 	}
 }
 
+func (m *Model) performRefresh() tea.Cmd {
+	return func() tea.Msg {
+		_ = m.adapter.Sync(m.ctx)
+		msgs, err := m.adapter.GetUnreadMessages(m.ctx)
+		if err != nil {
+			return nil
+		}
+		return unreadsLoadedMsg(msgs)
+	}
+}
+
 func (m *Model) waitForMessages() tea.Cmd {
 	return func() tea.Msg {
-		msgChan := make(chan domain.Message, 1)
-		m.adapter.OnMessage(func(msg domain.Message) {
-			select {
-			case msgChan <- msg:
-			default:
-			}
-		})
-		msg := <-msgChan
+		msg := <-m.msgChan
 		return incomingMsg(msg)
 	}
 }
 
 func (m *Model) waitForStatus() tea.Cmd {
 	return func() tea.Msg {
-		statusChan := make(chan domain.ConnectionStatus, 1)
-		m.adapter.OnStatus(func(s domain.ConnectionStatus) {
-			select {
-			case statusChan <- s:
-			default:
-			}
-		})
-		s := <-statusChan
+		s := <-m.statusChan
 		return statusChangeMsg(s)
+	}
+}
+
+func (m *Model) waitForChatDismissed() tea.Cmd {
+	return func() tea.Msg {
+		chatID := <-m.dismissChan
+		return chatDismissedMsg(chatID)
 	}
 }
 
 func (m *Model) waitForContactsUpdated() tea.Cmd {
 	return func() tea.Msg {
-		cChan := make(chan []domain.Contact, 1)
-		m.adapter.OnContactsUpdated(func(contacts []domain.Contact) {
-			select {
-			case cChan <- contacts:
-			default:
-			}
-		})
-		c := <-cChan
+		c := <-m.contactsChan
 		return contactsLoadedMsg(c)
 	}
 }
@@ -222,10 +255,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 
+	case chatDismissedMsg:
+		m.dismissUnread(string(msg))
+		cmds = append(cmds, m.waitForChatDismissed())
+
 	case unreadsLoadedMsg:
-		for _, msg := range msg {
-			m.handleIncomingMessage(msg)
-		}
+		m.rebuildUnreadChats(msg)
 
 	case tea.KeyMsg:
 		switch m.view {
@@ -239,6 +274,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.unreadChats = make(map[string]*UnreadChat)
+	m.chatOrder = nil
+
+	for _, msg := range msgs {
+		chat, exists := m.unreadChats[msg.ChatID]
+		if !exists {
+			name := msg.SenderName
+			if name == "" {
+				name = msg.Sender
+			}
+			chat = &UnreadChat{
+				ChatID:       msg.ChatID,
+				Name:         name,
+				Sender:       msg.Sender,
+				Messages:     []domain.Message{msg},
+				LastReceived: msg.Timestamp,
+			}
+			m.unreadChats[msg.ChatID] = chat
+			m.chatOrder = append([]string{msg.ChatID}, m.chatOrder...)
+		} else {
+			chat.Messages = append(chat.Messages, msg)
+			chat.LastReceived = msg.Timestamp
+			if msg.SenderName != "" {
+				chat.Name = msg.SenderName
+			}
+			m.reorderChatToTop(msg.ChatID)
+		}
+	}
+
+	if m.cursor >= len(m.chatOrder) {
+		m.cursor = max(0, len(m.chatOrder)-1)
+	}
 }
 
 func (m *Model) handleIncomingMessage(msg domain.Message) {
@@ -353,7 +426,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 
 	case "R", "ctrl+r": // manual refresh unreads and contacts
 		return tea.Batch(
-			m.loadPersistedUnread(),
+			m.performRefresh(),
 			m.loadContacts(),
 		)
 	}
@@ -361,17 +434,35 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m *Model) dismissUnread(chatID string) {
+	m.mu.Lock()
 	delete(m.unreadChats, chatID)
+
+	baseID := chatID
+	if idx := strings.Index(chatID, ":"); idx != -1 {
+		if atIdx := strings.Index(chatID, "@"); atIdx != -1 && atIdx > idx {
+			baseID = chatID[:idx] + chatID[atIdx:]
+			delete(m.unreadChats, baseID)
+		}
+	} else {
+		for k := range m.unreadChats {
+			if strings.HasPrefix(k, baseID+":") || (strings.Contains(baseID, "@") && strings.HasPrefix(k, strings.Split(baseID, "@")[0]+":")) {
+				delete(m.unreadChats, k)
+			}
+		}
+	}
+
 	var newOrder []string
 	for _, id := range m.chatOrder {
-		if id != chatID {
+		if id != chatID && id != baseID && !strings.HasPrefix(id, baseID+":") {
 			newOrder = append(newOrder, id)
 		}
 	}
 	m.chatOrder = newOrder
-	if m.cursor >= len(m.chatOrder) && m.cursor > 0 {
-		m.cursor--
+	if m.cursor >= len(m.chatOrder) {
+		m.cursor = max(0, len(m.chatOrder)-1)
 	}
+	m.mu.Unlock()
+
 	go func(id string) {
 		_ = m.adapter.DismissUnread(m.ctx, id)
 	}(chatID)

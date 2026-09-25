@@ -12,7 +12,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -40,6 +42,7 @@ type Adapter struct {
 	mu              sync.RWMutex
 	messageHandlers []domain.MessageHandler
 	statusHandlers  []domain.StatusHandler
+	dismissHandlers []func(chatID string)
 	currentStatus   domain.ConnectionStatus
 
 	contactsMu       sync.RWMutex
@@ -471,6 +474,49 @@ func (a *Adapter) MarkRead(ctx context.Context, chatID string, senderID string, 
 	return a.client.MarkRead(ctx, waMsgIDs, time.Now(), cJID, sJID)
 }
 
+// OnChatDismissed registers a listener triggered when a chat has been marked read remotely.
+func (a *Adapter) OnChatDismissed(handler func(chatID string)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.dismissHandlers = append(a.dismissHandlers, handler)
+}
+
+func (a *Adapter) notifyChatDismissed(chatID string) {
+	if chatID == "" {
+		return
+	}
+	a.mu.RLock()
+	handlers := make([]func(chatID string), len(a.dismissHandlers))
+	copy(handlers, a.dismissHandlers)
+	a.mu.RUnlock()
+
+	for _, h := range handlers {
+		h(chatID)
+	}
+}
+
+func (a *Adapter) notifyMessage(msg domain.Message) {
+	a.mu.RLock()
+	handlers := make([]domain.MessageHandler, len(a.messageHandlers))
+	copy(handlers, a.messageHandlers)
+	a.mu.RUnlock()
+
+	for _, h := range handlers {
+		h(msg)
+	}
+}
+
+// Sync explicitly pulls server updates (such as read state mutations) from WhatsApp.
+func (a *Adapter) Sync(ctx context.Context) error {
+	if a.client == nil || !a.client.IsConnected() {
+		return nil
+	}
+	// Fetch regular_low (contains read/unread statuses) and regular_high
+	_ = a.client.FetchAppState(ctx, appstate.WAPatchRegularLow, false, false)
+	_ = a.client.FetchAppState(ctx, appstate.WAPatchRegularHigh, false, false)
+	return nil
+}
+
 func (a *Adapter) saveUnreadMessage(msg domain.Message) {
 	if a.localDB == nil {
 		return
@@ -482,13 +528,29 @@ func (a *Adapter) saveUnreadMessage(msg domain.Message) {
 	)
 }
 
-func (a *Adapter) deleteUnreadMessageIDs(ids []types.MessageID) {
-	if a.localDB == nil || len(ids) == 0 {
-		return
+func (a *Adapter) isChatUnread(chatID string) bool {
+	if a.localDB == nil || chatID == "" {
+		return false
 	}
+	var count int
+	_ = a.localDB.QueryRow("SELECT COUNT(*) FROM watui_unread_messages WHERE chat_id = ?", chatID).Scan(&count)
+	return count > 0
+}
+
+func (a *Adapter) deleteUnreadMessageIDs(ids []types.MessageID) []string {
+	if a.localDB == nil || len(ids) == 0 {
+		return nil
+	}
+	var affectedChats []string
 	for _, id := range ids {
+		var chatID string
+		row := a.localDB.QueryRow("SELECT chat_id FROM watui_unread_messages WHERE id = ?", string(id))
+		if err := row.Scan(&chatID); err == nil && chatID != "" {
+			affectedChats = append(affectedChats, chatID)
+		}
 		_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", string(id))
 	}
+	return affectedChats
 }
 
 // GetUnreadMessages returns all unread messages persisted in local SQLite.
@@ -523,7 +585,11 @@ func (a *Adapter) DismissUnread(ctx context.Context, chatID string) error {
 	if a.localDB == nil {
 		return nil
 	}
-	_, err := a.localDB.ExecContext(ctx, "DELETE FROM watui_unread_messages WHERE chat_id = ?", chatID)
+	nonAD := chatID
+	if parsed, err := NormalizeJID(chatID); err == nil {
+		nonAD = parsed.ToNonAD().String()
+	}
+	_, err := a.localDB.ExecContext(ctx, "DELETE FROM watui_unread_messages WHERE chat_id = ? OR chat_id = ?", chatID, nonAD)
 	return err
 }
 
@@ -533,14 +599,80 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 	case *events.Connected:
 		a.setStatus(domain.StatusConnected)
 		go a.refreshContactsCache(context.Background())
+		go func() {
+			// Catch up on any app state mutations (e.g. chats read on other devices)
+			_ = a.client.FetchAppState(context.Background(), appstate.WAPatchRegularLow, false, false)
+		}()
 
 	case *events.LoggedOut:
 		a.setStatus(domain.StatusLoggedOut)
 
 	case *events.Receipt:
-		// If read on phone/companion, remove those messages from unread persistence
-		if evt.IsFromMe && (evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf) {
-			a.deleteUnreadMessageIDs(evt.MessageIDs)
+		// When read on phone or companion, delete those messages from unread persistence
+		if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
+			affectedChats := a.deleteUnreadMessageIDs(evt.MessageIDs)
+			for _, chatID := range affectedChats {
+				if !a.isChatUnread(chatID) {
+					a.notifyChatDismissed(chatID)
+				}
+			}
+			if !evt.Chat.IsEmpty() {
+				chatID := evt.Chat.ToNonAD().String()
+				if !a.isChatUnread(chatID) {
+					a.notifyChatDismissed(chatID)
+				}
+			}
+		}
+
+	case *events.MarkChatAsRead:
+		if evt.Action != nil && evt.Action.GetRead() {
+			chatID := evt.JID.ToNonAD().String()
+			_ = a.DismissUnread(context.Background(), chatID)
+			_ = a.DismissUnread(context.Background(), evt.JID.String())
+			a.notifyChatDismissed(chatID)
+			a.notifyChatDismissed(evt.JID.String())
+		}
+
+	case *events.HistorySync:
+		if evt.Data == nil {
+			return
+		}
+		for _, conv := range evt.Data.GetConversations() {
+			if conv == nil || conv.ID == nil {
+				continue
+			}
+			rawJID := *conv.ID
+			parsedJID, err := types.ParseJID(rawJID)
+			var chatID string
+			if err == nil {
+				chatID = parsedJID.ToNonAD().String()
+			} else {
+				chatID = rawJID
+			}
+
+			if conv.GetUnreadCount() == 0 {
+				_ = a.DismissUnread(context.Background(), chatID)
+				_ = a.DismissUnread(context.Background(), rawJID)
+				a.notifyChatDismissed(chatID)
+				a.notifyChatDismissed(rawJID)
+				continue
+			}
+
+			// If unread, process messages
+			for _, hMsg := range conv.GetMessages() {
+				if hMsg == nil || hMsg.Message == nil {
+					continue
+				}
+				webMsg := hMsg.Message
+				if webMsg.Key == nil || webMsg.Key.GetFromMe() {
+					continue
+				}
+				domainMsg, ok := a.extractWebMessage(chatID, webMsg)
+				if ok {
+					a.saveUnreadMessage(domainMsg)
+					a.notifyMessage(domainMsg)
+				}
+			}
 		}
 
 	case *events.Message:
@@ -554,76 +686,55 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			a.saveUnreadMessage(domainMsg)
 		}
 
-		a.mu.RLock()
-		handlers := append([]domain.MessageHandler(nil), a.messageHandlers...)
-		a.mu.RUnlock()
-
-		for _, h := range handlers {
-			h(domainMsg)
-		}
+		a.notifyMessage(domainMsg)
 	}
 }
 
-// extractDomainMessage extracts semantic fields from the raw wire message event.
-// Returns ok=false for purely internal protocol/key-distribution packets.
-func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, bool) {
-	m := evt.Message
+func extractMessageContent(m *waE2E.Message) (string, domain.MessageType, bool) {
 	if m == nil {
-		return domain.Message{}, false
+		return "", domain.MessageTypeText, false
 	}
 
-	msgType := domain.MessageTypeText
-	body := ""
-
 	if m.Conversation != nil && *m.Conversation != "" {
-		body = *m.Conversation
-		msgType = domain.MessageTypeText
+		return *m.Conversation, domain.MessageTypeText, true
 	} else if m.ExtendedTextMessage != nil && m.ExtendedTextMessage.Text != nil && *m.ExtendedTextMessage.Text != "" {
-		body = *m.ExtendedTextMessage.Text
-		msgType = domain.MessageTypeText
+		return *m.ExtendedTextMessage.Text, domain.MessageTypeText, true
 	} else if m.ImageMessage != nil {
-		msgType = domain.MessageTypeImage
 		if m.ImageMessage.Caption != nil && *m.ImageMessage.Caption != "" {
-			body = *m.ImageMessage.Caption
-		} else {
-			body = "[Image]"
+			return *m.ImageMessage.Caption, domain.MessageTypeImage, true
 		}
+		return "[Image]", domain.MessageTypeImage, true
 	} else if m.AudioMessage != nil {
-		msgType = domain.MessageTypeAudio
-		body = "[Audio / Voice Note]"
+		return "[Audio / Voice Note]", domain.MessageTypeAudio, true
 	} else if m.VideoMessage != nil {
-		msgType = domain.MessageTypeVideo
 		if m.VideoMessage.Caption != nil && *m.VideoMessage.Caption != "" {
-			body = *m.VideoMessage.Caption
-		} else {
-			body = "[Video]"
+			return *m.VideoMessage.Caption, domain.MessageTypeVideo, true
 		}
+		return "[Video]", domain.MessageTypeVideo, true
 	} else if m.DocumentMessage != nil {
-		msgType = domain.MessageTypeDocument
 		if m.DocumentMessage.FileName != nil && *m.DocumentMessage.FileName != "" {
-			body = fmt.Sprintf("[Document: %s]", *m.DocumentMessage.FileName)
-		} else {
-			body = "[Document]"
+			return fmt.Sprintf("[Document: %s]", *m.DocumentMessage.FileName), domain.MessageTypeDocument, true
 		}
+		return "[Document]", domain.MessageTypeDocument, true
 	} else if m.StickerMessage != nil {
-		msgType = domain.MessageTypeImage
-		body = "[Sticker]"
+		return "[Sticker]", domain.MessageTypeImage, true
 	} else if m.LocationMessage != nil {
-		msgType = domain.MessageTypeText
-		body = "[Location]"
+		return "[Location]", domain.MessageTypeText, true
 	} else if m.ContactMessage != nil {
-		msgType = domain.MessageTypeText
-		body = "[Contact Card]"
+		return "[Contact Card]", domain.MessageTypeText, true
 	} else if m.ReactionMessage != nil {
-		msgType = domain.MessageTypeReaction
 		if m.ReactionMessage.Text != nil && *m.ReactionMessage.Text != "" {
-			body = fmt.Sprintf("[Reaction: %s]", *m.ReactionMessage.Text)
-		} else {
-			// Removed reaction
-			return domain.Message{}, false
+			return fmt.Sprintf("[Reaction: %s]", *m.ReactionMessage.Text), domain.MessageTypeReaction, true
 		}
-	} else {
-		// Purely internal control/key-distribution/protocol message with no visible content
+		return "", domain.MessageTypeReaction, false
+	}
+	return "", domain.MessageTypeText, false
+}
+
+// extractDomainMessage extracts semantic fields from the raw wire message event.
+func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, bool) {
+	body, msgType, ok := extractMessageContent(evt.Message)
+	if !ok {
 		return domain.Message{}, false
 	}
 
@@ -634,11 +745,51 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 
 	return domain.Message{
 		ID:         evt.Info.ID,
-		ChatID:     evt.Info.Chat.String(),
-		Sender:     evt.Info.Sender.String(),
+		ChatID:     evt.Info.Chat.ToNonAD().String(),
+		Sender:     evt.Info.Sender.ToNonAD().String(),
 		SenderName: senderName,
 		Timestamp:  evt.Info.Timestamp,
 		IsFromMe:   evt.Info.IsFromMe,
+		Type:       msgType,
+		Body:       body,
+		Status:     domain.MessageStatusDelivered,
+	}, true
+}
+
+func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo) (domain.Message, bool) {
+	if webMsg.Message == nil {
+		return domain.Message{}, false
+	}
+	body, msgType, ok := extractMessageContent(webMsg.Message)
+	if !ok {
+		return domain.Message{}, false
+	}
+
+	sender := chatID
+	if webMsg.Participant != nil && *webMsg.Participant != "" {
+		sender = *webMsg.Participant
+	} else if webMsg.Key != nil && webMsg.Key.Participant != nil && *webMsg.Key.Participant != "" {
+		sender = *webMsg.Key.Participant
+	}
+
+	senderName := webMsg.GetPushName()
+	if senderName == "" {
+		senderName = sender
+	}
+
+	ts := time.Unix(int64(webMsg.GetMessageTimestamp()), 0)
+	msgID := ""
+	if webMsg.Key != nil && webMsg.Key.ID != nil {
+		msgID = *webMsg.Key.ID
+	}
+
+	return domain.Message{
+		ID:         msgID,
+		ChatID:     chatID,
+		Sender:     sender,
+		SenderName: senderName,
+		Timestamp:  ts,
+		IsFromMe:   false,
 		Type:       msgType,
 		Body:       body,
 		Status:     domain.MessageStatusDelivered,
