@@ -92,6 +92,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		CREATE TABLE IF NOT EXISTS watui_unread_messages (
 			id TEXT PRIMARY KEY,
 			chat_id TEXT NOT NULL,
+			chat_name TEXT,
 			sender TEXT NOT NULL,
 			sender_name TEXT,
 			timestamp INTEGER NOT NULL,
@@ -99,6 +100,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			type TEXT,
 			is_from_me BOOLEAN
 		);`)
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN chat_name TEXT;")
 	}
 
 	adapter := &Adapter{
@@ -522,9 +524,9 @@ func (a *Adapter) saveUnreadMessage(msg domain.Message) {
 		return
 	}
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_unread_messages
-		(id, chat_id, sender, sender_name, timestamp, body, type, is_from_me)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.ChatID, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe,
 	)
 }
 
@@ -558,7 +560,7 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 	if a.localDB == nil {
 		return nil, nil
 	}
-	rows, err := a.localDB.QueryContext(ctx, `SELECT id, chat_id, sender, sender_name, timestamp, body, type, is_from_me
+	rows, err := a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me
 		FROM watui_unread_messages ORDER BY timestamp ASC`)
 	if err != nil {
 		return nil, err
@@ -570,7 +572,7 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 		var m domain.Message
 		var ts int64
 		var tStr string
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe); err == nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe); err == nil {
 			m.Timestamp = time.Unix(ts, 0)
 			m.Type = domain.MessageType(tStr)
 			m.Status = domain.MessageStatusDelivered
@@ -731,7 +733,48 @@ func extractMessageContent(m *waE2E.Message) (string, domain.MessageType, bool) 
 	return "", domain.MessageTypeText, false
 }
 
-// extractDomainMessage extracts semantic fields from the raw wire message event.
+func (a *Adapter) resolveChatName(chat types.JID) string {
+	chatNonAD := chat.ToNonAD()
+	chatStr := chatNonAD.String()
+
+	if chatNonAD.Server == types.GroupServer {
+		if a.localDB != nil {
+			var name string
+			if err := a.localDB.QueryRow("SELECT name FROM watui_groups WHERE jid = ? OR jid LIKE ?", chatStr, chatNonAD.User+"%").Scan(&name); err == nil && name != "" {
+				return name
+			}
+		}
+		if a.client != nil {
+			info, err := a.client.GetGroupInfo(context.Background(), chatNonAD)
+			if err == nil && info != nil && info.GroupName.Name != "" {
+				name := strings.TrimSpace(info.GroupName.Name)
+				if a.localDB != nil {
+					_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", chatStr, name)
+				}
+				return name
+			}
+		}
+		return "Group (" + chatNonAD.User + ")"
+	}
+
+	// 1-on-1 contact
+	if a.client != nil && a.client.Store != nil && a.client.Store.Contacts != nil {
+		contact, err := a.client.Store.Contacts.GetContact(context.Background(), chatNonAD)
+		if err == nil && contact.Found {
+			if contact.FullName != "" {
+				return contact.FullName
+			}
+			if contact.BusinessName != "" {
+				return contact.BusinessName
+			}
+			if contact.PushName != "" {
+				return contact.PushName
+			}
+		}
+	}
+	return ""
+}
+
 func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, bool) {
 	body, msgType, ok := extractMessageContent(evt.Message)
 	if !ok {
@@ -743,9 +786,16 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 		senderName = evt.Info.Sender.User
 	}
 
+	chatJID := evt.Info.Chat.ToNonAD()
+	chatName := a.resolveChatName(chatJID)
+	if chatName == "" && !evt.Info.IsGroup {
+		chatName = senderName
+	}
+
 	return domain.Message{
 		ID:         evt.Info.ID,
-		ChatID:     evt.Info.Chat.ToNonAD().String(),
+		ChatID:     chatJID.String(),
+		ChatName:   chatName,
 		Sender:     evt.Info.Sender.ToNonAD().String(),
 		SenderName: senderName,
 		Timestamp:  evt.Info.Timestamp,
@@ -777,6 +827,12 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 		senderName = sender
 	}
 
+	chatJID, _ := types.ParseJID(chatID)
+	chatName := a.resolveChatName(chatJID.ToNonAD())
+	if chatName == "" && !strings.Contains(chatID, "@g.us") {
+		chatName = senderName
+	}
+
 	ts := time.Unix(int64(webMsg.GetMessageTimestamp()), 0)
 	msgID := ""
 	if webMsg.Key != nil && webMsg.Key.ID != nil {
@@ -786,6 +842,7 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 	return domain.Message{
 		ID:         msgID,
 		ChatID:     chatID,
+		ChatName:   chatName,
 		Sender:     sender,
 		SenderName: senderName,
 		Timestamp:  ts,

@@ -32,6 +32,7 @@ const (
 type Message struct {
 	ID         string        `json:"id"`
 	ChatID     string        `json:"chat_id"`
+	ChatName   string        `json:"chat_name,omitempty"`
 	Sender     string        `json:"sender"`
 	SenderName string        `json:"sender_name,omitempty"`
 	Timestamp  time.Time     `json:"timestamp"`

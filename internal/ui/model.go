@@ -14,7 +14,7 @@ import (
 	"watui/internal/domain"
 )
 
-// ViewState defines which screen is currently rendered.
+// ViewState represents the currently active screen in the TUI.
 type ViewState int
 
 const (
@@ -27,6 +27,7 @@ const (
 type UnreadChat struct {
 	ChatID       string
 	Name         string
+	IsGroup      bool
 	Sender       string
 	Messages     []domain.Message
 	LastReceived time.Time
@@ -46,16 +47,18 @@ type Model struct {
 	cursor      int
 
 	// Active conversation view
-	activeChatID string
-	activeName   string
-	activeMsgs   []domain.Message
-	input        textinput.Model
+	activeChatID     string
+	activeName       string
+	activeMsgs       []domain.Message
+	chatScrollOffset int
+	input            textinput.Model
 
 	// Contact search view
 	contacts       []domain.Contact
 	filteredList   []domain.Contact
 	contactSearch  textinput.Model
 	contactCursor  int
+	contactOffset  int
 	loadingContact bool
 
 	// App state
@@ -90,7 +93,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
 	ti.Width = 60
 
 	si := textinput.New()
-	si.Placeholder = "Search contact name, group, or type phone number..."
+	si.Placeholder = "Search contact name, group, or phone number..."
 	si.CharLimit = 100
 	si.Width = 50
 
@@ -103,7 +106,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter) *Model {
 		input:         ti,
 		contactSearch: si,
 		status:        domain.StatusConnecting,
-		msgChan:       make(chan domain.Message, 100),
+		msgChan:       make(chan domain.Message, 200),
 		statusChan:    make(chan domain.ConnectionStatus, 10),
 		dismissChan:   make(chan string, 50),
 		contactsChan:  make(chan []domain.Contact, 10),
@@ -161,14 +164,17 @@ func (m *Model) loadPersistedUnread() tea.Cmd {
 }
 
 func (m *Model) performRefresh() tea.Cmd {
-	return func() tea.Msg {
-		_ = m.adapter.Sync(m.ctx)
-		msgs, err := m.adapter.GetUnreadMessages(m.ctx)
-		if err != nil {
-			return nil
-		}
-		return unreadsLoadedMsg(msgs)
-	}
+	return tea.Batch(
+		func() tea.Msg {
+			_ = m.adapter.Sync(m.ctx)
+			msgs, err := m.adapter.GetUnreadMessages(m.ctx)
+			if err != nil {
+				return nil
+			}
+			return unreadsLoadedMsg(msgs)
+		},
+		m.loadContacts(),
+	)
 }
 
 func (m *Model) waitForMessages() tea.Cmd {
@@ -220,25 +226,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cw := m.contentWidth()
 		m.input.Width = max(20, cw-6)
 		m.contactSearch.Width = max(20, cw-6)
+		return m, nil
 
 	case statusChangeMsg:
 		m.status = domain.ConnectionStatus(msg)
+		cmds = append(cmds, m.waitForStatus())
 
 	case incomingMsg:
 		dMsg := domain.Message(msg)
 		m.handleIncomingMessage(dMsg)
-		cmds = append(cmds, m.waitForMessages()) // re-listen
+		// Drain any queued messages in msgChan to batch process bursts
+		for {
+			select {
+			case nextMsg := <-m.msgChan:
+				m.handleIncomingMessage(nextMsg)
+			default:
+				goto msgsDrained
+			}
+		}
+	msgsDrained:
+		cmds = append(cmds, m.waitForMessages())
 
 	case contactsLoadedMsg:
 		m.contacts = []domain.Contact(msg)
 		m.filterContacts(m.contactSearch.Value())
 		m.loadingContact = false
-		cmds = append(cmds, m.waitForContactsUpdated()) // re-listen for live updates
+		m.updateUnreadChatNames()
+		cmds = append(cmds, m.waitForContactsUpdated())
 
 	case messageSentMsg:
 		sent := domain.Message(msg)
 		if m.activeChatID == sent.ChatID {
 			m.activeMsgs = append(m.activeMsgs, sent)
+			m.chatScrollOffset = 0
 		}
 
 	case sendErrMsg:
@@ -254,6 +274,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Body:       fmt.Sprintf("[Failed to send: %v]", msg.Err),
 				Status:     domain.MessageStatusFailed,
 			})
+			m.chatScrollOffset = 0
 		}
 
 	case chatDismissedMsg:
@@ -277,6 +298,58 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m *Model) resolveChatName(chatID string, msgChatName string, fallback string) (string, bool) {
+	isGroup := strings.Contains(chatID, "@g.us")
+
+	cleanID := chatID
+	if idx := strings.Index(cleanID, ":"); idx != -1 {
+		if atIdx := strings.Index(cleanID, "@"); atIdx != -1 {
+			cleanID = cleanID[:idx] + cleanID[atIdx:]
+		}
+	}
+	baseUser := strings.Split(cleanID, "@")[0]
+
+	// 1. Check m.contacts first (contains address book contacts & local groups)
+	for _, c := range m.contacts {
+		cBase := strings.Split(c.JID, "@")[0]
+		if c.JID == cleanID || cBase == baseUser {
+			if c.Name != "" && !strings.HasPrefix(c.Name, "Group (") && !strings.HasPrefix(c.Name, "120363") {
+				return c.Name, c.IsGroup || isGroup
+			}
+		}
+	}
+
+	// 2. If message already had a real group or chat name
+	if msgChatName != "" && !strings.HasPrefix(msgChatName, "120363") && !strings.HasPrefix(msgChatName, "Group (") {
+		return msgChatName, isGroup
+	}
+
+	// 3. Fallback for group:
+	if isGroup {
+		return "Group (" + baseUser + ")", true
+	}
+
+	// 4. Fallback for 1-on-1:
+	if fallback != "" && fallback != chatID && !strings.HasPrefix(fallback, "120363") {
+		return fallback, false
+	}
+	return baseUser, false
+}
+
+func (m *Model) updateUnreadChatNames() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, chat := range m.unreadChats {
+		lastMsgName := ""
+		if len(chat.Messages) > 0 {
+			lastMsgName = chat.Messages[len(chat.Messages)-1].ChatName
+		}
+		name, isGroup := m.resolveChatName(chat.ChatID, lastMsgName, chat.Name)
+		chat.Name = name
+		chat.IsGroup = isGroup
+	}
+}
+
 func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -287,13 +360,11 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 	for _, msg := range msgs {
 		chat, exists := m.unreadChats[msg.ChatID]
 		if !exists {
-			name := msg.SenderName
-			if name == "" {
-				name = msg.Sender
-			}
+			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 			chat = &UnreadChat{
 				ChatID:       msg.ChatID,
 				Name:         name,
+				IsGroup:      isGroup,
 				Sender:       msg.Sender,
 				Messages:     []domain.Message{msg},
 				LastReceived: msg.Timestamp,
@@ -303,8 +374,10 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 		} else {
 			chat.Messages = append(chat.Messages, msg)
 			chat.LastReceived = msg.Timestamp
-			if msg.SenderName != "" {
-				chat.Name = msg.SenderName
+			if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
+				name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
+				chat.Name = name
+				chat.IsGroup = isGroup
 			}
 			m.reorderChatToTop(msg.ChatID)
 		}
@@ -322,23 +395,20 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 	// If currently viewing this chat, append directly
 	if m.view == ViewChat && m.activeChatID == msg.ChatID {
 		m.activeMsgs = append(m.activeMsgs, msg)
-		// Auto mark as read
+		m.chatScrollOffset = 0
 		go func() {
 			_ = m.adapter.MarkRead(m.ctx, msg.ChatID, msg.Sender, []string{msg.ID})
 		}()
 		return
 	}
 
-	// Otherwise, add or update unread chat
 	chat, exists := m.unreadChats[msg.ChatID]
 	if !exists {
-		name := msg.SenderName
-		if name == "" {
-			name = msg.Sender
-		}
+		name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 		chat = &UnreadChat{
 			ChatID:       msg.ChatID,
 			Name:         name,
+			IsGroup:      isGroup,
 			Sender:       msg.Sender,
 			Messages:     []domain.Message{msg},
 			LastReceived: msg.Timestamp,
@@ -348,16 +418,18 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 	} else {
 		chat.Messages = append(chat.Messages, msg)
 		chat.LastReceived = msg.Timestamp
-		if msg.SenderName != "" {
-			chat.Name = msg.SenderName
+		if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
+			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
+			chat.Name = name
+			chat.IsGroup = isGroup
 		}
-		// Move to top of chatOrder
 		m.reorderChatToTop(msg.ChatID)
 	}
 }
 
 func (m *Model) reorderChatToTop(chatID string) {
-	newOrder := []string{chatID}
+	var newOrder []string
+	newOrder = append(newOrder, chatID)
 	for _, id := range m.chatOrder {
 		if id != chatID {
 			newOrder = append(newOrder, id)
@@ -381,7 +453,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			m.cursor--
 		}
 
-	case "r", "d": // mark as read / dismiss from unread list
+	case "r", "d": // mark as read / dismiss
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
 			m.dismissUnread(chatID)
@@ -394,11 +466,11 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			m.activeChatID = chatID
 			m.activeName = chat.Name
 			m.activeMsgs = append([]domain.Message(nil), chat.Messages...)
+			m.chatScrollOffset = 0
 			m.input.Reset()
 			m.input.Focus()
 			m.view = ViewChat
 
-			// Mark as read in WhatsApp
 			var ids []string
 			for _, item := range chat.Messages {
 				ids = append(ids, item.ID)
@@ -407,9 +479,8 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 				_ = m.adapter.MarkRead(m.ctx, cID, sID, mIDs)
 			}(chat.ChatID, chat.Sender, ids)
 
-			// Remove from unread queue
 			m.dismissUnread(chatID)
-			return textinput.Blink
+			return tea.Batch(tea.ClearScreen, textinput.Blink)
 		}
 
 	case "n", "c": // new message / contact picker
@@ -417,15 +488,16 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		m.contactSearch.Reset()
 		m.contactSearch.Focus()
 		m.contactCursor = 0
+		m.contactOffset = 0
 		m.filterContacts("")
 		if len(m.contacts) == 0 {
 			m.loadingContact = true
-			return tea.Batch(textinput.Blink, m.loadContacts())
+			return tea.Batch(tea.ClearScreen, textinput.Blink, m.loadContacts())
 		}
 		m.loadingContact = false
-		return textinput.Blink
+		return tea.Batch(tea.ClearScreen, textinput.Blink)
 
-	case "R", "ctrl+r": // manual refresh unreads and contacts
+	case "R", "ctrl+r": // manual refresh
 		return tea.Batch(
 			m.performRefresh(),
 			m.loadContacts(),
@@ -473,10 +545,30 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		m.view = ViewUnreadList
-		return nil
+		return tea.ClearScreen
 
 	case "ctrl+c":
 		return tea.Quit
+
+	case "pgup", "ctrl+u":
+		m.chatScrollOffset += 5
+		return nil
+
+	case "pgdown", "ctrl+d":
+		m.chatScrollOffset = max(0, m.chatScrollOffset-5)
+		return nil
+
+	case "up":
+		if m.input.Value() == "" {
+			m.chatScrollOffset++
+			return nil
+		}
+
+	case "down":
+		if m.input.Value() == "" {
+			m.chatScrollOffset = max(0, m.chatScrollOffset-1)
+			return nil
+		}
 
 	case "enter":
 		text := strings.TrimSpace(m.input.Value())
@@ -503,7 +595,7 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		m.view = ViewUnreadList
-		return nil
+		return tea.ClearScreen
 
 	case "ctrl+c":
 		return tea.Quit
@@ -511,12 +603,19 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 	case "down", "ctrl+n":
 		if m.contactCursor < len(m.filteredList)-1 {
 			m.contactCursor++
+			maxItems := m.maxVisibleContacts()
+			if m.contactCursor >= m.contactOffset+maxItems {
+				m.contactOffset = m.contactCursor - maxItems + 1
+			}
 		}
 		return nil
 
 	case "up", "ctrl+p":
 		if m.contactCursor > 0 {
 			m.contactCursor--
+			if m.contactCursor < m.contactOffset {
+				m.contactOffset = m.contactCursor
+			}
 		}
 		return nil
 
@@ -526,21 +625,29 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeChatID = contact.JID
 			m.activeName = contact.Name
 			m.activeMsgs = nil
+			m.chatScrollOffset = 0
 			m.input.Reset()
 			m.input.Focus()
 			m.view = ViewChat
-			return textinput.Blink
+			return tea.Batch(tea.ClearScreen, textinput.Blink)
 		}
-		// Direct input fallback (user typed a raw phone number or JID)
+		// Direct input fallback
 		rawInput := strings.TrimSpace(m.contactSearch.Value())
-		if rawInput != "" {
+		var digitCount int
+		for _, r := range rawInput {
+			if r >= '0' && r <= '9' {
+				digitCount++
+			}
+		}
+		if digitCount >= 5 || strings.Contains(rawInput, "@") {
 			m.activeChatID = rawInput
 			m.activeName = rawInput
 			m.activeMsgs = nil
+			m.chatScrollOffset = 0
 			m.input.Reset()
 			m.input.Focus()
 			m.view = ViewChat
-			return textinput.Blink
+			return tea.Batch(tea.ClearScreen, textinput.Blink)
 		}
 		return nil
 	}
@@ -551,6 +658,7 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 	if m.contactSearch.Value() != oldVal {
 		m.filterContacts(m.contactSearch.Value())
 		m.contactCursor = 0
+		m.contactOffset = 0
 	}
 	return cmd
 }
@@ -564,6 +672,8 @@ func (m *Model) filterContacts(query string) {
 		} else {
 			m.filteredList = m.contacts
 		}
+		m.contactCursor = 0
+		m.contactOffset = 0
 		return
 	}
 
@@ -585,9 +695,26 @@ func (m *Model) filterContacts(query string) {
 
 	maxMatches := 40
 	for _, c := range m.contacts {
-		if strings.Contains(strings.ToLower(c.Name), q) ||
-			strings.Contains(strings.ToLower(c.PushName), q) ||
-			strings.Contains(c.JID, q) {
+		nameMatch := strings.Contains(strings.ToLower(c.Name), q)
+		if c.IsGroup {
+			// Never match group JID (e.g. 120363@g.us)
+			if nameMatch {
+				res = append(res, c)
+				if len(res) >= maxMatches {
+					break
+				}
+			}
+			continue
+		}
+
+		pushMatch := c.PushName != "" && strings.Contains(strings.ToLower(c.PushName), q)
+		phone := c.JID
+		if idx := strings.Index(phone, "@"); idx != -1 {
+			phone = phone[:idx]
+		}
+		phoneMatch := strings.Contains(phone, q)
+
+		if nameMatch || pushMatch || phoneMatch {
 			res = append(res, c)
 			if len(res) >= maxMatches {
 				break
@@ -595,10 +722,12 @@ func (m *Model) filterContacts(query string) {
 		}
 	}
 	m.filteredList = res
+	m.contactCursor = 0
+	m.contactOffset = 0
 }
 
 // -------------------------------------------------------------
-// View Renderers with Minimalist Styling
+// Styles and Layout Dimensions
 // -------------------------------------------------------------
 
 var (
@@ -609,11 +738,8 @@ var (
 	statusStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6C7086"))
 
-	headerStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderBottom(true).
-			BorderForeground(lipgloss.Color("#313244")).
-			Padding(0, 1)
+	dividerStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#313244"))
 
 	badgeStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -621,249 +747,380 @@ var (
 			Background(lipgloss.Color("#FAB387")).
 			Padding(0, 1)
 
-	selectedChatStyle = lipgloss.NewStyle().
+	selectedTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#89B4FA")).
-				PaddingLeft(1)
+				Foreground(lipgloss.Color("#89B4FA"))
 
-	normalChatStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#CDD6F4")).
-			PaddingLeft(2)
+	normalTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#CDD6F4"))
 
 	snippetStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6C7086")).
-			PaddingLeft(4)
+			Foreground(lipgloss.Color("#6C7086"))
 
 	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#585B70")).
-			Padding(0, 1)
-
-	boxStyle = lipgloss.NewStyle().
-			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#45475A")).
-			Padding(1, 2)
+			Foreground(lipgloss.Color("#585B70"))
 )
 
 func (m *Model) contentWidth() int {
 	if m.width <= 0 {
 		return 76
 	}
-	return min(76, max(36, m.width-4))
+	if m.width <= 40 {
+		return max(20, m.width-2)
+	}
+	return min(76, m.width-4)
 }
 
+func (m *Model) maxCanvasHeight() int {
+	if m.height <= 0 {
+		return 18
+	}
+	return max(8, min(30, m.height-4))
+}
+
+func (m *Model) maxVisibleChats() int {
+	ch := m.maxCanvasHeight()
+	// Header (3) + Footer (1) = 4 lines. Each chat is 3 lines.
+	return max(1, (ch-4)/3)
+}
+
+func (m *Model) maxVisibleContacts() int {
+	ch := m.maxCanvasHeight()
+	// Header (3) + Search (2) + Footer (2) = 7 lines.
+	return max(4, ch-7)
+}
+
+// -------------------------------------------------------------
+// Core Viewport-Safe Render Pipeline
+// -------------------------------------------------------------
+
 func (m *Model) View() string {
-	var content string
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+
+	var lines []string
 	switch m.view {
 	case ViewUnreadList:
-		content = m.renderUnreadListView()
+		lines = m.renderUnreadListView()
 	case ViewChat:
-		content = m.renderChatView()
+		lines = m.renderChatView()
 	case ViewContactPicker:
-		content = m.renderContactPickerView()
+		lines = m.renderContactPickerView()
 	default:
 		return ""
 	}
 
-	if m.width <= 0 || m.height <= 0 {
-		return content
+	cw := m.contentWidth()
+	maxH := max(4, m.height-4)
+	if len(lines) > maxH {
+		lines = lines[:maxH]
 	}
 
-	cw := m.contentWidth()
-	container := lipgloss.NewStyle().
-		Width(cw).
-		Align(lipgloss.Left).
-		Render(content)
+	leftPad := max(0, (m.width-cw)/2)
+	prefix := strings.Repeat(" ", leftPad)
 
-	return lipgloss.Place(
-		m.width,
-		m.height,
-		lipgloss.Center,
-		lipgloss.Center,
-		container,
-	)
+	topPad := max(0, (m.height-len(lines))/2)
+	// Safety limit: ensure topPad + len(lines) <= m.height - 2
+	if topPad+len(lines) > m.height-2 {
+		topPad = max(0, m.height-2-len(lines))
+	}
+
+	var b strings.Builder
+	for i := 0; i < topPad; i++ {
+		b.WriteString("\n")
+	}
+	for i, l := range lines {
+		b.WriteString(prefix + l)
+		if i < len(lines)-1 {
+			b.WriteString("\n")
+		}
+	}
+
+	return b.String()
 }
 
-func (m *Model) renderUnreadListView() string {
+func (m *Model) renderUnreadListView() []string {
 	cw := m.contentWidth()
-	var b strings.Builder
+	var lines []string
 
-	// Top Bar
+	// Header
 	unreadCount := len(m.chatOrder)
 	statusText := string(m.status)
 	if m.status == domain.StatusConnected {
 		statusText = fmt.Sprintf("connected · %d unread", unreadCount)
 	}
 
-	header := fmt.Sprintf("%s  %s",
+	headerText := fmt.Sprintf("%s  %s",
 		titleStyle.Render("watui"),
 		statusStyle.Render("· "+statusText),
 	)
-	b.WriteString(headerStyle.Copy().Width(cw - 2).Render(header) + "\n\n")
+	divider := dividerStyle.Render(strings.Repeat("─", cw))
+	lines = append(lines, headerText, divider, "")
 
-	// Center unread queue
 	if unreadCount == 0 {
-		emptyBox := boxStyle.Copy().Width(cw - 6).Render(
-			titleStyle.Render("✓ Inbox Zero") + "\n\n" +
-				"No unread messages.\n\n" +
-				statusStyle.Render("Press [n] to compose to a contact, or wait for incoming messages."),
-		)
-		b.WriteString(emptyBox + "\n\n")
+		lines = append(lines, "  ✓ Inbox Zero")
+		lines = append(lines, "")
+		lines = append(lines, "  No unread messages.")
+		lines = append(lines, "")
+		lines = append(lines, statusStyle.Render("  Press [n] to compose to a contact, or wait for incoming messages."))
+		lines = append(lines, "")
 	} else {
-		for i, chatID := range m.chatOrder {
+		maxChats := m.maxVisibleChats()
+		start := 0
+		if m.cursor >= maxChats {
+			start = m.cursor - maxChats + 1
+		}
+		end := min(len(m.chatOrder), start+maxChats)
+
+		for i := start; i < end; i++ {
+			chatID := m.chatOrder[i]
 			chat := m.unreadChats[chatID]
 			badge := badgeStyle.Render(fmt.Sprintf("%d", len(chat.Messages)))
+
+			name := chat.Name
+			if chat.IsGroup || strings.Contains(chat.ChatID, "@g.us") {
+				name = "👥 " + chat.Name
+			}
+			maxNameLen := max(10, cw-22)
+			rName := []rune(name)
+			if len(rName) > maxNameLen {
+				name = string(rName[:maxNameLen-3]) + "..."
+			}
 
 			lastMsg := ""
 			if len(chat.Messages) > 0 {
 				last := chat.Messages[len(chat.Messages)-1]
-				lastMsg = last.Body
-				maxLen := max(20, cw-20)
-				if len(lastMsg) > maxLen {
-					lastMsg = lastMsg[:maxLen] + "..."
+				clean := strings.ReplaceAll(last.Body, "\r", "")
+				clean = strings.ReplaceAll(clean, "\n", " ")
+				clean = strings.TrimSpace(clean)
+
+				// For groups, prefix snippet with sender name so context is clear: "Sender: message"
+				if (chat.IsGroup || strings.Contains(chat.ChatID, "@g.us")) && !last.IsFromMe {
+					sender := last.SenderName
+					if sender == "" {
+						sender = last.Sender
+						if idx := strings.Index(sender, "@"); idx != -1 {
+							sender = sender[:idx]
+						}
+					}
+					if sender != "" {
+						clean = sender + ": " + clean
+					}
+				}
+
+				lastMsg = clean
+				maxMsgLen := max(15, cw-10)
+				rMsg := []rune(lastMsg)
+				if len(rMsg) > maxMsgLen {
+					lastMsg = string(rMsg[:maxMsgLen-3]) + "..."
 				}
 			}
 
 			timeStr := chat.LastReceived.Format("15:04")
-			var item string
+
 			if i == m.cursor {
-				item = fmt.Sprintf("> %s %s  %s\n%s",
+				lines = append(lines, fmt.Sprintf("> %s %s  %s",
 					badge,
-					selectedChatStyle.Render(chat.Name),
+					selectedTitleStyle.Render(name),
 					statusStyle.Render(timeStr),
-					snippetStyle.Render(lastMsg),
-				)
+				))
+				lines = append(lines, snippetStyle.Render("    "+lastMsg))
 			} else {
-				item = fmt.Sprintf("  %s %s  %s\n%s",
+				lines = append(lines, fmt.Sprintf("  %s %s  %s",
 					badge,
-					normalChatStyle.Render(chat.Name),
+					normalTitleStyle.Render(name),
 					statusStyle.Render(timeStr),
-					snippetStyle.Render(lastMsg),
-				)
+				))
+				lines = append(lines, snippetStyle.Render("    "+lastMsg))
 			}
-			b.WriteString(item + "\n\n")
+			lines = append(lines, "")
 		}
 	}
 
-	// Bottom Keybindings
-	footer := helpStyle.Render("[Enter] Open · [r] Dismiss/Read · [n] New Message · [R] Refresh · [q] Quit")
-	b.WriteString(footer)
-
-	return b.String()
+	lines = append(lines, helpStyle.Render("[Enter] Open · [r] Dismiss · [n] New Message · [R] Refresh · [q] Quit"))
+	return lines
 }
 
-func (m *Model) renderChatView() string {
+func (m *Model) renderChatView() []string {
 	cw := m.contentWidth()
-	var b strings.Builder
+	var lines []string
 
-	// Header
-	header := fmt.Sprintf("%s %s  %s",
-		titleStyle.Render("Chat with"),
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89B4FA")).Render(m.activeName),
-		statusStyle.Render("· [Esc] Back to unread"),
-	)
-	b.WriteString(headerStyle.Copy().Width(cw - 2).Render(header) + "\n\n")
-
-	// Message history in current session (scrolled to latest messages that fit)
-	msgsToShow := m.activeMsgs
-	if m.height > 12 {
-		maxMsgs := max(3, (m.height-10)/3)
-		if len(msgsToShow) > maxMsgs {
-			msgsToShow = msgsToShow[len(msgsToShow)-maxMsgs:]
-		}
+	chatPrefix := "Chat with"
+	if strings.Contains(m.activeChatID, "@g.us") {
+		chatPrefix = "Group"
 	}
+	headerText := fmt.Sprintf("%s %s  %s",
+		titleStyle.Render(chatPrefix),
+		selectedTitleStyle.Render(m.activeName),
+		statusStyle.Render("· [Esc] Back"),
+	)
+	divider := dividerStyle.Render(strings.Repeat("─", cw))
+	lines = append(lines, headerText, divider, "")
 
-	if len(msgsToShow) == 0 {
-		b.WriteString(statusStyle.Render("  (No messages in this session yet. Type below to send.)\n\n"))
+	var msgLines []string
+	if len(m.activeMsgs) == 0 {
+		msgLines = append(msgLines, statusStyle.Render("  (No messages in this session yet. Type below to send.)"))
 	} else {
-		for _, msg := range msgsToShow {
+		msgWrapWidth := max(20, cw-6)
+		wrapStyle := lipgloss.NewStyle().Width(msgWrapWidth)
+
+		for i, msg := range m.activeMsgs {
 			timeStr := msg.Timestamp.Format("15:04")
+			var header string
 			if msg.IsFromMe {
-				line := fmt.Sprintf("  %s %s\n    %s",
+				header = fmt.Sprintf("  %s %s",
 					lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render("You"),
 					statusStyle.Render(timeStr),
-					msg.Body,
 				)
-				b.WriteString(line + "\n\n")
 			} else {
 				sender := msg.SenderName
 				if sender == "" {
 					sender = "Them"
 				}
-				line := fmt.Sprintf("  %s %s\n    %s",
-					lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89B4FA")).Render(sender),
+				header = fmt.Sprintf("  %s %s",
+					selectedTitleStyle.Render(sender),
 					statusStyle.Render(timeStr),
-					msg.Body,
 				)
-				b.WriteString(line + "\n\n")
+			}
+			msgLines = append(msgLines, header)
+
+			wrapped := wrapStyle.Render(msg.Body)
+			for _, wl := range strings.Split(wrapped, "\n") {
+				msgLines = append(msgLines, "    "+wl)
+			}
+			if i < len(m.activeMsgs)-1 {
+				msgLines = append(msgLines, "")
 			}
 		}
 	}
 
-	// Bottom Input
-	b.WriteString("\n" + m.input.View() + "\n\n")
-	b.WriteString(helpStyle.Render("[Enter] Send · [Esc] Back to inbox"))
+	availH := max(4, m.maxCanvasHeight()-5)
+	scrollInfo := ""
 
-	return b.String()
+	if len(msgLines) <= availH {
+		lines = append(lines, msgLines...)
+	} else {
+		maxOffset := len(msgLines) - availH
+		if m.chatScrollOffset > maxOffset {
+			m.chatScrollOffset = maxOffset
+		}
+		if m.chatScrollOffset < 0 {
+			m.chatScrollOffset = 0
+		}
+		end := len(msgLines) - m.chatScrollOffset
+		start := max(0, end-availH)
+		lines = append(lines, msgLines[start:end]...)
+
+		if m.chatScrollOffset > 0 {
+			scrollInfo = fmt.Sprintf(" · [PgUp/PgDn] (%d lines up)", m.chatScrollOffset)
+		}
+	}
+
+	// Pad with blank lines if fewer than availH
+	renderedMsgLines := len(lines) - 3
+	for k := renderedMsgLines; k < availH; k++ {
+		lines = append(lines, "")
+	}
+
+	lines = append(lines, m.input.View())
+	lines = append(lines, helpStyle.Render("[Enter] Send · [Esc] Back"+scrollInfo))
+
+	return lines
 }
 
-func (m *Model) renderContactPickerView() string {
+func (m *Model) renderContactPickerView() []string {
 	cw := m.contentWidth()
-	var b strings.Builder
+	var lines []string
 
-	header := fmt.Sprintf("%s  %s",
+	headerText := fmt.Sprintf("%s  %s",
 		titleStyle.Render("Send Message Upfront"),
 		statusStyle.Render("· Select contact without loading history"),
 	)
-	b.WriteString(headerStyle.Copy().Width(cw - 2).Render(header) + "\n\n")
+	divider := dividerStyle.Render(strings.Repeat("─", cw))
+	lines = append(lines, headerText, divider, "")
 
-	// Search bar
-	b.WriteString(m.contactSearch.View() + "\n\n")
+	lines = append(lines, m.contactSearch.View())
+	lines = append(lines, "")
+
+	maxItems := m.maxVisibleContacts()
 
 	if m.loadingContact {
-		b.WriteString(statusStyle.Render("  Loading contact cache from local session...\n\n"))
-	} else if len(m.filteredList) == 0 {
-		b.WriteString(statusStyle.Render("  No contacts found matching search.\n\n"))
-	} else {
-		maxItems := 10
-		if m.height > 12 {
-			maxItems = max(5, m.height-12)
+		lines = append(lines, statusStyle.Render("  Loading contacts..."))
+		for k := 1; k < maxItems; k++ {
+			lines = append(lines, "")
 		}
-		start := 0
-		if m.contactCursor >= maxItems {
-			start = m.contactCursor - maxItems + 1
+	} else if len(m.filteredList) == 0 {
+		query := m.contactSearch.Value()
+		lines = append(lines, statusStyle.Render(fmt.Sprintf("  No contacts found matching %q", query)))
+		for k := 1; k < maxItems; k++ {
+			lines = append(lines, "")
+		}
+	} else {
+		start := m.contactOffset
+		if start < 0 {
+			start = 0
+		}
+		if start >= len(m.filteredList) {
+			start = max(0, len(m.filteredList)-1)
 		}
 		end := min(len(m.filteredList), start+maxItems)
 
 		for i := start; i < end; i++ {
 			c := m.filteredList[i]
 			label := c.Name
+			phone := ""
 			if c.IsGroup {
-				label = "👥 [Group] " + c.Name
-			} else if c.PushName != "" && c.PushName != c.Name && !strings.HasPrefix(c.Name, "💬") {
-				label += fmt.Sprintf(" (%s)", c.PushName)
-			}
-			phone := c.JID
-			if strings.Contains(c.JID, "@") {
-				phone = strings.Split(c.JID, "@")[0]
+				phone = "[Group]"
+			} else {
+				phone = c.JID
+				if idx := strings.Index(phone, "@"); idx != -1 {
+					phone = phone[:idx]
+				}
+				if c.PushName != "" && c.PushName != c.Name && !strings.HasPrefix(c.Name, "💬") {
+					label += fmt.Sprintf(" (%s)", c.PushName)
+				}
 			}
 
-			if i == m.contactCursor {
-				b.WriteString(fmt.Sprintf("> %s  %s\n",
-					selectedChatStyle.Render(label),
-					statusStyle.Render(phone),
-				))
-			} else {
-				b.WriteString(fmt.Sprintf("  %s  %s\n",
-					normalChatStyle.Render(label),
-					statusStyle.Render(phone),
-				))
+			prefix := "  "
+			isSelected := (i == m.contactCursor)
+			if isSelected {
+				prefix = "> "
 			}
+
+			prefixLen := 2
+			phoneLen := len([]rune(phone))
+			avail := max(10, cw-prefixLen-phoneLen-2)
+			rLabel := []rune(label)
+			if len(rLabel) > avail {
+				label = string(rLabel[:avail-3]) + "..."
+			}
+
+			labelLen := len([]rune(label))
+			gapLen := max(2, cw-(prefixLen+labelLen+phoneLen))
+			gap := strings.Repeat(" ", gapLen)
+
+			var styledLabel string
+			if isSelected {
+				styledLabel = selectedTitleStyle.Render(label)
+			} else {
+				styledLabel = normalTitleStyle.Render(label)
+			}
+			styledPhone := statusStyle.Render(phone)
+
+			lines = append(lines, prefix+styledLabel+gap+styledPhone)
+		}
+
+		rendered := end - start
+		for k := rendered; k < maxItems; k++ {
+			lines = append(lines, "")
 		}
 	}
 
-	b.WriteString("\n" + helpStyle.Render("[↑/↓] Navigate · [Enter] Select & Compose · [Esc] Cancel"))
+	lines = append(lines, "")
+	lines = append(lines, helpStyle.Render("[↑/↓] Navigate · [Enter] Select & Compose · [Esc] Cancel"))
 
-	return b.String()
+	return lines
 }
 
 func max(a, b int) int {

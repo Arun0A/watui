@@ -14,4 +14,5 @@
 # Go build cache & tooling
 .envrc
 .direnv/
+.vscode/
 
