@@ -1101,7 +1101,8 @@ func (m *Model) View() string {
 		b.WriteString("\n")
 	}
 	for i, l := range lines {
-		b.WriteString(prefix + l)
+		b.WriteString(prefix)
+		b.WriteString(l)
 		if i < len(lines)-1 {
 			b.WriteString("\n")
 		}
