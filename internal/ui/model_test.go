@@ -311,6 +311,12 @@ func TestChatViewportAndScrolling(t *testing.T) {
 	if len(chatLines) > model.height {
 		t.Errorf("Chat view lines (%d) exceeded model height (%d)", len(chatLines), model.height)
 	}
+
+	// Verify that the line directly preceding the message input box is empty padding
+	inputIdx := len(chatLines) - 2
+	if chatLines[inputIdx-1] != "" {
+		t.Errorf("Expected blank padding line directly above message input box, got: %q", chatLines[inputIdx-1])
+	}
 }
 
 func TestViewLineCountNeverExceedsHeight(t *testing.T) {

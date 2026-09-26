@@ -1299,7 +1299,7 @@ func (m *Model) renderChatView() []string {
 		}
 	}
 
-	availH := max(4, m.maxCanvasHeight()-5)
+	availH := max(3, m.maxCanvasHeight()-6)
 	scrollInfo := ""
 
 	if len(msgLines) <= availH {
@@ -1327,6 +1327,8 @@ func (m *Model) renderChatView() []string {
 		lines = append(lines, "")
 	}
 
+	// One line padding on top of the message box
+	lines = append(lines, "")
 	lines = append(lines, m.input.View())
 	lines = append(lines, helpStyle.Render("[Enter] Send · [Esc] Back"+scrollInfo))
 
