@@ -56,5 +56,8 @@ preview:
 # file_picker: "kdialog --getopenfilename"
 # file_picker: "yazi"
 
-
-
+# 5. Companion Device Name
+# Name registered and displayed in WhatsApp mobile under Settings -> Linked Devices.
+# Sent during first-time QR pairing registration.
+# Default: "WA-TUI"
+# device_name: "WA-TUI"

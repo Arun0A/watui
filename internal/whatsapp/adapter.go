@@ -19,6 +19,7 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -28,11 +29,16 @@ import (
 	"watui/internal/domain"
 )
 
+func init() {
+	store.SetOSInfo("WA-TUI", [3]uint32{0, 1, 0})
+}
+
 // Config holds configuration for the WhatsApp adapter.
 type Config struct {
-	DBPath   string
-	LogFile  string
-	LogLevel string
+	DBPath     string
+	LogFile    string
+	LogLevel   string
+	DeviceName string
 }
 
 // Adapter implements domain.WhatsAppAdapter using whatsmeow.
@@ -93,6 +99,12 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		cfg.LogFile = "watui.log"
 	}
 
+	deviceName := strings.TrimSpace(cfg.DeviceName)
+	if deviceName == "" {
+		deviceName = "WA-TUI"
+	}
+	store.SetOSInfo(deviceName, [3]uint32{0, 1, 0})
+
 	dbLog, err := NewFileLogger(cfg.LogFile, "Database", cfg.LogLevel)
 	if err != nil {
 		dbLog = waLog.Noop
@@ -150,7 +162,10 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 					updates = append(updates, lidUpdate{oldChatID: oldID, newChatID: pn + "@s.whatsapp.net"})
 				}
 			}
-			rows.Close()
+			if err := rows.Err(); err != nil {
+				clientLog.Errorf("failed to iterate LID migration rows: %v", err)
+			}
+			_ = rows.Close()
 			for _, u := range updates {
 				_, _ = localDB.Exec("UPDATE watui_unread_messages SET chat_id = ? WHERE chat_id = ?", u.newChatID, u.oldChatID)
 			}
@@ -534,6 +549,9 @@ func (a *Adapter) getLocalGroups() []domain.Contact {
 			})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return groups
+	}
 	return groups
 }
 
@@ -858,6 +876,9 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 			}
 			msgs = append(msgs, m)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return msgs, fmt.Errorf("failed during unread messages row iteration: %w", err)
 	}
 	return msgs, nil
 }

@@ -43,9 +43,10 @@ func main() {
 
 	// 2. Initialize WhatsApp Adapter (Encapsulated Protocol Layer)
 	adapter, err := whatsapp.NewAdapter(ctx, whatsapp.Config{
-		DBPath:   *dbPath,
-		LogFile:  *logFile,
-		LogLevel: *logLevel,
+		DBPath:     *dbPath,
+		LogFile:    *logFile,
+		LogLevel:   *logLevel,
+		DeviceName: appCfg.GetDeviceName(),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing adapter: %v\n", err)

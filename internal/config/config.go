@@ -26,6 +26,9 @@ type Config struct {
 	// FilePicker specifies an optional custom command to open a file picker.
 	FilePicker string `json:"file_picker" yaml:"file_picker"`
 
+	// DeviceName specifies the companion client name registered in WhatsApp Linked Devices (default: "WA-TUI").
+	DeviceName string `json:"device_name" yaml:"device_name"`
+
 	// Muted lists chat JIDs, phone numbers, or group/contact names to hide from unread.
 	Muted []string `json:"muted" yaml:"muted"`
 
@@ -89,6 +92,14 @@ func (c *Config) GetFilePickerCommand() string {
 		return strings.TrimSpace(c.FilePicker)
 	}
 	return ""
+}
+
+// GetDeviceName returns the configured companion device name, or "WA-TUI" by default.
+func (c *Config) GetDeviceName() string {
+	if c != nil && strings.TrimSpace(c.DeviceName) != "" {
+		return strings.TrimSpace(c.DeviceName)
+	}
+	return "WA-TUI"
 }
 
 
