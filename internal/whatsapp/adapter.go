@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -96,9 +97,6 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	if cfg.DBPath == "" {
 		cfg.DBPath = "watui.db"
 	}
-	if cfg.LogFile == "" {
-		cfg.LogFile = "watui.log"
-	}
 
 	deviceName := strings.TrimSpace(cfg.DeviceName)
 	if deviceName == "" {
@@ -106,18 +104,21 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	}
 	store.SetOSInfo(deviceName, [3]uint32{0, 1, 0})
 
-	dbLog, err := NewFileLogger(cfg.LogFile, "Database", cfg.LogLevel)
+	cleanLog := strings.TrimSpace(cfg.LogFile)
+	dbLog, err := NewFileLogger(cleanLog, "Database", cfg.LogLevel)
 	if err != nil {
 		dbLog = waLog.Noop
 	}
-	clientLog, err := NewFileLogger(cfg.LogFile, "Client", cfg.LogLevel)
+	clientLog, err := NewFileLogger(cleanLog, "Client", cfg.LogLevel)
 	if err != nil {
 		clientLog = waLog.Noop
 	}
 
 	dbDir := filepath.Dir(cfg.DBPath)
 	if dbDir == "" || dbDir == "." {
-		if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+		if runtime.GOOS == "windows" {
+			dbDir = "."
+		} else if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
 			dbDir = filepath.Join(xdgData, "watui")
 		} else if home, err := os.UserHomeDir(); err == nil {
 			dbDir = filepath.Join(home, ".local", "share", "watui")

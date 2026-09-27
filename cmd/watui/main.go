@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -21,11 +22,18 @@ import (
 func main() {
 	defaultDB := config.DefaultDBPath()
 	dbPath := flag.String("db", "", "Path to SQLite session and cache database (default: "+defaultDB+")")
-	logFile := flag.String("log-file", "watui.log", "File to write protocol and network logs to (or 'none' to disable)")
+	logFile := flag.String("log-file", "", "File to write protocol and network logs to (disabled by default)")
 	logLevel := flag.String("log", "WARN", "Protocol log level (DEBUG, INFO, WARN, ERROR)")
 	cliMode := flag.Bool("cli", false, "Run in headless CLI mode instead of interactive TUI")
 	jsonOutput := flag.Bool("json", false, "Print extracted messages as raw JSON (used with -cli)")
-	configFile := flag.String("config", "", "Path to optional YAML or JSON config file (default: ./watui.yaml or ~/.config/watui/config.yaml)")
+
+	configHelp := "Path to optional YAML or JSON config file (default: ./watui.yaml"
+	if runtime.GOOS != "windows" {
+		configHelp += " or ~/.config/watui/config.yaml)"
+	} else {
+		configHelp += ")"
+	}
+	configFile := flag.String("config", "", configHelp)
 	flag.Parse()
 
 	// Load optional declarative configuration

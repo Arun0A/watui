@@ -81,27 +81,19 @@ jobs:
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
 
       # -----------------------------------------------------------
-      # Windows Packaging (Portable + Standalone .zip)
+      # Windows Packaging (Portable .zip)
       # -----------------------------------------------------------
       - name: Package Windows Archives
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          # 1. Windows Portable Package: contains binary + default watui.yaml (runs self-contained in folder)
+          # Windows Portable Package: contains binary + default watui.yaml (runs self-contained in folder)
           PORTABLE_DIR="watui-${{ matrix.target }}-portable"
           mkdir -p "$PORTABLE_DIR"
           cp watui.exe "$PORTABLE_DIR/"
           cp watui.example.yaml "$PORTABLE_DIR/watui.yaml"
           cp README.md LICENSE "$PORTABLE_DIR/"
           7z a "${PORTABLE_DIR}.zip" "$PORTABLE_DIR"
-
-          # 2. Windows Standalone Package: for installing to PATH (uses standard %APPDATA%/watui)
-          STANDALONE_DIR="watui-${{ matrix.target }}-standalone"
-          mkdir -p "$STANDALONE_DIR"
-          cp watui.exe "$STANDALONE_DIR/"
-          cp watui.example.yaml "$STANDALONE_DIR/"
-          cp README.md LICENSE "$STANDALONE_DIR/"
-          7z a "${STANDALONE_DIR}.zip" "$STANDALONE_DIR"
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4

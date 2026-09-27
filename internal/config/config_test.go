@@ -117,6 +117,7 @@ func TestPreviewConfig(t *testing.T) {
 preview:
   image: "feh -."
   video: "vlc"
+  audio: "custom-audio-player"
   sticker: "custom-sticker-cmd"
   document: "zathura"
 `
@@ -137,6 +138,9 @@ preview:
 	if cfg.GetPreviewCommand("video") != "vlc" {
 		t.Errorf("Expected vlc, got %s", cfg.GetPreviewCommand("video"))
 	}
+	if cfg.GetPreviewCommand("audio") != "custom-audio-player" {
+		t.Errorf("Expected custom-audio-player, got %s", cfg.GetPreviewCommand("audio"))
+	}
 	if cfg.GetPreviewCommand("sticker") != "custom-sticker-cmd" {
 		t.Errorf("Expected custom-sticker-cmd, got %s", cfg.GetPreviewCommand("sticker"))
 	}
@@ -151,6 +155,9 @@ preview:
 	}
 	if emptyCfg.GetPreviewCommand("video") != "mpv" {
 		t.Errorf("Expected default mpv for video, got %s", emptyCfg.GetPreviewCommand("video"))
+	}
+	if emptyCfg.GetPreviewCommand("audio") != "mpv --force-window" {
+		t.Errorf("Expected default mpv --force-window for audio, got %s", emptyCfg.GetPreviewCommand("audio"))
 	}
 	if emptyCfg.GetPreviewCommand("sticker") != "mpv --loop=inf" {
 		t.Errorf("Expected default mpv --loop=inf for sticker, got %s", emptyCfg.GetPreviewCommand("sticker"))

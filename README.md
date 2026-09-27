@@ -58,18 +58,15 @@ nix develop github:Arun0A/watui
 
 ### Windows
 
-#### 1. Portable Version (`watui-windows-amd64-portable.zip`)
-1. Extract the zip file anywhere (e.g. `C:\Tools\watui`).
-2. The folder contains `watui.exe` and a pre-configured `watui.yaml`.
-3. In this mode, the session database (`watui.db`) and logs stay strictly inside this folder.
-4. Run `watui.exe` from PowerShell or Command Prompt.
-
-#### 2. Standalone Version (`watui-windows-amd64-standalone.zip`)
-1. Extract `watui.exe` to a directory in your system `%PATH%` (e.g., `C:\Users\<YourUser>\bin` or `C:\Program Files\watui`).
-2. In standalone mode, `watui` stores its database in `%LOCALAPPDATA%\watui` and config in `%APPDATA%\watui\config.yaml`.
-3. *(Optional)* Add the directory to your Windows PATH:
-   - Press <kbd>Win</kbd> + <kbd>X</kbd> ➔ **System** ➔ **Advanced system settings** ➔ **Environment Variables**.
-   - Edit `Path` under *User variables* and add the folder path where you placed `watui.exe`.
+1. Download `watui-windows-amd64-portable.zip` from the latest release.
+2. Extract the zip file anywhere (e.g. `C:\Tools\watui` or your preferred location).
+3. The folder contains `watui.exe` and `watui.yaml`.
+4. **100% Self-Contained**: The session database (`watui.db`), encryption key (`.watui_key`), and config stay strictly inside this folder without touching `%LOCALAPPDATA%` or non-standard directories.
+5. Launch `watui.exe` from PowerShell, Command Prompt, or Windows Terminal:
+   ```powershell
+   .\watui.exe
+   ```
+   *(Optional)* To run `watui` from any terminal, add the folder containing `watui.exe` to your Windows `Path` environment variable.
 
 ---
 
@@ -130,7 +127,8 @@ nix develop github:Arun0A/watui
 | <kbd>Esc</kbd> | Back to inbox |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Scroll conversation history up / down |
 | <kbd>Alt</kbd> + <kbd>p</kbd> | Preview selected media attachment |
-| <kbd>Alt</kbd> + <kbd>s</kbd> | Cycle targeted media in the message thread |
+| <kbd>Alt</kbd> + <kbd>x</kbd> | Stop media / audio playback immediately |
+| <kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd> | Cycle targeted media in the message thread |
 | <kbd>Alt</kbd> + <kbd>f</kbd> | Open file picker to attach and send a file |
 | <kbd>Ctrl</kbd> + <kbd>u</kbd> | Clear current input line |
 

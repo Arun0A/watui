@@ -863,6 +863,12 @@ func TestMediaPreviewKeybindings(t *testing.T) {
 	if !strings.Contains(model.previewStatus, "Saved to") {
 		t.Errorf("Expected previewStatus to say 'Saved to...', got %q", model.previewStatus)
 	}
+
+	// Test Alt+X stops media playback
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}, Alt: true})
+	if !strings.Contains(model.previewStatus, "Playback stopped") {
+		t.Errorf("Expected previewStatus to say 'Playback stopped', got %q", model.previewStatus)
+	}
 }
 
 func TestDocumentActionKeybindings(t *testing.T) {

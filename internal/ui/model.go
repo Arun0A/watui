@@ -87,6 +87,10 @@ type Model struct {
 	statusChan   chan domain.ConnectionStatus
 	dismissChan  chan string
 	contactsChan chan []domain.Contact
+
+	// Active external preview/player process
+	activeViewerCmd *exec.Cmd
+	viewerMu        sync.Mutex
 }
 
 // Msg types for Tea event loop
@@ -831,6 +835,7 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		m.stopActiveViewer()
 		return tea.Quit
 
 	case "j", "down":
@@ -987,6 +992,7 @@ func (m *Model) dismissUnread(chatID string) {
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
+		m.stopActiveViewer()
 		m.previewStatus = ""
 		m.confirmSave = false
 		m.confirmDocAction = false
@@ -995,7 +1001,13 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		return tea.ClearScreen
 
 	case "ctrl+c":
+		m.stopActiveViewer()
 		return tea.Quit
+
+	case "alt+x":
+		m.stopActiveViewer()
+		m.previewStatus = "Playback stopped"
+		return nil
 
 	case "alt+p":
 		m.confirmSave = false
@@ -1666,9 +1678,9 @@ func (m *Model) renderChatView() []string {
 	mediaIndices := m.getChatMediaIndices()
 	mediaHelp := ""
 	if len(mediaIndices) > 1 {
-		mediaHelp = fmt.Sprintf(" · [Alt+P] Preview (%d/%d) · [Alt+↑/↓] Media", m.selectedMediaIdx+1, len(mediaIndices))
+		mediaHelp = fmt.Sprintf(" · [Alt+P] Preview (%d/%d) · [Alt+↑/↓] Media · [Alt+X] Stop", m.selectedMediaIdx+1, len(mediaIndices))
 	} else if len(mediaIndices) == 1 {
-		mediaHelp = " · [Alt+P] Preview Media"
+		mediaHelp = " · [Alt+P] Preview Media · [Alt+X] Stop"
 	}
 
 	helpText := "[Enter] Send · [Alt+F] Attach · [Esc] Back" + mediaHelp + scrollInfo
@@ -1816,7 +1828,7 @@ func (m *Model) previewMediaCmd(msg domain.Message) tea.Cmd {
 		if err != nil {
 			return mediaPreviewErrMsg{Err: err}
 		}
-		if err := launchViewer(cmdStr, filePath); err != nil {
+		if err := m.launchViewer(cmdStr, filePath); err != nil {
 			return mediaPreviewErrMsg{Err: err}
 		}
 		return mediaPreviewSuccessMsg{Path: filePath}
@@ -1857,7 +1869,7 @@ func (m *Model) downloadAndOpenDocCmd(msg domain.Message) tea.Cmd {
 		if err != nil {
 			return mediaPreviewErrMsg{Err: err}
 		}
-		if err := launchViewer(cmdStr, filePath); err != nil {
+		if err := m.launchViewer(cmdStr, filePath); err != nil {
 			destPath, saveErr := saveToDownloads(filePath)
 			if saveErr != nil {
 				return mediaPreviewErrMsg{Err: fmt.Errorf("open failed (%v) and save failed (%w)", err, saveErr)}
@@ -1944,9 +1956,20 @@ func saveToDownloads(srcPath string) (string, error) {
 	return displayPath, nil
 }
 
-func launchViewer(cmdStr string, filePath string) error {
+func (m *Model) stopActiveViewer() {
+	m.viewerMu.Lock()
+	defer m.viewerMu.Unlock()
+	if m.activeViewerCmd != nil && m.activeViewerCmd.Process != nil {
+		_ = m.activeViewerCmd.Process.Kill()
+		m.activeViewerCmd = nil
+	}
+}
+
+func (m *Model) launchViewer(cmdStr string, filePath string) error {
+	m.stopActiveViewer()
+
 	if cmdStr == "" {
-		cmdStr = "mpv --loop=inf"
+		cmdStr = "mpv --force-window"
 	}
 
 	var cmd *exec.Cmd
@@ -1960,7 +1983,7 @@ func launchViewer(cmdStr string, filePath string) error {
 	} else {
 		parts := strings.Fields(cmdStr)
 		if len(parts) == 0 {
-			parts = []string{"mpv"}
+			parts = []string{"mpv", "--force-window"}
 		}
 		args := append(parts[1:], filePath)
 		cmd = exec.Command(parts[0], args...)
@@ -1973,8 +1996,18 @@ func launchViewer(cmdStr string, filePath string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+
+	m.viewerMu.Lock()
+	m.activeViewerCmd = cmd
+	m.viewerMu.Unlock()
+
 	go func() {
 		_ = cmd.Wait()
+		m.viewerMu.Lock()
+		if m.activeViewerCmd == cmd {
+			m.activeViewerCmd = nil
+		}
+		m.viewerMu.Unlock()
 	}()
 	return nil
 }

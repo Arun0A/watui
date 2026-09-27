@@ -14,6 +14,7 @@ import (
 type PreviewConfig struct {
 	Image    string `json:"image" yaml:"image"`
 	Video    string `json:"video" yaml:"video"`
+	Audio    string `json:"audio" yaml:"audio"`
 	Sticker  string `json:"sticker" yaml:"sticker"`
 	Document string `json:"document" yaml:"document"`
 }
@@ -53,6 +54,9 @@ func DefaultDBPath() string {
 	if _, err := os.Stat("watui.db"); err == nil {
 		return "watui.db"
 	}
+	if runtime.GOOS == "windows" {
+		return "watui.db"
+	}
 	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
 		return filepath.Join(xdgData, "watui", "watui.db")
 	}
@@ -85,6 +89,10 @@ func (c *Config) GetPreviewCommand(msgType string) string {
 			if c.Preview.Video != "" {
 				return c.Preview.Video
 			}
+		case "audio":
+			if c.Preview.Audio != "" {
+				return c.Preview.Audio
+			}
 		case "sticker":
 			if c.Preview.Sticker != "" {
 				return c.Preview.Sticker
@@ -98,6 +106,8 @@ func (c *Config) GetPreviewCommand(msgType string) string {
 	switch strings.ToLower(msgType) {
 	case "video":
 		return "mpv"
+	case "audio":
+		return "mpv --force-window"
 	case "document":
 		return defaultDocumentCommand()
 	default:
@@ -163,20 +173,42 @@ func defaultCandidatePaths() []string {
 		"watui.json",
 	}
 
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" {
-		xdgConfig := os.Getenv("XDG_CONFIG_HOME")
-		if xdgConfig == "" {
-			xdgConfig = filepath.Join(home, ".config")
-		}
+	if exeDir := getExeDir(); exeDir != "" && exeDir != "." {
 		paths = append(paths,
-			filepath.Join(xdgConfig, "watui", "config.yaml"),
-			filepath.Join(xdgConfig, "watui", "config.yml"),
-			filepath.Join(xdgConfig, "watui", "config.json"),
+			filepath.Join(exeDir, "watui.yaml"),
+			filepath.Join(exeDir, "watui.yml"),
+			filepath.Join(exeDir, "watui.json"),
 		)
 	}
 
+	if runtime.GOOS != "windows" {
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+			if xdgConfig == "" {
+				xdgConfig = filepath.Join(home, ".config")
+			}
+			paths = append(paths,
+				filepath.Join(xdgConfig, "watui", "config.yaml"),
+				filepath.Join(xdgConfig, "watui", "config.yml"),
+				filepath.Join(xdgConfig, "watui", "config.json"),
+			)
+		}
+	}
+
 	return paths
+}
+
+func getExeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	realExe, err := filepath.EvalSymlinks(exe)
+	if err == nil {
+		return filepath.Dir(realExe)
+	}
+	return filepath.Dir(exe)
 }
 
 // GetMuted returns all unique, trimmed mute rules.

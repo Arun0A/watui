@@ -29,23 +29,26 @@
 #   - "+18005550199"
 #   - "120363000000000000@g.us"
 
-# 3. Media Preview (Images, Videos, Stickers, Documents)
+# 3. Media Preview (Images, Videos, Audio, Stickers, Documents)
 # Command used to preview media attachments on demand.
 # Defaults:
 #   image:    "mpv --loop=inf"
 #   video:    "mpv"
+#   audio:    "mpv --force-window"
 #   sticker:  "mpv --loop=inf"
 #   document: "xdg-open" (opens in default OS viewer, e.g. PDF/office)
 #
 # preview:
 #   image: "mpv --loop=inf"
 #   video: "mpv"
+#   audio: "mpv --force-window"
 #   sticker: "mpv --loop=inf"
 #   document: "xdg-open"
 #
 # Custom command examples:
 #   image: "feh -."
 #   video: "vlc"
+#   audio: "ffplay -nodisp -autoexit"
 #   document: "zathura"
 
 # 4. File Picker Command (Alt+F)
