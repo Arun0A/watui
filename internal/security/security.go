@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	_ "github.com/mutecomm/go-sqlcipher/v4"
@@ -24,20 +26,14 @@ const (
 	HKDFInfoContext = "watui-database-v1"
 )
 
-// GetMachineID attempts to read the machine ID from Linux systemd or D-Bus locations.
-// Falls back to hostname + architecture if unavailable.
+// GetMachineID attempts to read the unique hardware/OS machine ID across platforms:
+// - Linux: /etc/machine-id or /var/lib/dbus/machine-id
+// - Windows: HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography\MachineGuid
+// - macOS: IOPlatformUUID
+// - Fallback: hostname
 func GetMachineID() string {
-	paths := []string{
-		"/etc/machine-id",
-		"/var/lib/dbus/machine-id",
-	}
-	for _, p := range paths {
-		if data, err := os.ReadFile(p); err == nil {
-			trimmed := strings.TrimSpace(string(data))
-			if len(trimmed) > 0 {
-				return trimmed
-			}
-		}
+	if id, err := getPlatformMachineID(); err == nil && len(strings.TrimSpace(id)) > 0 {
+		return strings.TrimSpace(id)
 	}
 
 	hostname, err := os.Hostname()
@@ -45,6 +41,16 @@ func GetMachineID() string {
 		hostname = "watui-host"
 	}
 	return "fallback-" + hostname
+}
+
+// GetUserIdentifier returns the system user identifier:
+// - Linux / macOS: UID (e.g. "1000")
+// - Windows: User SID (e.g. "S-1-5-21-...") or username
+func GetUserIdentifier() string {
+	if u, err := user.Current(); err == nil && u.Uid != "" {
+		return u.Uid
+	}
+	return strconv.Itoa(os.Getuid())
 }
 
 // GetOrCreateLocalSalt returns or generates a 32-byte cryptographically secure salt in keyDir with 0600 permissions.
@@ -71,7 +77,7 @@ func GetOrCreateLocalSalt(keyDir string) ([]byte, error) {
 }
 
 // DeriveDatabaseKey computes a 32-byte machine-bound AES key using HKDF-SHA256.
-// It combines the host machine-id, user UID, and the local secret salt.
+// It combines the host machine-id, user identifier, and the local secret salt.
 // Returns a 64-character hex string suitable for SQLCipher.
 func DeriveDatabaseKey(keyDir string) (string, error) {
 	salt, err := GetOrCreateLocalSalt(keyDir)
@@ -80,8 +86,8 @@ func DeriveDatabaseKey(keyDir string) (string, error) {
 	}
 
 	machineID := GetMachineID()
-	uid := os.Getuid()
-	ikm := []byte(fmt.Sprintf("%s:%d", machineID, uid))
+	userIdentifier := GetUserIdentifier()
+	ikm := fmt.Appendf(nil, "%s:%s", machineID, userIdentifier)
 
 	hkdfReader := hkdf.New(sha256.New, ikm, salt, []byte(HKDFInfoContext))
 	keyBytes := make([]byte, 32)
