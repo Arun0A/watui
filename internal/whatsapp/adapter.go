@@ -66,6 +66,9 @@ type Adapter struct {
 
 	mediaMu    sync.RWMutex
 	mediaCache map[string]*waE2E.Message
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func (a *Adapter) cacheMediaMessage(id string, raw *waE2E.Message) {
@@ -156,6 +159,9 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open local database: %w", err)
 	}
+	localDB.SetMaxOpenConns(1)
+	localDB.SetMaxIdleConns(1)
+
 	security.EnsureSecurePermissions(cfg.DBPath)
 	if localDB != nil {
 		_, _ = localDB.Exec(`CREATE TABLE IF NOT EXISTS watui_groups (
@@ -173,35 +179,38 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			type TEXT,
 			is_from_me BOOLEAN,
 			raw_message BLOB
-		);`)
+		);
+		CREATE INDEX IF NOT EXISTS idx_watui_unread_chat_id ON watui_unread_messages(chat_id);`)
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN chat_name TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN raw_message BLOB;")
 
-		// Migrate any existing @lid unread messages to phone JIDs if mapped in whatsmeow_lid_map
-		rows, err := localDB.Query(`SELECT DISTINCT m.chat_id, l.pn FROM watui_unread_messages m 
-			JOIN whatsmeow_lid_map l ON (m.chat_id = l.lid || '@lid' OR m.chat_id LIKE l.lid || ':%@lid')`)
-		if err == nil {
-			type lidUpdate struct {
-				oldChatID string
-				newChatID string
-			}
-			var updates []lidUpdate
-			for rows.Next() {
-				var oldID, pn string
-				if err := rows.Scan(&oldID, &pn); err == nil && pn != "" {
-					updates = append(updates, lidUpdate{oldChatID: oldID, newChatID: pn + "@s.whatsapp.net"})
+		// Only run LID migration if there are actually @lid chats present in watui_unread_messages
+		var hasLID int
+		_ = localDB.QueryRow("SELECT COUNT(*) FROM watui_unread_messages WHERE chat_id LIKE '%@lid'").Scan(&hasLID)
+		if hasLID > 0 {
+			rows, err := localDB.Query(`SELECT DISTINCT m.chat_id, l.pn FROM watui_unread_messages m 
+				JOIN whatsmeow_lid_map l ON (m.chat_id = l.lid || '@lid' OR m.chat_id LIKE l.lid || ':%@lid')`)
+			if err == nil {
+				type lidUpdate struct {
+					oldChatID string
+					newChatID string
 				}
-			}
-			if err := rows.Err(); err != nil {
-				clientLog.Errorf("failed to iterate LID migration rows: %v", err)
-			}
-			_ = rows.Close()
-			for _, u := range updates {
-				_, _ = localDB.Exec("UPDATE watui_unread_messages SET chat_id = ? WHERE chat_id = ?", u.newChatID, u.oldChatID)
+				var updates []lidUpdate
+				for rows.Next() {
+					var oldID, pn string
+					if err := rows.Scan(&oldID, &pn); err == nil && pn != "" {
+						updates = append(updates, lidUpdate{oldChatID: oldID, newChatID: pn + "@s.whatsapp.net"})
+					}
+				}
+				_ = rows.Close()
+				for _, u := range updates {
+					_, _ = localDB.Exec("UPDATE watui_unread_messages SET chat_id = ? WHERE chat_id = ?", u.newChatID, u.oldChatID)
+				}
 			}
 		}
 	}
 
+	adapterCtx, cancel := context.WithCancel(ctx)
 	adapter := &Adapter{
 		client:        client,
 		container:     container,
@@ -209,6 +218,8 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		config:        cfg,
 		currentStatus: domain.StatusDisconnected,
 		mediaCache:    make(map[string]*waE2E.Message),
+		ctx:           adapterCtx,
+		cancel:        cancel,
 	}
 
 	client.AddEventHandler(adapter.handleEvent)
@@ -283,6 +294,7 @@ func (a *Adapter) Connect(ctx context.Context) error {
 		// Session already exists in SQLite, connect directly
 		err := a.client.Connect()
 		if err != nil {
+			a.setStatus(domain.StatusDisconnected)
 			return fmt.Errorf("failed to connect with existing session: %w", err)
 		}
 	}
@@ -290,14 +302,31 @@ func (a *Adapter) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Disconnect gracefully shuts down the connection.
+// Disconnect gracefully shuts down the connection within 1 second.
 func (a *Adapter) Disconnect() {
-	if a.client != nil {
-		a.client.Disconnect()
+	if a.cancel != nil {
+		a.cancel()
 	}
-	if a.localDB != nil {
-		_ = a.localDB.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if a.client != nil {
+			a.client.Disconnect()
+		}
+		if a.localDB != nil {
+			_ = a.localDB.Close()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		if a.localDB != nil {
+			_ = a.localDB.Close()
+		}
 	}
+
 	a.setStatus(domain.StatusDisconnected)
 }
 
@@ -553,7 +582,7 @@ func (a *Adapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
 	contacts := a.fetchLocalContacts(ctx)
 
 	// Refresh cache in background (including network groups from WhatsApp)
-	go a.refreshContactsCache(context.Background())
+	go a.refreshContactsCache(a.ctx)
 
 	return contacts, nil
 }
@@ -674,13 +703,15 @@ func (a *Adapter) refreshContactsCache(ctx context.Context) {
 		a.refreshMu.Unlock()
 	}()
 
-	// Wait up to 10 seconds for socket connection to complete
-	if !a.client.WaitForConnection(10 * time.Second) {
+	// Wait up to 3 seconds for socket connection to complete
+	if !a.client.WaitForConnection(3 * time.Second) {
 		return
 	}
 
-	// 1. Fetch joined groups from WhatsApp over WebSocket
-	groups, err := a.client.GetJoinedGroups(ctx)
+	// 1. Fetch joined groups from WhatsApp with 4-second timeout
+	groupCtx, groupCancel := context.WithTimeout(ctx, 4*time.Second)
+	groups, err := a.client.GetJoinedGroups(groupCtx)
+	groupCancel()
 	if err == nil && len(groups) > 0 {
 		a.saveLocalGroups(groups)
 	}
@@ -945,10 +976,10 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
 		a.setStatus(domain.StatusConnected)
-		go a.refreshContactsCache(context.Background())
+		go a.refreshContactsCache(a.ctx)
 		go func() {
 			// Catch up on any app state mutations (e.g. chats read on other devices)
-			_ = a.client.FetchAppState(context.Background(), appstate.WAPatchRegularLow, false, false)
+			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularLow, false, false)
 		}()
 
 	case *events.LoggedOut:

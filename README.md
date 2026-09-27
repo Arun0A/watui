@@ -8,7 +8,7 @@
 > 
 > **Then WA-TUI is for you.**
 
-Most of the time, you don't need your entire 5-year conversation history loaded into memory just to reply to someone. **watui** adopts an **Inbox Zero** philosophy: it shows only your unread messages, with message context persisting only for your active session. You can also start a new chat with any contact on demand, preview media (images, videos, documents), and send file attachments—all from the comfort of your terminal.
+Most of the time, you don't need your entire 5-year conversation history loaded into memory just to reply to someone. **watui** adopts an **Inbox Zero** philosophy: it shows only your unread messages, with message context persisting only for your active session. You can also start a new chat with any contact on demand, preview media (images, videos, audio, documents), and send file attachments.
 
 ---
 
@@ -61,8 +61,7 @@ nix develop github:Arun0A/watui
 1. Download `watui-windows-amd64-portable.zip` from the latest release.
 2. Extract the zip file anywhere (e.g. `C:\Tools\watui` or your preferred location).
 3. The folder contains `watui.exe` and `watui.yaml`.
-4. **100% Self-Contained**: The session database (`watui.db`), encryption key (`.watui_key`), and config stay strictly inside this folder without touching `%LOCALAPPDATA%` or non-standard directories.
-5. Launch `watui.exe` from PowerShell, Command Prompt, or Windows Terminal:
+4. Launch `watui.exe` from PowerShell, Command Prompt, or Windows Terminal:
    ```powershell
    .\watui.exe
    ```

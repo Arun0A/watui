@@ -175,5 +175,5 @@ func MigratePlaintextDatabase(dbPath, hexKey string) error {
 
 // BuildEncryptedDSN formats an SQLite connection string with SQLCipher key and WAL/foreign key options.
 func BuildEncryptedDSN(dbPath, hexKey string) string {
-	return fmt.Sprintf("file:%s?_pragma_key=%s&_foreign_keys=on", dbPath, hexKey)
+	return fmt.Sprintf("file:%s?_pragma_key=%s&_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL", dbPath, hexKey)
 }

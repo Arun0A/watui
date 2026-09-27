@@ -99,19 +99,17 @@ func main() {
 		select {
 		case <-connectedChan:
 			fmt.Println("[*] Pairing successful! Launching TUI...")
-			time.Sleep(1 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 		case <-sigChan:
 			fmt.Println("\n[*] Pairing aborted.")
 			adapter.Disconnect()
 			return
 		}
-	} else {
-		// Session exists, connect in background
-		err = adapter.Connect(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Connection failed: %v\n", err)
-			os.Exit(1)
-		}
+	} else if !*cliMode {
+		// Session exists: connect asynchronously in background so TUI launches instantly!
+		go func() {
+			_ = adapter.Connect(ctx)
+		}()
 	}
 
 	// 4. Run Mode: CLI Stream vs Interactive TUI
@@ -122,6 +120,13 @@ func main() {
 			fmt.Printf(" Loaded configuration from %s\n", appCfg.SourcePath)
 		}
 		fmt.Println("───────────────────────────────────────────────────────")
+
+		// In CLI mode, connect directly before streaming
+		err = adapter.Connect(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Connection failed: %v\n", err)
+			os.Exit(1)
+		}
 
 		adapter.OnMessage(func(msg domain.Message) {
 			if appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
@@ -145,6 +150,7 @@ func main() {
 
 		<-sigChan
 		fmt.Println("\n[*] Shutting down...")
+		cancel()
 		adapter.Disconnect()
 		return
 	}
@@ -165,5 +171,6 @@ func main() {
 		os.Exit(1)
 	}
 
+	cancel() // Abort background routines immediately
 	adapter.Disconnect()
 }
