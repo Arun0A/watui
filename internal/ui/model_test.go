@@ -1058,4 +1058,56 @@ func TestSendingStatusAndFilePickerConfig(t *testing.T) {
 	}
 }
 
+func TestResolvePickerAndTerminalPickerCmd(t *testing.T) {
+	// 1. Terminal file picker detection
+	cases := []struct {
+		cmd          string
+		expectedType string
+		isTerm       bool
+	}{
+		{"yazi", "yazi", true},
+		{"yazi --chooser-file=/tmp/foo && cat /tmp/foo", "yazi", true},
+		{"ranger", "ranger", true},
+		{"lf", "lf", true},
+		{"nnn", "nnn", true},
+		{"fzf", "fzf", true},
+		{"zenity --file-selection", "", false},
+		{"kdialog --getopenfilename", "", false},
+	}
+
+	for _, tc := range cases {
+		pType, isTerm := resolvePicker(tc.cmd)
+		if isTerm != tc.isTerm {
+			t.Errorf("Cmd %q: expected isTerm=%v, got %v", tc.cmd, tc.isTerm, isTerm)
+		}
+		if pType != tc.expectedType {
+			t.Errorf("Cmd %q: expected type=%q, got %q", tc.cmd, tc.expectedType, pType)
+		}
+	}
+
+	// 2. buildTerminalPickerCmd for yazi
+	cmd, outPath, err := buildTerminalPickerCmd("yazi", "yazi")
+	if err != nil {
+		t.Fatalf("buildTerminalPickerCmd failed: %v", err)
+	}
+	defer os.Remove(outPath)
+
+	if cmd.Path != "yazi" && !strings.HasSuffix(cmd.Path, "yazi") {
+		t.Errorf("Expected cmd to execute yazi, got %q", cmd.Path)
+	}
+	hasChooserArg := false
+	for _, arg := range cmd.Args {
+		if strings.HasPrefix(arg, "--chooser-file=") {
+			hasChooserArg = true
+			if !strings.Contains(arg, outPath) {
+				t.Errorf("Expected --chooser-file to contain outPath, got %q", arg)
+			}
+		}
+	}
+	if !hasChooserArg {
+		t.Errorf("Expected --chooser-file arg in %v", cmd.Args)
+	}
+}
+
+
 

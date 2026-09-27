@@ -379,6 +379,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.previewStatus = ""
 		}
+		return m, tea.ClearScreen
 
 	case filePickErrMsg:
 		if errors.Is(msg.Err, errNoFilePicker) {
@@ -386,6 +387,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.previewStatus = "File picker failed"
 		}
+		return m, tea.ClearScreen
 
 	case tea.KeyMsg:
 		if m.confirmDocAction {
@@ -1949,11 +1951,153 @@ func launchViewer(cmdStr string, filePath string) error {
 
 var errNoFilePicker = errors.New("no file selector found")
 
+func resolvePicker(customCmd string) (pickerType string, isTerminal bool) {
+	if strings.TrimSpace(customCmd) != "" {
+		trimmed := strings.TrimSpace(customCmd)
+		for _, term := range []string{"yazi", "ranger", "lf", "nnn", "fzf", "vifm"} {
+			if strings.HasPrefix(trimmed, term) || strings.Contains(trimmed, term) {
+				return term, true
+			}
+		}
+		return "", false
+	}
+
+	// Auto-detect based on OS and installed tools:
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return "", false // GUI dialogs default on Windows (PowerShell) and macOS (osascript)
+	}
+
+	// Linux / BSD: check if GUI dialogs exist
+	if _, err := exec.LookPath("zenity"); err == nil {
+		return "", false
+	}
+	if _, err := exec.LookPath("kdialog"); err == nil {
+		return "", false
+	}
+
+	// If no GUI dialogs, check for installed terminal file managers:
+	for _, term := range []string{"yazi", "ranger", "lf", "nnn", "fzf"} {
+		if _, err := exec.LookPath(term); err == nil {
+			return term, true
+		}
+	}
+
+	return "", false
+}
+
+func buildTerminalPickerCmd(pickerType, customCmd string) (*exec.Cmd, string, error) {
+	tmpFile, err := os.CreateTemp("", "watui_"+pickerType+"_*")
+	if err != nil {
+		return nil, "", err
+	}
+	outPath := tmpFile.Name()
+	_ = tmpFile.Close()
+
+	switch pickerType {
+	case "yazi":
+		args := []string{"--chooser-file=" + outPath}
+		if customCmd != "" {
+			parts := strings.Split(customCmd, "&&")
+			firstPart := strings.TrimSpace(parts[0])
+			words := strings.Fields(firstPart)
+			for i := 1; i < len(words); i++ {
+				w := words[i]
+				if strings.HasPrefix(w, "--chooser-file") {
+					continue
+				}
+				args = append(args, w)
+			}
+		}
+		return exec.Command("yazi", args...), outPath, nil
+
+	case "ranger":
+		args := []string{"--choosefile=" + outPath}
+		if customCmd != "" {
+			parts := strings.Split(customCmd, "&&")
+			firstPart := strings.TrimSpace(parts[0])
+			words := strings.Fields(firstPart)
+			for i := 1; i < len(words); i++ {
+				w := words[i]
+				if strings.HasPrefix(w, "--choosefile") {
+					continue
+				}
+				args = append(args, w)
+			}
+		}
+		return exec.Command("ranger", args...), outPath, nil
+
+	case "lf":
+		args := []string{"-selection-path=" + outPath}
+		if customCmd != "" {
+			parts := strings.Split(customCmd, "&&")
+			firstPart := strings.TrimSpace(parts[0])
+			words := strings.Fields(firstPart)
+			for i := 1; i < len(words); i++ {
+				w := words[i]
+				if strings.HasPrefix(w, "-selection-path") {
+					continue
+				}
+				args = append(args, w)
+			}
+		}
+		return exec.Command("lf", args...), outPath, nil
+
+	case "nnn":
+		return exec.Command("nnn", "-p", outPath), outPath, nil
+
+	case "fzf":
+		return exec.Command("sh", "-c", `fzf > "$1"`, "--", outPath), outPath, nil
+
+	default:
+		cmd := exec.Command("sh", "-c", customCmd+` > "$1"`, "--", outPath)
+		cmd.Env = append(os.Environ(), "WATUI_PICKER_FILE="+outPath)
+		return cmd, outPath, nil
+	}
+}
+
 func (m *Model) pickFileCmd() tea.Cmd {
 	customCmd := ""
 	if m.cfg != nil {
 		customCmd = m.cfg.GetFilePickerCommand()
 	}
+
+	pickerType, isTerm := resolvePicker(customCmd)
+	if isTerm {
+		execCmd, outPath, err := buildTerminalPickerCmd(pickerType, customCmd)
+		if err != nil {
+			return func() tea.Msg {
+				return filePickErrMsg{Err: err}
+			}
+		}
+		return tea.ExecProcess(execCmd, func(err error) tea.Msg {
+			defer os.Remove(outPath)
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					return filePickedMsg{Path: ""}
+				}
+				data, readErr := os.ReadFile(outPath)
+				if readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+					selected := strings.TrimSpace(string(data))
+					if idx := strings.Index(selected, "\n"); idx != -1 {
+						selected = strings.TrimSpace(selected[:idx])
+					}
+					return filePickedMsg{Path: selected}
+				}
+				return filePickErrMsg{Err: err}
+			}
+			data, readErr := os.ReadFile(outPath)
+			if readErr != nil {
+				return filePickErrMsg{Err: readErr}
+			}
+			selected := strings.TrimSpace(string(data))
+			if idx := strings.Index(selected, "\n"); idx != -1 {
+				selected = strings.TrimSpace(selected[:idx])
+			}
+			return filePickedMsg{Path: selected}
+		})
+	}
+
 	return func() tea.Msg {
 		path, err := openFilePicker(customCmd)
 		if err != nil {
