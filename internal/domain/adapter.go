@@ -46,7 +46,6 @@ type WhatsAppAdapter interface {
 	// SendFileMessage uploads and sends a local media or document file to a chat.
 	SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (Message, error)
 
-
 	// GetContacts retrieves all known contacts from local store.
 	GetContacts(ctx context.Context) ([]Contact, error)
 
@@ -71,4 +70,3 @@ type WhatsAppAdapter interface {
 	// DownloadMedia downloads the media attachment for a message on demand and returns the local file path.
 	DownloadMedia(ctx context.Context, msg Message) (string, error)
 }
-

@@ -121,8 +121,6 @@ func (c *Config) GetDeviceName() string {
 	return "WA-TUI"
 }
 
-
-
 // Load loads configuration from an explicit path or checks default paths.
 // If explicitPath is empty, it tries default paths:
 // 1. ./watui.yaml, ./watui.yml, ./watui.json

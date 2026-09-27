@@ -52,4 +52,3 @@ func (m Message) IsMedia() bool {
 		return false
 	}
 }
-

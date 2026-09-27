@@ -1346,5 +1346,3 @@ func (a *Adapter) DownloadMedia(ctx context.Context, msg domain.Message) (string
 
 	return filePath, nil
 }
-
-

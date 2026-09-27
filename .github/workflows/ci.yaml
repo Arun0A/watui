@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+# Cancel in-progress runs when a new push is made to the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------
+  # 1. Hygiene & Security Leak Prevention
+  # -------------------------------------------------------------
+  hygiene:
+    name: Code Hygiene & Secret Leak Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Verify no private config or database leaks
+        run: |
+          echo "Checking git index for forbidden files..."
+          LEAKED=0
+
+          # Check for private watui.yaml
+          if git ls-files watui.yaml | grep -q .; then
+            echo "::error file=watui.yaml::Forbidden file 'watui.yaml' is tracked in Git index!"
+            LEAKED=1
+          fi
+
+          # Check for SQLite database files
+          if git ls-files '*.db*' | grep -q .; then
+            echo "::error::SQLite database files (*.db*) must not be committed to Git!"
+            git ls-files '*.db*'
+            LEAKED=1
+          fi
+
+          # Check for private key / salt files
+          if git ls-files '*.key' | grep -q .; then
+            echo "::error::Private key files (*.key) must not be committed to Git!"
+            git ls-files '*.key'
+            LEAKED=1
+          fi
+
+          # Check for runtime log files
+          if git ls-files '*.log' | grep -q .; then
+            echo "::error::Log files (*.log) must not be committed to Git!"
+            git ls-files '*.log'
+            LEAKED=1
+          fi
+
+          if [ $LEAKED -ne 0 ]; then
+            exit 1
+          fi
+          echo "✔ No sensitive or forbidden files found in git index."
+
+      - name: Check code formatting (gofmt)
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "::error::The following Go files are not properly formatted:"
+            echo "$UNFORMATTED"
+            echo "Please run: gofmt -w ."
+            exit 1
+          fi
+          echo "✔ All Go files formatted correctly."
+
+      - name: Verify go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "::error::go.mod or go.sum is not tidy! Run 'go mod tidy' and commit the changes."
+            exit 1
+          fi
+          echo "✔ go.mod and go.sum are tidy."
+
+  # -------------------------------------------------------------
+  # 2. Static Analysis & Linter
+  # -------------------------------------------------------------
+  lint:
+    name: Lint & Static Analysis
+    needs: hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.6
+          args: --timeout=5m ./internal/config/... ./internal/security/... ./internal/ui/... ./cmd/...
+
+  # -------------------------------------------------------------
+  # 3. Unit Tests & Test Coverage
+  # -------------------------------------------------------------
+  test:
+    name: Tests (${{ matrix.os }})
+    needs: hygiene
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run unit tests with coverage
+        run: |
+          go test -v -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Print coverage summary
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go tool cover -func=coverage.out | tail -n 1
+
+  # -------------------------------------------------------------
+  # 4. Build & Smoke Test
+  # -------------------------------------------------------------
+  build:
+    name: Build & Smoke Test (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build binary
+        run: |
+          go build -v -o watui ./cmd/watui
+
+      - name: Smoke test CLI help
+        run: |
+          ./watui --help

@@ -21,11 +21,11 @@ type mockAdapter struct {
 	statusHandler domain.StatusHandler
 }
 
-func (m *mockAdapter) Connect(ctx context.Context) error                          { return nil }
-func (m *mockAdapter) Disconnect()                                                {}
-func (m *mockAdapter) IsLoggedIn() bool                                           { return true }
-func (m *mockAdapter) OnMessage(h domain.MessageHandler)                          { m.msgHandler = h }
-func (m *mockAdapter) OnStatus(h domain.StatusHandler)                            { m.statusHandler = h }
+func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
+func (m *mockAdapter) Disconnect()                       {}
+func (m *mockAdapter) IsLoggedIn() bool                  { return true }
+func (m *mockAdapter) OnMessage(h domain.MessageHandler) { m.msgHandler = h }
+func (m *mockAdapter) OnStatus(h domain.StatusHandler)   { m.statusHandler = h }
 func (m *mockAdapter) SendTextMessage(ctx context.Context, c, t string) (domain.Message, error) {
 	return domain.Message{ID: "SENT1", ChatID: c, Body: t}, nil
 }
@@ -37,13 +37,13 @@ func (m *mockAdapter) GetContacts(ctx context.Context) ([]domain.Contact, error)
 	}, nil
 }
 func (m *mockAdapter) MarkRead(ctx context.Context, c, s string, ids []string) error { return nil }
-func (m *mockAdapter) OnContactsUpdated(h func([]domain.Contact))                     {}
+func (m *mockAdapter) OnContactsUpdated(h func([]domain.Contact))                    {}
 func (m *mockAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, error) {
 	return nil, nil
 }
 func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error { return nil }
 func (m *mockAdapter) Sync(ctx context.Context) error                         { return nil }
-func (m *mockAdapter) OnChatDismissed(h func(chatID string))                   {}
+func (m *mockAdapter) OnChatDismissed(h func(chatID string))                  {}
 func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
 	return "/tmp/mock_media.jpg", nil
 }
@@ -1147,6 +1147,3 @@ func TestChatHeaderDisplaysJIDOnlyInChatWindow(t *testing.T) {
 		t.Errorf("Expected chat header to contain active name, got: %s", headerLine)
 	}
 }
-
-
-

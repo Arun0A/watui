@@ -191,5 +191,3 @@ func TestDefaultDBPath(t *testing.T) {
 		t.Fatalf("expected non-empty default db path")
 	}
 }
-
-
