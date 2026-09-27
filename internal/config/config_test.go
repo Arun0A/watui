@@ -204,4 +204,3 @@ func TestExampleConfigIsUnconfigured(t *testing.T) {
 		t.Errorf("watui.example.yaml must have 0 muted items by default, got %v", cfg.GetMuted())
 	}
 }
-
