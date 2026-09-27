@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v0.1.0)'
+        required: false
+        default: ''
+      draft:
+        description: 'Publish as draft release'
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Publish as pre-release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-amd64
+            binary_name: watui
+            ext: tar.gz
+          - os: macos-latest
+            target: darwin-arm64
+            binary_name: watui
+            ext: tar.gz
+          - os: windows-latest
+            target: windows-amd64
+            binary_name: watui.exe
+            ext: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build binary
+        shell: bash
+        run: |
+          go build -trimpath -ldflags="-s -w" -o "${{ matrix.binary_name }}" ./cmd/watui
+
+      # -----------------------------------------------------------
+      # Linux Packaging (.tar.gz)
+      # -----------------------------------------------------------
+      - name: Package Linux Archive
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          PKG_NAME="watui-${{ matrix.target }}"
+          mkdir -p "$PKG_NAME"
+          cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
+          tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
+
+      # -----------------------------------------------------------
+      # macOS Packaging (.tar.gz)
+      # -----------------------------------------------------------
+      - name: Package macOS Archive
+        if: matrix.os == 'macos-latest'
+        run: |
+          PKG_NAME="watui-${{ matrix.target }}"
+          mkdir -p "$PKG_NAME"
+          cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
+          tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
+
+      # -----------------------------------------------------------
+      # Windows Packaging (Portable + Standalone .zip)
+      # -----------------------------------------------------------
+      - name: Package Windows Archives
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          # 1. Windows Portable Package: contains binary + default watui.yaml (runs self-contained in folder)
+          PORTABLE_DIR="watui-${{ matrix.target }}-portable"
+          mkdir -p "$PORTABLE_DIR"
+          cp watui.exe "$PORTABLE_DIR/"
+          cp watui.example.yaml "$PORTABLE_DIR/watui.yaml"
+          cp README.md LICENSE "$PORTABLE_DIR/"
+          7z a "${PORTABLE_DIR}.zip" "$PORTABLE_DIR"
+
+          # 2. Windows Standalone Package: for installing to PATH (uses standard %APPDATA%/watui)
+          STANDALONE_DIR="watui-${{ matrix.target }}-standalone"
+          mkdir -p "$STANDALONE_DIR"
+          cp watui.exe "$STANDALONE_DIR/"
+          cp watui.example.yaml "$STANDALONE_DIR/"
+          cp README.md LICENSE "$STANDALONE_DIR/"
+          7z a "${STANDALONE_DIR}.zip" "$STANDALONE_DIR"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  # -------------------------------------------------------------
+  # Publish GitHub Release
+  # -------------------------------------------------------------
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all built packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate Checksums (SHA-256)
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Determine Release Tag
+        id: vars
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v0.1.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.tag }}
+          draft: ${{ github.event.inputs.draft || false }}
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+          files: |
+            dist/*
+          generate_release_notes: true
