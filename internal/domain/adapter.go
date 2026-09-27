@@ -63,5 +63,8 @@ type WhatsAppAdapter interface {
 
 	// OnChatDismissed registers a listener triggered when a chat has been marked read remotely.
 	OnChatDismissed(handler func(chatID string))
+
+	// DownloadMedia downloads the media attachment for a message on demand and returns the local file path.
+	DownloadMedia(ctx context.Context, msg Message) (string, error)
 }
 

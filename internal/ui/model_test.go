@@ -3,6 +3,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +43,9 @@ func (m *mockAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, 
 func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error { return nil }
 func (m *mockAdapter) Sync(ctx context.Context) error                         { return nil }
 func (m *mockAdapter) OnChatDismissed(h func(chatID string))                   {}
+func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
+	return "/tmp/mock_media.jpg", nil
+}
 
 func TestUnreadModelLifecycle(t *testing.T) {
 	adapter := &mockAdapter{}
@@ -735,10 +740,117 @@ func TestPinnedAndMutedByJID(t *testing.T) {
 	}
 }
 
+func TestMediaPreviewKeybindings(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
 
+	// Add an unread chat with two media messages
+	model.handleIncomingMessage(domain.Message{
+		ID:         "IMG_001",
+		ChatID:     "12345@s.whatsapp.net",
+		ChatName:   "Friend",
+		Sender:     "12345@s.whatsapp.net",
+		SenderName: "Friend",
+		Timestamp:  time.Now().Add(-1 * time.Minute),
+		Type:       domain.MessageTypeImage,
+		Body:       "[Image] First photo",
+	})
+	model.handleIncomingMessage(domain.Message{
+		ID:         "VID_002",
+		ChatID:     "12345@s.whatsapp.net",
+		ChatName:   "Friend",
+		Sender:     "12345@s.whatsapp.net",
+		SenderName: "Friend",
+		Timestamp:  time.Now(),
+		Type:       domain.MessageTypeVideo,
+		Body:       "[Video] Vacation clip",
+	})
 
+	if len(model.chatOrder) != 1 {
+		t.Fatalf("Expected 1 chat, got %d", len(model.chatOrder))
+	}
 
+	// 1. In ViewUnreadList: 'p' is no longer a preview hotkey
+	pCmd := model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if pCmd != nil {
+		t.Errorf("Expected 'p' to not trigger preview in unread list")
+	}
 
+	// 'alt+p' triggers preview in unread list
+	altPCmd := model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	if altPCmd == nil {
+		t.Errorf("Expected non-nil cmd when pressing alt+p on media chat")
+	}
+	if !strings.Contains(model.previewStatus, "Downloading video") {
+		t.Errorf("Expected previewStatus to indicate downloading video, got %q", model.previewStatus)
+	}
 
+	// Simulate media preview success message
+	model.Update(mediaPreviewSuccessMsg{Path: "/tmp/mock_media.mp4"})
+	if model.previewStatus != "" {
+		t.Errorf("Expected no lingering preview status, got %q", model.previewStatus)
+	}
+	if !model.confirmSave {
+		t.Errorf("Expected confirmSave to be true after preview success")
+	}
 
+	// Pressing 'n' declines saving to Downloads
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if model.confirmSave {
+		t.Errorf("Expected confirmSave to be false after declining")
+	}
 
+	// 2. Open chat to enter ViewChat
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewChat {
+		t.Fatalf("Expected view to be ViewChat, got %v", model.view)
+	}
+
+	// ctrl+p is no longer a preview hotkey
+	ctrlPCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if ctrlPCmd != nil {
+		t.Errorf("Expected ctrl+p to not trigger preview in chat view")
+	}
+
+	// Check media navigation: initially pointing to latest (index 1 / 2)
+	mediaIndices := model.getChatMediaIndices()
+	if len(mediaIndices) != 2 {
+		t.Fatalf("Expected 2 media messages, got %d", len(mediaIndices))
+	}
+	if model.selectedMediaIdx != 1 {
+		t.Errorf("Expected selectedMediaIdx to default to 1, got %d", model.selectedMediaIdx)
+	}
+
+	// Navigate to previous media using Alt+Up
+	model.updateChat(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	if model.selectedMediaIdx != 0 {
+		t.Errorf("Expected selectedMediaIdx to be 0 after Alt+Up, got %d", model.selectedMediaIdx)
+	}
+
+	// Press Alt+P to preview the first media (image)
+	chatAltPCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	if chatAltPCmd == nil {
+		t.Errorf("Expected non-nil cmd when pressing alt+p in chat with media")
+	}
+	if !strings.Contains(model.previewStatus, "Downloading image") {
+		t.Errorf("Expected previewStatus to indicate downloading image, got %q", model.previewStatus)
+	}
+
+	// Simulate preview success and save confirmation with 'y'
+	tmpFile := filepath.Join(t.TempDir(), "test_preview.jpg")
+	_ = os.WriteFile(tmpFile, []byte("fake image data"), 0644)
+	model.Update(mediaPreviewSuccessMsg{Path: tmpFile})
+
+	if !model.confirmSave {
+		t.Errorf("Expected confirmSave to be true")
+	}
+
+	// Confirm save with 'y'
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if model.confirmSave {
+		t.Errorf("Expected confirmSave to be reset to false")
+	}
+	if !strings.Contains(model.previewStatus, "Saved to") {
+		t.Errorf("Expected previewStatus to say 'Saved to...', got %q", model.previewStatus)
+	}
+}

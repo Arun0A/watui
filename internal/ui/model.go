@@ -3,6 +3,9 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -57,6 +60,11 @@ type Model struct {
 	chatScrollOffset int
 	input            textinput.Model
 
+	// Media navigation & saving
+	selectedMediaIdx int    // targeted media index within activeChat (0-based)
+	confirmSave      bool   // true when prompting "save? (y/N)"
+	pendingSavePath  string // path of the media file awaiting save confirmation
+
 	// Contact search view
 	contacts       []domain.Contact
 	filteredList   []domain.Contact
@@ -66,10 +74,11 @@ type Model struct {
 	loadingContact bool
 
 	// App state
-	status domain.ConnectionStatus
-	width  int
-	height int
-	err    error
+	status        domain.ConnectionStatus
+	previewStatus string
+	width         int
+	height        int
+	err           error
 
 	msgChan      chan domain.Message
 	statusChan   chan domain.ConnectionStatus
@@ -87,6 +96,12 @@ type chatDismissedMsg string
 type sendErrMsg struct {
 	ChatID string
 	Err    error
+}
+type mediaPreviewErrMsg struct {
+	Err error
+}
+type mediaPreviewSuccessMsg struct {
+	Path string
 }
 
 // NewModel initializes the TUI model.
@@ -305,7 +320,41 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case unreadsLoadedMsg:
 		m.rebuildUnreadChats(msg)
 
+	case mediaPreviewErrMsg:
+		m.confirmSave = false
+		m.previewStatus = fmt.Sprintf("Preview error: %v", msg.Err)
+
+	case mediaPreviewSuccessMsg:
+		m.previewStatus = ""
+		m.confirmSave = true
+		m.pendingSavePath = msg.Path
+
 	case tea.KeyMsg:
+		if m.confirmSave {
+			switch msg.String() {
+			case "y", "Y":
+				m.confirmSave = false
+				srcPath := m.pendingSavePath
+				m.pendingSavePath = ""
+				destPath, err := saveToDownloads(srcPath)
+				if err != nil {
+					m.previewStatus = fmt.Sprintf("Failed to save: %v", err)
+				} else {
+					m.previewStatus = fmt.Sprintf("Saved to %s", destPath)
+				}
+				return m, nil
+			case "n", "N", "enter", "esc":
+				m.confirmSave = false
+				m.pendingSavePath = ""
+				m.previewStatus = ""
+				return m, nil
+			default:
+				m.confirmSave = false
+				m.pendingSavePath = ""
+				m.previewStatus = ""
+			}
+		}
+
 		switch m.view {
 		case ViewUnreadList:
 			cmds = append(cmds, m.updateUnreadList(msg))
@@ -696,22 +745,48 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		return tea.Quit
 
 	case "j", "down":
+		m.previewStatus = ""
 		if m.cursor < len(m.chatOrder)-1 {
 			m.cursor++
 		}
 
 	case "k", "up":
+		m.previewStatus = ""
 		if m.cursor > 0 {
 			m.cursor--
 		}
 
 	case "r", "d": // mark as read / dismiss
+		m.previewStatus = ""
+		m.confirmSave = false
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
 			m.dismissUnread(chatID)
 		}
 
+	case "alt+p": // preview media from unread chat
+		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
+			chatID := m.chatOrder[m.cursor]
+			chat := m.unreadChats[chatID]
+			if chat != nil {
+				var targetMsg *domain.Message
+				for i := len(chat.Messages) - 1; i >= 0; i-- {
+					if chat.Messages[i].IsMedia() {
+						targetMsg = &chat.Messages[i]
+						break
+					}
+				}
+				if targetMsg != nil {
+					return m.previewMediaCmd(*targetMsg)
+				}
+				m.previewStatus = "No media found in this chat"
+				return nil
+			}
+		}
+
 	case "enter": // open chat
+		m.previewStatus = ""
+		m.confirmSave = false
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
 			chat := m.unreadChats[chatID]
@@ -722,6 +797,8 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			m.input.Reset()
 			m.input.Focus()
 			m.view = ViewChat
+			mediaIndices := m.getChatMediaIndices()
+			m.selectedMediaIdx = len(mediaIndices) - 1
 
 			var ids []string
 			for _, item := range chat.Messages {
@@ -808,11 +885,51 @@ func (m *Model) dismissUnread(chatID string) {
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
+		m.previewStatus = ""
+		m.confirmSave = false
 		m.view = ViewUnreadList
 		return tea.ClearScreen
 
 	case "ctrl+c":
 		return tea.Quit
+
+	case "alt+p":
+		mediaIndices := m.getChatMediaIndices()
+		if len(mediaIndices) == 0 {
+			m.previewStatus = "No media found in this chat"
+			return nil
+		}
+		if m.selectedMediaIdx < 0 || m.selectedMediaIdx >= len(mediaIndices) {
+			m.selectedMediaIdx = len(mediaIndices) - 1
+		}
+		targetMsg := m.activeMsgs[mediaIndices[m.selectedMediaIdx]]
+		return m.previewMediaCmd(targetMsg)
+
+	case "alt+up", "alt+k", "alt+left":
+		mediaIndices := m.getChatMediaIndices()
+		if len(mediaIndices) > 0 {
+			if m.selectedMediaIdx > 0 {
+				m.selectedMediaIdx--
+			} else {
+				m.selectedMediaIdx = len(mediaIndices) - 1
+			}
+			m.scrollToMediaMessage(mediaIndices[m.selectedMediaIdx])
+			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[mediaIndices[m.selectedMediaIdx]].Type)
+		}
+		return nil
+
+	case "alt+down", "alt+j", "alt+right":
+		mediaIndices := m.getChatMediaIndices()
+		if len(mediaIndices) > 0 {
+			if m.selectedMediaIdx < len(mediaIndices)-1 {
+				m.selectedMediaIdx++
+			} else {
+				m.selectedMediaIdx = 0
+			}
+			m.scrollToMediaMessage(mediaIndices[m.selectedMediaIdx])
+			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[mediaIndices[m.selectedMediaIdx]].Type)
+		}
+		return nil
 
 	case "pgup", "ctrl+u":
 		m.chatScrollOffset += 5
@@ -835,6 +952,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case "enter":
+		m.previewStatus = ""
 		text := strings.TrimSpace(m.input.Value())
 		if text == "" {
 			return nil
@@ -1243,7 +1361,13 @@ func (m *Model) renderUnreadListView() []string {
 		}
 	}
 
-	lines = append(lines, helpStyle.Render("[Enter] Open · [r] Dismiss · [n] New Message · [R] Refresh · [q] Quit"))
+	statusNotice := ""
+	if m.confirmSave {
+		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
+	} else if m.previewStatus != "" {
+		statusNotice = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
+	}
+	lines = append(lines, helpStyle.Render("[Enter] Open · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit")+statusNotice)
 	return lines
 }
 
@@ -1270,22 +1394,49 @@ func (m *Model) renderChatView() []string {
 		msgWrapWidth := max(20, cw-6)
 		wrapStyle := lipgloss.NewStyle().Width(msgWrapWidth)
 
+		mediaIndices := m.getChatMediaIndices()
 		for i, msg := range m.activeMsgs {
 			timeStr := msg.Timestamp.Format("15:04")
 			var header string
+			mediaBadge := ""
+			if msg.IsMedia() {
+				pos := -1
+				for mIdx, origIdx := range mediaIndices {
+					if origIdx == i {
+						pos = mIdx
+						break
+					}
+				}
+				if pos != -1 {
+					if len(mediaIndices) > 1 {
+						if pos == m.selectedMediaIdx {
+							mediaBadge = " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#11111B")).Background(lipgloss.Color("#FAB387")).Render(fmt.Sprintf(" ▶ [%d/%d] ", pos+1, len(mediaIndices)))
+						} else {
+							mediaBadge = " " + statusStyle.Render(fmt.Sprintf("[%d/%d]", pos+1, len(mediaIndices)))
+						}
+					} else {
+						if pos == m.selectedMediaIdx {
+							mediaBadge = " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#11111B")).Background(lipgloss.Color("#FAB387")).Render(" ▶ MEDIA ")
+						}
+					}
+				}
+			}
+
 			if msg.IsFromMe {
-				header = fmt.Sprintf("  %s %s",
+				header = fmt.Sprintf("  %s %s%s",
 					lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render("You"),
 					statusStyle.Render(timeStr),
+					mediaBadge,
 				)
 			} else {
 				sender := msg.SenderName
 				if sender == "" {
 					sender = "Them"
 				}
-				header = fmt.Sprintf("  %s %s",
+				header = fmt.Sprintf("  %s %s%s",
 					selectedTitleStyle.Render(sender),
 					statusStyle.Render(timeStr),
+					mediaBadge,
 				)
 			}
 			msgLines = append(msgLines, header)
@@ -1331,7 +1482,24 @@ func (m *Model) renderChatView() []string {
 	// One line padding on top of the message box
 	lines = append(lines, "")
 	lines = append(lines, m.input.View())
-	lines = append(lines, helpStyle.Render("[Enter] Send · [Esc] Back"+scrollInfo))
+
+	mediaIndices := m.getChatMediaIndices()
+	mediaHelp := ""
+	if len(mediaIndices) > 1 {
+		mediaHelp = fmt.Sprintf(" · [Alt+P] Preview (%d/%d) · [Alt+↑/↓] Media", m.selectedMediaIdx+1, len(mediaIndices))
+	} else if len(mediaIndices) == 1 {
+		mediaHelp = " · [Alt+P] Preview Media"
+	}
+
+	helpText := "[Enter] Send · [Esc] Back" + mediaHelp + scrollInfo
+
+	statusNotice := ""
+	if m.confirmSave {
+		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
+	} else if m.previewStatus != "" {
+		statusNotice = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
+	}
+	lines = append(lines, helpStyle.Render(helpText)+statusNotice)
 
 	return lines
 }
@@ -1443,3 +1611,128 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+func (m *Model) previewMediaCmd(msg domain.Message) tea.Cmd {
+	m.previewStatus = fmt.Sprintf("Downloading %s...", msg.Type)
+	m.confirmSave = false
+	cmdStr := m.cfg.GetPreviewCommand(string(msg.Type))
+	return func() tea.Msg {
+		filePath, err := m.adapter.DownloadMedia(m.ctx, msg)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		if err := launchViewer(cmdStr, filePath); err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		return mediaPreviewSuccessMsg{Path: filePath}
+	}
+}
+
+func (m *Model) getChatMediaIndices() []int {
+	var indices []int
+	for i, msg := range m.activeMsgs {
+		if msg.IsMedia() {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+func (m *Model) scrollToMediaMessage(msgIdx int) {
+	cw := m.contentWidth()
+	msgWrapWidth := max(20, cw-6)
+	wrapStyle := lipgloss.NewStyle().Width(msgWrapWidth)
+
+	linesAfter := 0
+	for i := msgIdx + 1; i < len(m.activeMsgs); i++ {
+		linesAfter += 1 // header
+		wrapped := wrapStyle.Render(m.activeMsgs[i].Body)
+		linesAfter += len(strings.Split(wrapped, "\n"))
+		linesAfter += 1 // spacing
+	}
+	m.chatScrollOffset = linesAfter
+}
+
+func saveToDownloads(srcPath string) (string, error) {
+	if srcPath == "" {
+		return "", fmt.Errorf("no media file to save")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("cannot find home directory: %w", err)
+	}
+
+	downloadsDir := filepath.Join(home, "Downloads")
+	if xdg := os.Getenv("XDG_DOWNLOAD_DIR"); xdg != "" {
+		downloadsDir = xdg
+	}
+
+	if err := os.MkdirAll(downloadsDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create downloads directory: %w", err)
+	}
+
+	fileName := filepath.Base(srcPath)
+	destPath := filepath.Join(downloadsDir, fileName)
+
+	// Avoid overwriting existing files
+	if _, err := os.Stat(destPath); err == nil {
+		ext := filepath.Ext(fileName)
+		base := strings.TrimSuffix(fileName, ext)
+		for i := 1; i < 1000; i++ {
+			candidate := filepath.Join(downloadsDir, fmt.Sprintf("%s_%d%s", base, i, ext))
+			if _, err := os.Stat(candidate); os.IsNotExist(err) {
+				destPath = candidate
+				break
+			}
+		}
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read cached file: %w", err)
+	}
+
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write to downloads: %w", err)
+	}
+
+	displayPath := destPath
+	if strings.HasPrefix(destPath, home) {
+		displayPath = "~" + strings.TrimPrefix(destPath, home)
+	}
+
+	return displayPath, nil
+}
+
+func launchViewer(cmdStr string, filePath string) error {
+	if cmdStr == "" {
+		cmdStr = "mpv --loop=inf"
+	}
+
+	var cmd *exec.Cmd
+	if strings.Contains(cmdStr, "%s") {
+		fullCmd := fmt.Sprintf(cmdStr, filePath)
+		cmd = exec.Command("sh", "-c", fullCmd)
+	} else {
+		parts := strings.Fields(cmdStr)
+		if len(parts) == 0 {
+			parts = []string{"mpv"}
+		}
+		args := append(parts[1:], filePath)
+		cmd = exec.Command(parts[0], args...)
+	}
+
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		_ = cmd.Wait()
+	}()
+	return nil
+}
+

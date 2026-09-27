@@ -9,8 +9,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// PreviewConfig specifies commands used to preview media attachments on demand.
+type PreviewConfig struct {
+	Image   string `json:"image" yaml:"image"`
+	Video   string `json:"video" yaml:"video"`
+	Sticker string `json:"sticker" yaml:"sticker"`
+}
+
 // Config represents declarative user configuration for watui.
 type Config struct {
+	// Preview defines commands to preview media attachments on demand.
+	Preview PreviewConfig `json:"preview" yaml:"preview"`
+
 	// Muted lists chat JIDs, phone numbers, or group/contact names to hide from unread.
 	Muted []string `json:"muted" yaml:"muted"`
 
@@ -24,6 +34,33 @@ type Config struct {
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
 }
+
+// GetPreviewCommand returns the command string for previewing the given message type.
+func (c *Config) GetPreviewCommand(msgType string) string {
+	if c != nil {
+		switch strings.ToLower(msgType) {
+		case "image":
+			if c.Preview.Image != "" {
+				return c.Preview.Image
+			}
+		case "video":
+			if c.Preview.Video != "" {
+				return c.Preview.Video
+			}
+		case "sticker":
+			if c.Preview.Sticker != "" {
+				return c.Preview.Sticker
+			}
+		}
+	}
+	switch strings.ToLower(msgType) {
+	case "video":
+		return "mpv"
+	default:
+		return "mpv --loop=inf"
+	}
+}
+
 
 // Load loads configuration from an explicit path or checks default paths.
 // If explicitPath is empty, it tries default paths:

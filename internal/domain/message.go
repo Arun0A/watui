@@ -14,6 +14,7 @@ const (
 	MessageTypeVideo    MessageType = "video"
 	MessageTypeDocument MessageType = "document"
 	MessageTypeReaction MessageType = "reaction"
+	MessageTypeSticker  MessageType = "sticker"
 	MessageTypeUnknown  MessageType = "unknown"
 )
 
@@ -41,3 +42,14 @@ type Message struct {
 	Body       string        `json:"body"`
 	Status     MessageStatus `json:"status"`
 }
+
+// IsMedia returns true if the message represents a media attachment that can be previewed.
+func (m Message) IsMedia() bool {
+	switch m.Type {
+	case MessageTypeImage, MessageTypeVideo, MessageTypeSticker, MessageTypeAudio, MessageTypeDocument:
+		return true
+	default:
+		return false
+	}
+}
+

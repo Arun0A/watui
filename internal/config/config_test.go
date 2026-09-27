@@ -111,3 +111,45 @@ func TestConfigLoadMissingDefault(t *testing.T) {
 		t.Errorf("Expected empty rules")
 	}
 }
+
+func TestPreviewConfig(t *testing.T) {
+	yamlContent := `
+preview:
+  image: "feh -."
+  video: "vlc"
+  sticker: "custom-sticker-cmd"
+`
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "watui.yaml")
+	if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	if cfg.GetPreviewCommand("image") != "feh -." {
+		t.Errorf("Expected feh -., got %s", cfg.GetPreviewCommand("image"))
+	}
+	if cfg.GetPreviewCommand("video") != "vlc" {
+		t.Errorf("Expected vlc, got %s", cfg.GetPreviewCommand("video"))
+	}
+	if cfg.GetPreviewCommand("sticker") != "custom-sticker-cmd" {
+		t.Errorf("Expected custom-sticker-cmd, got %s", cfg.GetPreviewCommand("sticker"))
+	}
+
+	// Test default commands on empty config
+	emptyCfg := &Config{}
+	if emptyCfg.GetPreviewCommand("image") != "mpv --loop=inf" {
+		t.Errorf("Expected default mpv --loop=inf for image, got %s", emptyCfg.GetPreviewCommand("image"))
+	}
+	if emptyCfg.GetPreviewCommand("video") != "mpv" {
+		t.Errorf("Expected default mpv for video, got %s", emptyCfg.GetPreviewCommand("video"))
+	}
+	if emptyCfg.GetPreviewCommand("sticker") != "mpv --loop=inf" {
+		t.Errorf("Expected default mpv --loop=inf for sticker, got %s", emptyCfg.GetPreviewCommand("sticker"))
+	}
+}
+

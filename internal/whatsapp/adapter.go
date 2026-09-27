@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -51,6 +53,33 @@ type Adapter struct {
 	contactsHandlers []func([]domain.Contact)
 	refreshMu        sync.Mutex
 	isRefreshing     bool
+
+	mediaMu    sync.RWMutex
+	mediaCache map[string]*waE2E.Message
+}
+
+func (a *Adapter) cacheMediaMessage(id string, raw *waE2E.Message) {
+	if raw == nil || id == "" {
+		return
+	}
+	a.mediaMu.Lock()
+	defer a.mediaMu.Unlock()
+	if a.mediaCache == nil {
+		a.mediaCache = make(map[string]*waE2E.Message)
+	}
+	a.mediaCache[id] = raw
+}
+
+func (a *Adapter) getCachedMediaMessage(id string) *waE2E.Message {
+	if id == "" {
+		return nil
+	}
+	a.mediaMu.RLock()
+	defer a.mediaMu.RUnlock()
+	if a.mediaCache == nil {
+		return nil
+	}
+	return a.mediaCache[id]
 }
 
 // NewAdapter creates and initializes a WhatsApp adapter instance.
@@ -98,9 +127,11 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			timestamp INTEGER NOT NULL,
 			body TEXT,
 			type TEXT,
-			is_from_me BOOLEAN
+			is_from_me BOOLEAN,
+			raw_message BLOB
 		);`)
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN chat_name TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN raw_message BLOB;")
 
 		// Migrate any existing @lid unread messages to phone JIDs if mapped in whatsmeow_lid_map
 		rows, err := localDB.Query(`SELECT DISTINCT m.chat_id, l.pn FROM watui_unread_messages m 
@@ -130,6 +161,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		localDB:       localDB,
 		config:        cfg,
 		currentStatus: domain.StatusDisconnected,
+		mediaCache:    make(map[string]*waE2E.Message),
 	}
 
 	client.AddEventHandler(adapter.handleEvent)
@@ -575,14 +607,18 @@ func (a *Adapter) Sync(ctx context.Context) error {
 	return nil
 }
 
-func (a *Adapter) saveUnreadMessage(msg domain.Message) {
+func (a *Adapter) saveUnreadMessage(msg domain.Message, rawMsg ...*waE2E.Message) {
 	if a.localDB == nil {
 		return
 	}
+	var rawBytes []byte
+	if len(rawMsg) > 0 && rawMsg[0] != nil {
+		rawBytes, _ = proto.Marshal(rawMsg[0])
+	}
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_unread_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, raw_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, rawBytes,
 	)
 }
 
@@ -616,19 +652,33 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 	if a.localDB == nil {
 		return nil, nil
 	}
-	rows, err := a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me
+	rows, err := a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, raw_message
 		FROM watui_unread_messages ORDER BY timestamp ASC`)
 	if err != nil {
-		return nil, err
+		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me
+			FROM watui_unread_messages ORDER BY timestamp ASC`)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer rows.Close()
 
 	var msgs []domain.Message
+	cols, _ := rows.Columns()
+	hasRaw := len(cols) >= 10
+
 	for rows.Next() {
 		var m domain.Message
 		var ts int64
 		var tStr string
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe); err == nil {
+		var rawBytes []byte
+		var scanErr error
+		if hasRaw {
+			scanErr = rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe, &rawBytes)
+		} else {
+			scanErr = rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe)
+		}
+		if scanErr == nil {
 			m.Timestamp = time.Unix(ts, 0)
 			m.Type = domain.MessageType(tStr)
 			m.Status = domain.MessageStatusDelivered
@@ -642,6 +692,12 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 				lidUser := strings.TrimSuffix(m.Sender, "@lid")
 				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
 					m.Sender = pn + "@s.whatsapp.net"
+				}
+			}
+			if len(rawBytes) > 0 {
+				var parsed waE2E.Message
+				if err := proto.Unmarshal(rawBytes, &parsed); err == nil {
+					a.cacheMediaMessage(m.ID, &parsed)
 				}
 			}
 			msgs = append(msgs, m)
@@ -753,7 +809,10 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				}
 				domainMsg, ok := a.extractWebMessage(chatID, webMsg)
 				if ok {
-					a.saveUnreadMessage(domainMsg)
+					if webMsg.Message != nil {
+						a.cacheMediaMessage(domainMsg.ID, webMsg.Message)
+					}
+					a.saveUnreadMessage(domainMsg, webMsg.Message)
 					a.notifyMessage(domainMsg)
 				}
 			}
@@ -766,8 +825,12 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			return
 		}
 
+		if evt.Message != nil {
+			a.cacheMediaMessage(domainMsg.ID, evt.Message)
+		}
+
 		if !domainMsg.IsFromMe {
-			a.saveUnreadMessage(domainMsg)
+			a.saveUnreadMessage(domainMsg, evt.Message)
 		}
 
 		a.notifyMessage(domainMsg)
@@ -801,7 +864,7 @@ func extractMessageContent(m *waE2E.Message) (string, domain.MessageType, bool) 
 		}
 		return "[Document]", domain.MessageTypeDocument, true
 	} else if m.StickerMessage != nil {
-		return "[Sticker]", domain.MessageTypeImage, true
+		return "[Sticker]", domain.MessageTypeSticker, true
 	} else if m.LocationMessage != nil {
 		return "[Location]", domain.MessageTypeText, true
 	} else if m.ContactMessage != nil {
@@ -986,4 +1049,96 @@ func (a *Adapter) renderQRInTerminal(code string) {
 	fmt.Print(qr.ToSmallString(false))
 	fmt.Println("=======================================================")
 }
+
+// DownloadMedia downloads the media attachment for a message on demand and returns the local file path.
+func (a *Adapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
+	if a.client == nil {
+		return "", fmt.Errorf("client not connected")
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil || cacheDir == "" {
+		cacheDir = filepath.Join(os.TempDir(), "watui-media")
+	} else {
+		cacheDir = filepath.Join(cacheDir, "watui", "media")
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create media cache dir: %w", err)
+	}
+
+	ext := ".bin"
+	switch msg.Type {
+	case domain.MessageTypeImage:
+		ext = ".jpg"
+	case domain.MessageTypeVideo:
+		ext = ".mp4"
+	case domain.MessageTypeSticker:
+		ext = ".webp"
+	case domain.MessageTypeAudio:
+		ext = ".ogg"
+	}
+
+	safeID := strings.ReplaceAll(msg.ID, "/", "_")
+	filePath := filepath.Join(cacheDir, fmt.Sprintf("%s%s", safeID, ext))
+
+	// Return cached file if already on disk and non-empty
+	if fi, err := os.Stat(filePath); err == nil && fi.Size() > 0 {
+		return filePath, nil
+	}
+
+	rawMsg := a.getCachedMediaMessage(msg.ID)
+	if rawMsg == nil && a.localDB != nil {
+		var rawBytes []byte
+		row := a.localDB.QueryRowContext(ctx, "SELECT raw_message FROM watui_unread_messages WHERE id = ?", msg.ID)
+		if err := row.Scan(&rawBytes); err == nil && len(rawBytes) > 0 {
+			var parsed waE2E.Message
+			if err := proto.Unmarshal(rawBytes, &parsed); err == nil {
+				rawMsg = &parsed
+				a.cacheMediaMessage(msg.ID, &parsed)
+			}
+		}
+	}
+
+	if rawMsg == nil {
+		return "", fmt.Errorf("media metadata not found for message %s", msg.ID)
+	}
+
+	var downloadable whatsmeow.DownloadableMessage
+	if rawMsg.ImageMessage != nil {
+		downloadable = rawMsg.ImageMessage
+		if rawMsg.ImageMessage.GetMimetype() == "image/png" {
+			filePath = filepath.Join(cacheDir, fmt.Sprintf("%s.png", safeID))
+		}
+	} else if rawMsg.VideoMessage != nil {
+		downloadable = rawMsg.VideoMessage
+	} else if rawMsg.StickerMessage != nil {
+		downloadable = rawMsg.StickerMessage
+		filePath = filepath.Join(cacheDir, fmt.Sprintf("%s.webp", safeID))
+	} else if rawMsg.AudioMessage != nil {
+		downloadable = rawMsg.AudioMessage
+	} else if rawMsg.DocumentMessage != nil {
+		downloadable = rawMsg.DocumentMessage
+		fileName := rawMsg.DocumentMessage.GetFileName()
+		if fileName != "" {
+			safeFileName := filepath.Base(fileName)
+			filePath = filepath.Join(cacheDir, fmt.Sprintf("%s_%s", safeID, safeFileName))
+		}
+	}
+
+	if downloadable == nil {
+		return "", fmt.Errorf("message %s does not contain downloadable attachment", msg.ID)
+	}
+
+	data, err := a.client.Download(ctx, downloadable)
+	if err != nil {
+		return "", fmt.Errorf("failed to download media: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write media file to disk: %w", err)
+	}
+
+	return filePath, nil
+}
+
 
