@@ -171,9 +171,8 @@ preview:
 device_name: "MyCustomTUI"
 file_picker: "ranger --choosefile=/tmp/watui_test && cat /tmp/watui_test"
 `
-	customCfg, err := Load(filepath.Join(tmpDir, "custom.yaml"))
 	_ = os.WriteFile(filepath.Join(tmpDir, "custom.yaml"), []byte(customCfgYAML), 0644)
-	customCfg, err = Load(filepath.Join(tmpDir, "custom.yaml"))
+	customCfg, err := Load(filepath.Join(tmpDir, "custom.yaml"))
 	if err != nil {
 		t.Fatalf("Failed to load custom config: %v", err)
 	}

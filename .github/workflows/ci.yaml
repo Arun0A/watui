@@ -106,7 +106,8 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.6
-          args: --timeout=5m ./internal/config/... ./internal/security/... ./internal/ui/... ./cmd/...
+          install-mode: go-install
+          args: --timeout=5m ./...
 
   # -------------------------------------------------------------
   # 3. Unit Tests & Test Coverage

@@ -1090,7 +1090,7 @@ func TestResolvePickerAndTerminalPickerCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTerminalPickerCmd failed: %v", err)
 	}
-	defer os.Remove(outPath)
+	defer func() { _ = os.Remove(outPath) }()
 
 	if cmd.Path != "yazi" && !strings.HasSuffix(cmd.Path, "yazi") {
 		t.Errorf("Expected cmd to execute yazi, got %q", cmd.Path)
