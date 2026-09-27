@@ -23,6 +23,9 @@ type Config struct {
 	// Preview defines commands to preview media attachments on demand.
 	Preview PreviewConfig `json:"preview" yaml:"preview"`
 
+	// FilePicker specifies an optional custom command to open a file picker.
+	FilePicker string `json:"file_picker" yaml:"file_picker"`
+
 	// Muted lists chat JIDs, phone numbers, or group/contact names to hide from unread.
 	Muted []string `json:"muted" yaml:"muted"`
 
@@ -79,6 +82,15 @@ func (c *Config) GetPreviewCommand(msgType string) string {
 		return "mpv --loop=inf"
 	}
 }
+
+// GetFilePickerCommand returns any user-configured file picker command, or empty string.
+func (c *Config) GetFilePickerCommand() string {
+	if c != nil {
+		return strings.TrimSpace(c.FilePicker)
+	}
+	return ""
+}
+
 
 
 // Load loads configuration from an explicit path or checks default paths.

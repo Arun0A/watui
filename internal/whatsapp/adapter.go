@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -333,6 +335,160 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		IsFromMe:   true,
 		Type:       domain.MessageTypeText,
 		Body:       text,
+		Status:     domain.MessageStatusSent,
+	}, nil
+}
+
+// SendFileMessage uploads and sends a file attachment to a WhatsApp chat JID or raw phone number.
+func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
+	if a.client == nil {
+		return domain.Message{}, fmt.Errorf("client not connected")
+	}
+
+	recipientJID, err := NormalizeJID(chatID)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("invalid recipient %q: %w", chatID, err)
+	}
+
+	// Expand ~ to user home directory if present
+	if strings.HasPrefix(filePath, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			filePath = filepath.Join(home, strings.TrimPrefix(filePath, "~"))
+		}
+	}
+
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("failed to read file %q: %w", filePath, err)
+	}
+
+	fileName := filepath.Base(filePath)
+	ext := strings.ToLower(filepath.Ext(filePath))
+	mimeType := http.DetectContentType(fileData)
+	if detectedMime := mime.TypeByExtension(ext); detectedMime != "" {
+		mimeType = detectedMime
+	}
+
+	var appInfo whatsmeow.MediaType
+	var msgType domain.MessageType
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".bmp":
+		appInfo = whatsmeow.MediaImage
+		msgType = domain.MessageTypeImage
+	case ".mp4", ".mov", ".avi", ".mkv", ".webm":
+		appInfo = whatsmeow.MediaVideo
+		msgType = domain.MessageTypeVideo
+	case ".mp3", ".ogg", ".wav", ".m4a", ".aac", ".flac":
+		appInfo = whatsmeow.MediaAudio
+		msgType = domain.MessageTypeAudio
+	default:
+		appInfo = whatsmeow.MediaDocument
+		msgType = domain.MessageTypeDocument
+	}
+
+	resp, err := a.client.Upload(ctx, fileData, appInfo)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("failed to upload media: %w", err)
+	}
+
+	var waMsg *waE2E.Message
+	label := "Document"
+	switch msgType {
+	case domain.MessageTypeImage:
+		label = "Image"
+	case domain.MessageTypeVideo:
+		label = "Video"
+	case domain.MessageTypeAudio:
+		label = "Audio"
+	}
+	bodyText := fmt.Sprintf("[%s: %s]", label, fileName)
+	if caption != "" {
+		bodyText += " " + caption
+	}
+
+	switch msgType {
+	case domain.MessageTypeImage:
+		imgMsg := &waE2E.ImageMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+		}
+		if caption != "" {
+			imgMsg.Caption = proto.String(caption)
+		}
+		waMsg = &waE2E.Message{ImageMessage: imgMsg}
+
+	case domain.MessageTypeVideo:
+		vidMsg := &waE2E.VideoMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+		}
+		if caption != "" {
+			vidMsg.Caption = proto.String(caption)
+		}
+		waMsg = &waE2E.Message{VideoMessage: vidMsg}
+
+	case domain.MessageTypeAudio:
+		audioMsg := &waE2E.AudioMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+		}
+		waMsg = &waE2E.Message{AudioMessage: audioMsg}
+
+	default: // Document
+		docMsg := &waE2E.DocumentMessage{
+			FileName:      proto.String(fileName),
+			Title:         proto.String(fileName),
+			Mimetype:      proto.String(mimeType),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &resp.FileLength,
+		}
+		if caption != "" {
+			docMsg.Caption = proto.String(caption)
+		}
+		waMsg = &waE2E.Message{DocumentMessage: docMsg}
+	}
+
+	sendResp, err := a.client.SendMessage(ctx, recipientJID, waMsg)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("failed to send media message: %w", err)
+	}
+
+	a.cacheMediaMessage(sendResp.ID, waMsg)
+
+	senderID := ""
+	if a.client.Store.ID != nil {
+		senderID = a.client.Store.ID.ToNonAD().String()
+	}
+
+	return domain.Message{
+		ID:         sendResp.ID,
+		ChatID:     recipientJID.String(),
+		Sender:     senderID,
+		SenderName: "Me",
+		Timestamp:  sendResp.Timestamp,
+		IsFromMe:   true,
+		Type:       msgType,
+		Body:       bodyText,
 		Status:     domain.MessageStatusSent,
 	}, nil
 }

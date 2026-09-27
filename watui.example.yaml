@@ -42,4 +42,16 @@ preview:
   # video: "vlc"
   # document: "zathura"
 
+# 4. File Picker Command (Alt+F)
+# Custom command executed when pressing Alt+F to pick a file to attach.
+# Watui captures the chosen file path from standard output.
+# If omitted, automatically detects zenity, kdialog, or OS dialogs.
+#
+# Examples:
+# file_picker: "zenity --file-selection"
+# file_picker: "kdialog --getopenfilename"
+# file_picker: "ranger --choosefile=/tmp/watui_picked && cat /tmp/watui_picked"
+# file_picker: "yazi --chooser-file=/tmp/watui_picked && cat /tmp/watui_picked"
+# file_picker: ""
+
 

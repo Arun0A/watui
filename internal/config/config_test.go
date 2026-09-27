@@ -159,5 +159,23 @@ preview:
 	if emptyCfg.GetPreviewCommand("document") != expectedDoc {
 		t.Errorf("Expected default %s for document, got %s", expectedDoc, emptyCfg.GetPreviewCommand("document"))
 	}
+	if emptyCfg.GetFilePickerCommand() != "" {
+		t.Errorf("Expected empty default file picker command, got %s", emptyCfg.GetFilePickerCommand())
+	}
+
+	// Test custom file_picker
+	customCfgYAML := `
+file_picker: "ranger --choosefile=/tmp/watui_test && cat /tmp/watui_test"
+`
+	customCfg, err := Load(filepath.Join(tmpDir, "custom.yaml"))
+	_ = os.WriteFile(filepath.Join(tmpDir, "custom.yaml"), []byte(customCfgYAML), 0644)
+	customCfg, err = Load(filepath.Join(tmpDir, "custom.yaml"))
+	if err != nil {
+		t.Fatalf("Failed to load custom config: %v", err)
+	}
+	if customCfg.GetFilePickerCommand() != "ranger --choosefile=/tmp/watui_test && cat /tmp/watui_test" {
+		t.Errorf("Expected ranger file picker command, got %q", customCfg.GetFilePickerCommand())
+	}
 }
+
 

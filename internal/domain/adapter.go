@@ -43,6 +43,10 @@ type WhatsAppAdapter interface {
 	// SendTextMessage sends a plain text message to a given chat JID.
 	SendTextMessage(ctx context.Context, chatID string, text string) (Message, error)
 
+	// SendFileMessage uploads and sends a local media or document file to a chat.
+	SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (Message, error)
+
+
 	// GetContacts retrieves all known contacts from local store.
 	GetContacts(ctx context.Context) ([]Contact, error)
 

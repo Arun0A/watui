@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,6 +46,15 @@ func (m *mockAdapter) Sync(ctx context.Context) error                         { 
 func (m *mockAdapter) OnChatDismissed(h func(chatID string))                   {}
 func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
 	return "/tmp/mock_media.jpg", nil
+}
+func (m *mockAdapter) SendFileMessage(ctx context.Context, c, filePath, caption string) (domain.Message, error) {
+	return domain.Message{
+		ID:       "FILESENT1",
+		ChatID:   c,
+		IsFromMe: true,
+		Type:     domain.MessageTypeDocument,
+		Body:     fmt.Sprintf("[Document: %s] %s", filepath.Base(filePath), caption),
+	}, nil
 }
 
 func TestUnreadModelLifecycle(t *testing.T) {
@@ -930,4 +940,122 @@ func TestDocumentActionKeybindings(t *testing.T) {
 		t.Errorf("Expected confirmDocAction to be false after esc")
 	}
 }
+
+func TestFileAttachmentAndSending(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// 1. Test parseFileURI
+	tmpDir := t.TempDir()
+	sampleFile := filepath.Join(tmpDir, "report.pdf")
+	_ = os.WriteFile(sampleFile, []byte("pdf content"), 0644)
+
+	path, caption := parseFileURI("file://" + sampleFile + " Annual Report 2026")
+	if path != sampleFile {
+		t.Errorf("Expected path %q, got %q", sampleFile, path)
+	}
+	if caption != "Annual Report 2026" {
+		t.Errorf("Expected caption 'Annual Report 2026', got %q", caption)
+	}
+
+	// Test quoted path with spaces
+	quotedInput := fmt.Sprintf("file://\"%s\" Please review ASAP", sampleFile)
+	qPath, qCap := parseFileURI(quotedInput)
+	if qPath != sampleFile {
+		t.Errorf("Expected qPath %q, got %q", sampleFile, qPath)
+	}
+	if qCap != "Please review ASAP" {
+		t.Errorf("Expected qCap 'Please review ASAP', got %q", qCap)
+	}
+
+	// 2. Test sending attachment in ViewChat
+	model.activeChatID = "12345@s.whatsapp.net"
+	model.view = ViewChat
+	model.input.SetValue("file://" + sampleFile + " Sent via Watui")
+
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd for Enter with file:// attachment")
+	}
+	msg := cmd()
+	sent, ok := msg.(messageSentMsg)
+	if !ok {
+		t.Fatalf("Expected messageSentMsg, got %T: %v", msg, msg)
+	}
+	if sent.Type != domain.MessageTypeDocument {
+		t.Errorf("Expected MessageTypeDocument, got %v", sent.Type)
+	}
+	if !strings.Contains(sent.Body, "report.pdf") {
+		t.Errorf("Expected sent.Body to contain filename, got %q", sent.Body)
+	}
+	if !strings.Contains(sent.Body, "Sent via Watui") {
+		t.Errorf("Expected sent.Body to contain caption, got %q", sent.Body)
+	}
+
+	// 3. Test filePickedMsg updates input box
+	m, _ := model.Update(filePickedMsg{Path: sampleFile})
+	updatedModel := m.(*Model)
+	if !strings.HasPrefix(updatedModel.input.Value(), "file://"+sampleFile) {
+		t.Errorf("Expected input to have file:// prefix, got %q", updatedModel.input.Value())
+	}
+}
+
+func TestSendingStatusAndFilePickerConfig(t *testing.T) {
+	ctx := context.Background()
+	mock := &mockAdapter{}
+	cfg := &config.Config{
+		FilePicker: "echo /tmp/picked_by_custom_cmd.txt",
+	}
+	model := NewModel(ctx, mock, cfg)
+	model.activeChatID = "12345@s.whatsapp.net"
+	model.view = ViewChat
+
+	// 1. When Enter is pressed on input, previewStatus becomes "Sending..."
+	model.input.SetValue("hello world")
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd on Enter")
+	}
+	if model.previewStatus != "Sending..." {
+		t.Errorf("Expected previewStatus to be 'Sending...', got %q", model.previewStatus)
+	}
+
+	// 2. When messageSentMsg arrives, previewStatus is cleared
+	sentMsg := cmd()
+	m, _ := model.Update(sentMsg)
+	updated := m.(*Model)
+	if updated.previewStatus != "" {
+		t.Errorf("Expected previewStatus to be cleared after messageSentMsg, got %q", updated.previewStatus)
+	}
+
+	// 3. When sendErrMsg arrives, previewStatus is also cleared
+	model.previewStatus = "Sending..."
+	m, _ = model.Update(sendErrMsg{ChatID: model.activeChatID, Err: errors.New("network failure")})
+	updated = m.(*Model)
+	if updated.previewStatus != "" {
+		t.Errorf("Expected previewStatus to be cleared after sendErrMsg, got %q", updated.previewStatus)
+	}
+
+	// 4. Test custom file picker execution
+	pickCmd := model.pickFileCmd()
+	res := pickCmd()
+	picked, ok := res.(filePickedMsg)
+	if !ok {
+		t.Fatalf("Expected filePickedMsg from custom file picker, got %T: %v", res, res)
+	}
+	if picked.Path != "/tmp/picked_by_custom_cmd.txt" {
+		t.Errorf("Expected path '/tmp/picked_by_custom_cmd.txt', got %q", picked.Path)
+	}
+
+	// 5. Test short brief message on errNoFilePicker
+	m, _ = model.Update(filePickErrMsg{Err: errNoFilePicker})
+	updated = m.(*Model)
+	if updated.previewStatus != "No file picker found" {
+		t.Errorf("Expected 'No file picker found', got %q", updated.previewStatus)
+	}
+	if len(updated.previewStatus) > 30 {
+		t.Errorf("Status message too long for compact terminals: %d chars", len(updated.previewStatus))
+	}
+}
+
 

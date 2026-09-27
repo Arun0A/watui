@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -115,6 +116,12 @@ type docSavedMsg struct {
 type docFallbackSavedMsg struct {
 	DestPath string
 	OpenErr  error
+}
+type filePickedMsg struct {
+	Path string
+}
+type filePickErrMsg struct {
+	Err error
 }
 
 // NewModel initializes the TUI model.
@@ -303,6 +310,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeMsgs = append(m.activeMsgs, sent)
 			m.chatScrollOffset = 0
 		}
+		if m.previewStatus == "Sending..." {
+			m.previewStatus = ""
+		}
 		m.mu.Lock()
 		if chat, exists := m.unreadChats[sent.ChatID]; exists && chat.IsPinned {
 			chat.Messages = []domain.Message{sent}
@@ -311,6 +321,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mu.Unlock()
 
 	case sendErrMsg:
+		if m.previewStatus == "Sending..." {
+			m.previewStatus = ""
+		}
 		if m.activeChatID == msg.ChatID {
 			m.activeMsgs = append(m.activeMsgs, domain.Message{
 				ID:         "err-" + time.Now().Format("150405"),
@@ -356,6 +369,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case docFallbackSavedMsg:
 		m.confirmSave = false
 		m.previewStatus = fmt.Sprintf("No default app; saved to %s", msg.DestPath)
+
+	case filePickedMsg:
+		if msg.Path != "" {
+			cleanPath := strings.TrimSpace(msg.Path)
+			m.input.SetValue("file://" + cleanPath + " ")
+			m.input.SetCursor(len(m.input.Value()))
+			m.previewStatus = fmt.Sprintf("Attached %s (press Enter to send)", filepath.Base(cleanPath))
+		} else {
+			m.previewStatus = ""
+		}
+
+	case filePickErrMsg:
+		if errors.Is(msg.Err, errNoFilePicker) {
+			m.previewStatus = "No file picker found"
+		} else {
+			m.previewStatus = "File picker failed"
+		}
 
 	case tea.KeyMsg:
 		if m.confirmDocAction {
@@ -1017,6 +1047,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 
+	case "alt+f":
+		m.previewStatus = "Opening file selector..."
+		return m.pickFileCmd()
+
 	case "pgup", "ctrl+u":
 		m.chatScrollOffset += 5
 		return nil
@@ -1038,13 +1072,25 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		}
 
 	case "enter":
-		m.previewStatus = ""
 		text := strings.TrimSpace(m.input.Value())
 		if text == "" {
 			return nil
 		}
+		m.previewStatus = "Sending..."
 		m.input.Reset()
 		chatID := m.activeChatID
+
+		if strings.HasPrefix(text, "file://") {
+			filePath, caption := parseFileURI(text)
+			return func() tea.Msg {
+				sentMsg, err := m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption)
+				if err != nil {
+					return sendErrMsg{ChatID: chatID, Err: err}
+				}
+				return messageSentMsg(sentMsg)
+			}
+		}
+
 		return func() tea.Msg {
 			sentMsg, err := m.adapter.SendTextMessage(m.ctx, chatID, text)
 			if err != nil {
@@ -1449,13 +1495,27 @@ func (m *Model) renderUnreadListView() []string {
 
 	statusNotice := ""
 	if m.confirmDocAction {
-		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
 	} else if m.confirmSave {
-		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
 	} else if m.previewStatus != "" {
-		statusNotice = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
+		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
 	}
-	lines = append(lines, helpStyle.Render("[Enter] Open · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit")+statusNotice)
+
+	helpText := "[Enter] Open · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit"
+	if statusNotice != "" {
+		if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
+			if cw >= lipgloss.Width(statusNotice)+12 {
+				lines = append(lines, helpStyle.Render("[q] Quit")+" · "+statusNotice)
+			} else {
+				lines = append(lines, statusNotice)
+			}
+		} else {
+			lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
+		}
+	} else {
+		lines = append(lines, helpStyle.Render(helpText))
+	}
 	return lines
 }
 
@@ -1579,17 +1639,30 @@ func (m *Model) renderChatView() []string {
 		mediaHelp = " · [Alt+P] Preview Media"
 	}
 
-	helpText := "[Enter] Send · [Esc] Back" + mediaHelp + scrollInfo
+	helpText := "[Enter] Send · [Alt+F] Attach · [Esc] Back" + mediaHelp + scrollInfo
 
 	statusNotice := ""
 	if m.confirmDocAction {
-		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
 	} else if m.confirmSave {
-		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
 	} else if m.previewStatus != "" {
-		statusNotice = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
+		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
 	}
-	lines = append(lines, helpStyle.Render(helpText)+statusNotice)
+
+	if statusNotice != "" {
+		if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
+			if cw >= lipgloss.Width(statusNotice)+14 {
+				lines = append(lines, helpStyle.Render("[Esc] Back")+" · "+statusNotice)
+			} else {
+				lines = append(lines, statusNotice)
+			}
+		} else {
+			lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
+		}
+	} else {
+		lines = append(lines, helpStyle.Render(helpText))
+	}
 
 	return lines
 }
@@ -1872,5 +1945,152 @@ func launchViewer(cmdStr string, filePath string) error {
 		_ = cmd.Wait()
 	}()
 	return nil
+}
+
+var errNoFilePicker = errors.New("no file selector found")
+
+func (m *Model) pickFileCmd() tea.Cmd {
+	customCmd := ""
+	if m.cfg != nil {
+		customCmd = m.cfg.GetFilePickerCommand()
+	}
+	return func() tea.Msg {
+		path, err := openFilePicker(customCmd)
+		if err != nil {
+			return filePickErrMsg{Err: err}
+		}
+		return filePickedMsg{Path: path}
+	}
+}
+
+func openFilePicker(customCmd string) (string, error) {
+	if strings.TrimSpace(customCmd) != "" {
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command("cmd", "/c", customCmd)
+		} else {
+			cmd = exec.Command("sh", "-c", customCmd)
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 {
+				return "", nil
+			}
+			return "", fmt.Errorf("picker failed: %w", err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			"[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select file to send'; if ($f.ShowDialog() -eq 'OK') { $f.FileName }")
+		out, err := cmd.Output()
+		if err != nil {
+			return "", errNoFilePicker
+		}
+		return strings.TrimSpace(string(out)), nil
+
+	case "darwin":
+		cmd := exec.Command("osascript", "-e", "POSIX path of (choose file with prompt \"Select file to send:\")")
+		out, err := cmd.Output()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+				return "", nil
+			}
+			return "", errNoFilePicker
+		}
+		return strings.TrimSpace(string(out)), nil
+
+	default: // Linux / BSD
+		if _, err := exec.LookPath("zenity"); err == nil {
+			cmd := exec.Command("zenity", "--file-selection", "--title=Select file to send")
+			out, err := cmd.Output()
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					return "", nil
+				}
+				return "", fmt.Errorf("zenity failed: %w", err)
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		if _, err := exec.LookPath("kdialog"); err == nil {
+			cmd := exec.Command("kdialog", "--getopenfilename", "--title", "Select file to send")
+			out, err := cmd.Output()
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					return "", nil
+				}
+				return "", fmt.Errorf("kdialog failed: %w", err)
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		if _, err := exec.LookPath("python3"); err == nil {
+			pyScript := "import tkinter as tk, tkinter.filedialog as fd; root = tk.Tk(); root.withdraw(); print(fd.askopenfilename() or '')"
+			cmd := exec.Command("python3", "-c", pyScript)
+			out, err := cmd.Output()
+			if err == nil {
+				return strings.TrimSpace(string(out)), nil
+			}
+		}
+		return "", errNoFilePicker
+	}
+}
+
+func parseFileURI(input string) (string, string) {
+	rem := strings.TrimPrefix(input, "file://")
+	rem = strings.TrimSpace(rem)
+
+	// If enclosed in quotes, e.g. "path/with spaces.pdf" caption here
+	if strings.HasPrefix(rem, "\"") {
+		if endIdx := strings.Index(rem[1:], "\""); endIdx != -1 {
+			filePath := rem[1 : endIdx+1]
+			caption := strings.TrimSpace(rem[endIdx+2:])
+			return expandPath(filePath), caption
+		}
+	} else if strings.HasPrefix(rem, "'") {
+		if endIdx := strings.Index(rem[1:], "'"); endIdx != -1 {
+			filePath := rem[1 : endIdx+1]
+			caption := strings.TrimSpace(rem[endIdx+2:])
+			return expandPath(filePath), caption
+		}
+	}
+
+	// If the entire remainder exists as a file directly (e.g. unquoted path with spaces)
+	if _, err := os.Stat(expandPath(rem)); err == nil {
+		return expandPath(rem), ""
+	}
+
+	// Otherwise, find the split point between file path and caption
+	parts := strings.Split(rem, " ")
+	for i := len(parts); i >= 1; i-- {
+		candidate := strings.Join(parts[:i], " ")
+		if _, err := os.Stat(expandPath(candidate)); err == nil {
+			caption := strings.TrimSpace(strings.Join(parts[i:], " "))
+			return expandPath(candidate), caption
+		}
+	}
+
+	// Fallback: first word is file, rest is caption
+	idx := strings.Index(rem, " ")
+	if idx != -1 {
+		return expandPath(rem[:idx]), strings.TrimSpace(rem[idx+1:])
+	}
+	return expandPath(rem), ""
+}
+
+func expandPath(p string) string {
+	p = strings.TrimSpace(p)
+	if strings.HasPrefix(p, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil && home != "" {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
 }
 
