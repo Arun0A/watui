@@ -93,3 +93,37 @@ func TestEncryptedDatabaseAndMigration(t *testing.T) {
 		t.Fatalf("expected 'Alice', got '%s'", name)
 	}
 }
+
+func TestSaltFallbackLocation(t *testing.T) {
+	origDir := t.TempDir()
+	origSalt, err := GetOrCreateLocalSalt(origDir)
+	if err != nil {
+		t.Fatalf("failed to create salt in origDir: %v", err)
+	}
+
+	// Set XDG_DATA_HOME to point to origDir's parent so fallback finds it
+	origXDG := os.Getenv("XDG_DATA_HOME")
+	defer func() { _ = os.Setenv("XDG_DATA_HOME", origXDG) }()
+	_ = os.Setenv("XDG_DATA_HOME", origDir)
+
+	// Create a new folder (e.g. symlink or moved folder) that has .watui_key inside XDG_DATA_HOME/watui
+	targetXDGDir := filepath.Join(origDir, "watui")
+	_ = os.MkdirAll(targetXDGDir, 0700)
+	_ = os.WriteFile(filepath.Join(targetXDGDir, KeyFileName), origSalt, 0600)
+
+	newDir := t.TempDir()
+	retrievedSalt, err := GetOrCreateLocalSalt(newDir)
+	if err != nil {
+		t.Fatalf("failed to get salt in newDir: %v", err)
+	}
+
+	if string(retrievedSalt) != string(origSalt) {
+		t.Fatalf("expected salt to be reused from fallback location")
+	}
+
+	// Verify it was copied into newDir
+	copied, err := os.ReadFile(filepath.Join(newDir, KeyFileName))
+	if err != nil || string(copied) != string(origSalt) {
+		t.Fatalf("expected salt to be persisted locally in newDir")
+	}
+}

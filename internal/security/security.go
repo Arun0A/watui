@@ -64,6 +64,34 @@ func GetOrCreateLocalSalt(keyDir string) ([]byte, error) {
 		return data[:32], nil
 	}
 
+	// Check fallback locations for existing salt before generating a new one
+	// (e.g. when app is invoked through a symlink or moved between directories)
+	var fallbackDirs []string
+	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+		fallbackDirs = append(fallbackDirs, filepath.Join(xdgData, "watui"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		fallbackDirs = append(fallbackDirs, filepath.Join(home, ".local", "share", "watui"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		if realExe, err := filepath.EvalSymlinks(exe); err == nil {
+			fallbackDirs = append(fallbackDirs, filepath.Dir(realExe))
+		}
+		fallbackDirs = append(fallbackDirs, filepath.Dir(exe))
+	}
+
+	for _, fallbackDir := range fallbackDirs {
+		if fallbackDir == "" || fallbackDir == keyDir {
+			continue
+		}
+		fbPath := filepath.Join(fallbackDir, KeyFileName)
+		if data, err := os.ReadFile(fbPath); err == nil && len(data) >= 32 {
+			salt := data[:32]
+			_ = os.WriteFile(keyFilePath, salt, 0600)
+			return salt, nil
+		}
+	}
+
 	salt := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, fmt.Errorf("failed to generate random salt: %w", err)

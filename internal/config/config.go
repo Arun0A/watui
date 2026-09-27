@@ -48,15 +48,43 @@ type Config struct {
 }
 
 // DefaultDBPath returns the appropriate default path for the database file.
-// If ./watui.db exists in the working directory, it returns that for backward compatibility.
-// Otherwise, it returns $XDG_DATA_HOME/watui/watui.db (or ~/.local/share/watui/watui.db).
+// Priority:
+// 1. ./watui.db in current working directory (if it exists)
+// 2. watui.db next to the resolved executable (handles symlinks and portable installs)
+// 3. If watui.yaml exists next to the resolved executable, use <exeDir>/watui.db
+// 4. Windows default: <exeDir>/watui.db or ./watui.db
+// 5. Unix default: $XDG_DATA_HOME/watui/watui.db or ~/.local/share/watui/watui.db
 func DefaultDBPath() string {
+	// 1. Current working directory watui.db
 	if _, err := os.Stat("watui.db"); err == nil {
 		return "watui.db"
 	}
+
+	exeDir := GetExeDir()
+	if exeDir != "" && exeDir != "." {
+		// 2. Next to the resolved executable (handles symlinked binaries pointing to original setup)
+		candidate := filepath.Join(exeDir, "watui.db")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+
+		// 3. If a config exists in exeDir, it's a self-contained portable directory
+		for _, cfgName := range []string{"watui.yaml", "watui.yml", "watui.json"} {
+			if _, err := os.Stat(filepath.Join(exeDir, cfgName)); err == nil {
+				return candidate
+			}
+		}
+	}
+
+	// 4. Windows portable default
 	if runtime.GOOS == "windows" {
+		if exeDir != "" && exeDir != "." {
+			return filepath.Join(exeDir, "watui.db")
+		}
 		return "watui.db"
 	}
+
+	// 5. Unix XDG standard path
 	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
 		return filepath.Join(xdgData, "watui", "watui.db")
 	}
@@ -173,7 +201,7 @@ func defaultCandidatePaths() []string {
 		"watui.json",
 	}
 
-	if exeDir := getExeDir(); exeDir != "" && exeDir != "." {
+	if exeDir := GetExeDir(); exeDir != "" && exeDir != "." {
 		paths = append(paths,
 			filepath.Join(exeDir, "watui.yaml"),
 			filepath.Join(exeDir, "watui.yml"),
@@ -199,7 +227,8 @@ func defaultCandidatePaths() []string {
 	return paths
 }
 
-func getExeDir() string {
+// GetExeDir returns the directory containing the running binary, resolving any symlinks.
+func GetExeDir() string {
 	exe, err := os.Executable()
 	if err != nil {
 		return ""

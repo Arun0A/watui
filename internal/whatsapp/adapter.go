@@ -27,6 +27,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
+	"watui/internal/config"
 	"watui/internal/domain"
 	"watui/internal/security"
 )
@@ -119,14 +120,23 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	dbDir := filepath.Dir(cfg.DBPath)
 	if dbDir == "" || dbDir == "." {
-		if runtime.GOOS == "windows" {
-			dbDir = "."
-		} else if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
-			dbDir = filepath.Join(xdgData, "watui")
-		} else if home, err := os.UserHomeDir(); err == nil {
-			dbDir = filepath.Join(home, ".local", "share", "watui")
-		} else {
-			dbDir = "."
+		if exeDir := config.GetExeDir(); exeDir != "" && exeDir != "." {
+			if _, err := os.Stat(filepath.Join(exeDir, "watui.db")); err == nil {
+				dbDir = exeDir
+			} else if _, err := os.Stat(filepath.Join(exeDir, security.KeyFileName)); err == nil {
+				dbDir = exeDir
+			}
+		}
+		if dbDir == "" || dbDir == "." {
+			if runtime.GOOS == "windows" {
+				dbDir = "."
+			} else if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+				dbDir = filepath.Join(xdgData, "watui")
+			} else if home, err := os.UserHomeDir(); err == nil {
+				dbDir = filepath.Join(home, ".local", "share", "watui")
+			} else {
+				dbDir = "."
+			}
 		}
 	}
 	dbKey, err := security.DeriveDatabaseKey(dbDir)
@@ -191,6 +201,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			rows, err := localDB.Query(`SELECT DISTINCT m.chat_id, l.pn FROM watui_unread_messages m 
 				JOIN whatsmeow_lid_map l ON (m.chat_id = l.lid || '@lid' OR m.chat_id LIKE l.lid || ':%@lid')`)
 			if err == nil {
+				defer func() { _ = rows.Close() }()
 				type lidUpdate struct {
 					oldChatID string
 					newChatID string
@@ -202,9 +213,10 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 						updates = append(updates, lidUpdate{oldChatID: oldID, newChatID: pn + "@s.whatsapp.net"})
 					}
 				}
-				_ = rows.Close()
-				for _, u := range updates {
-					_, _ = localDB.Exec("UPDATE watui_unread_messages SET chat_id = ? WHERE chat_id = ?", u.newChatID, u.oldChatID)
+				if err := rows.Err(); err == nil {
+					for _, u := range updates {
+						_, _ = localDB.Exec("UPDATE watui_unread_messages SET chat_id = ? WHERE chat_id = ?", u.newChatID, u.oldChatID)
+					}
 				}
 			}
 		}
