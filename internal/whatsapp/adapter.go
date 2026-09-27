@@ -565,7 +565,7 @@ func (a *Adapter) getLocalGroups() []domain.Contact {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var groups []domain.Contact
 	for rows.Next() {
@@ -597,10 +597,10 @@ func (a *Adapter) saveLocalGroups(groups []*types.GroupInfo) {
 		_ = tx.Rollback()
 		return
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, g := range groups {
-		name := strings.TrimSpace(g.GroupName.Name)
+		name := strings.TrimSpace(g.Name)
 		if name == "" {
 			name = "Group (" + g.JID.User + ")"
 		}
@@ -864,7 +864,7 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 			return nil, err
 		}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var msgs []domain.Message
 	cols, _ := rows.Columns()
@@ -1102,8 +1102,8 @@ func (a *Adapter) resolveChatName(chat types.JID) string {
 		}
 		if a.client != nil {
 			info, err := a.client.GetGroupInfo(context.Background(), chatNonAD)
-			if err == nil && info != nil && info.GroupName.Name != "" {
-				name := strings.TrimSpace(info.GroupName.Name)
+			if err == nil && info != nil && info.Name != "" {
+				name := strings.TrimSpace(info.Name)
 				if a.localDB != nil {
 					_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", chatStr, name)
 				}

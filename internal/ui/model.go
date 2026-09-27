@@ -82,7 +82,6 @@ type Model struct {
 	previewStatus string
 	width         int
 	height        int
-	err           error
 
 	msgChan      chan domain.Message
 	statusChan   chan domain.ConnectionStatus
@@ -2101,7 +2100,7 @@ func (m *Model) pickFileCmd() tea.Cmd {
 			}
 		}
 		return tea.ExecProcess(execCmd, func(err error) tea.Msg {
-			defer os.Remove(outPath)
+			defer func() { _ = os.Remove(outPath) }()
 			if err != nil {
 				var exitErr *exec.ExitError
 				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
