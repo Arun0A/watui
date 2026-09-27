@@ -118,6 +118,7 @@ preview:
   image: "feh -."
   video: "vlc"
   sticker: "custom-sticker-cmd"
+  document: "zathura"
 `
 	tmpDir := t.TempDir()
 	cfgFile := filepath.Join(tmpDir, "watui.yaml")
@@ -139,6 +140,9 @@ preview:
 	if cfg.GetPreviewCommand("sticker") != "custom-sticker-cmd" {
 		t.Errorf("Expected custom-sticker-cmd, got %s", cfg.GetPreviewCommand("sticker"))
 	}
+	if cfg.GetPreviewCommand("document") != "zathura" {
+		t.Errorf("Expected zathura, got %s", cfg.GetPreviewCommand("document"))
+	}
 
 	// Test default commands on empty config
 	emptyCfg := &Config{}
@@ -150,6 +154,9 @@ preview:
 	}
 	if emptyCfg.GetPreviewCommand("sticker") != "mpv --loop=inf" {
 		t.Errorf("Expected default mpv --loop=inf for sticker, got %s", emptyCfg.GetPreviewCommand("sticker"))
+	}
+	if emptyCfg.GetPreviewCommand("document") != "xdg-open" {
+		t.Errorf("Expected default xdg-open for document, got %s", emptyCfg.GetPreviewCommand("document"))
 	}
 }
 

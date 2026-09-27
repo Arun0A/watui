@@ -61,9 +61,11 @@ type Model struct {
 	input            textinput.Model
 
 	// Media navigation & saving
-	selectedMediaIdx int    // targeted media index within activeChat (0-based)
-	confirmSave      bool   // true when prompting "save? (y/N)"
-	pendingSavePath  string // path of the media file awaiting save confirmation
+	selectedMediaIdx int             // targeted media index within activeChat (0-based)
+	confirmSave      bool            // true when prompting "save? (y/N)"
+	pendingSavePath  string          // path of the media file awaiting save confirmation
+	confirmDocAction bool            // true when prompting "Document: Open [o] or Save [s]?"
+	pendingDocMsg    *domain.Message // message awaiting document action choice
 
 	// Contact search view
 	contacts       []domain.Contact
@@ -102,6 +104,16 @@ type mediaPreviewErrMsg struct {
 }
 type mediaPreviewSuccessMsg struct {
 	Path string
+}
+type docOpenedMsg struct {
+	Path string
+}
+type docSavedMsg struct {
+	DestPath string
+}
+type docFallbackSavedMsg struct {
+	DestPath string
+	OpenErr  error
 }
 
 // NewModel initializes the TUI model.
@@ -322,14 +334,59 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mediaPreviewErrMsg:
 		m.confirmSave = false
-		m.previewStatus = fmt.Sprintf("Preview error: %v", msg.Err)
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
+		m.previewStatus = fmt.Sprintf("Error: %v", msg.Err)
 
 	case mediaPreviewSuccessMsg:
 		m.previewStatus = ""
 		m.confirmSave = true
 		m.pendingSavePath = msg.Path
 
+	case docOpenedMsg:
+		m.previewStatus = ""
+		m.confirmSave = true
+		m.pendingSavePath = msg.Path
+
+	case docSavedMsg:
+		m.confirmSave = false
+		m.previewStatus = fmt.Sprintf("Saved to %s", msg.DestPath)
+
+	case docFallbackSavedMsg:
+		m.confirmSave = false
+		m.previewStatus = fmt.Sprintf("No default app; saved to %s", msg.DestPath)
+
 	case tea.KeyMsg:
+		if m.confirmDocAction {
+			switch msg.String() {
+			case "o", "O":
+				m.confirmDocAction = false
+				if m.pendingDocMsg != nil {
+					targetMsg := *m.pendingDocMsg
+					m.pendingDocMsg = nil
+					return m, m.downloadAndOpenDocCmd(targetMsg)
+				}
+				return m, nil
+			case "s", "S":
+				m.confirmDocAction = false
+				if m.pendingDocMsg != nil {
+					targetMsg := *m.pendingDocMsg
+					m.pendingDocMsg = nil
+					return m, m.downloadAndSaveDocCmd(targetMsg)
+				}
+				return m, nil
+			case "esc":
+				m.confirmDocAction = false
+				m.pendingDocMsg = nil
+				m.previewStatus = ""
+				return m, nil
+			default:
+				m.confirmDocAction = false
+				m.pendingDocMsg = nil
+				m.previewStatus = ""
+			}
+		}
+
 		if m.confirmSave {
 			switch msg.String() {
 			case "y", "Y":
@@ -759,12 +816,17 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 	case "r", "d": // mark as read / dismiss
 		m.previewStatus = ""
 		m.confirmSave = false
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
 			m.dismissUnread(chatID)
 		}
 
 	case "alt+p": // preview media from unread chat
+		m.confirmSave = false
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
 			chat := m.unreadChats[chatID]
@@ -777,6 +839,12 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 					}
 				}
 				if targetMsg != nil {
+					if targetMsg.Type == domain.MessageTypeDocument {
+						m.confirmDocAction = true
+						m.pendingDocMsg = targetMsg
+						m.previewStatus = ""
+						return nil
+					}
 					return m.previewMediaCmd(*targetMsg)
 				}
 				m.previewStatus = "No media found in this chat"
@@ -787,6 +855,8 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 	case "enter": // open chat
 		m.previewStatus = ""
 		m.confirmSave = false
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
 			chat := m.unreadChats[chatID]
@@ -887,6 +957,8 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	case "esc":
 		m.previewStatus = ""
 		m.confirmSave = false
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
 		m.view = ViewUnreadList
 		return tea.ClearScreen
 
@@ -894,6 +966,9 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		return tea.Quit
 
 	case "alt+p":
+		m.confirmSave = false
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
 		mediaIndices := m.getChatMediaIndices()
 		if len(mediaIndices) == 0 {
 			m.previewStatus = "No media found in this chat"
@@ -903,9 +978,17 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.selectedMediaIdx = len(mediaIndices) - 1
 		}
 		targetMsg := m.activeMsgs[mediaIndices[m.selectedMediaIdx]]
+		if targetMsg.Type == domain.MessageTypeDocument {
+			m.confirmDocAction = true
+			m.pendingDocMsg = &targetMsg
+			m.previewStatus = ""
+			return nil
+		}
 		return m.previewMediaCmd(targetMsg)
 
 	case "alt+up", "alt+k", "alt+left":
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
 		mediaIndices := m.getChatMediaIndices()
 		if len(mediaIndices) > 0 {
 			if m.selectedMediaIdx > 0 {
@@ -919,6 +1002,8 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case "alt+down", "alt+j", "alt+right":
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
 		mediaIndices := m.getChatMediaIndices()
 		if len(mediaIndices) > 0 {
 			if m.selectedMediaIdx < len(mediaIndices)-1 {
@@ -1362,7 +1447,9 @@ func (m *Model) renderUnreadListView() []string {
 	}
 
 	statusNotice := ""
-	if m.confirmSave {
+	if m.confirmDocAction {
+		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
+	} else if m.confirmSave {
 		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
 	} else if m.previewStatus != "" {
 		statusNotice = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
@@ -1494,7 +1581,9 @@ func (m *Model) renderChatView() []string {
 	helpText := "[Enter] Send · [Esc] Back" + mediaHelp + scrollInfo
 
 	statusNotice := ""
-	if m.confirmSave {
+	if m.confirmDocAction {
+		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
+	} else if m.confirmSave {
 		statusNotice = " · " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
 	} else if m.previewStatus != "" {
 		statusNotice = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
@@ -1653,6 +1742,42 @@ func (m *Model) scrollToMediaMessage(msgIdx int) {
 	m.chatScrollOffset = linesAfter
 }
 
+func (m *Model) downloadAndOpenDocCmd(msg domain.Message) tea.Cmd {
+	m.previewStatus = "Downloading document..."
+	m.confirmSave = false
+	cmdStr := m.cfg.GetPreviewCommand("document")
+	return func() tea.Msg {
+		filePath, err := m.adapter.DownloadMedia(m.ctx, msg)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		if err := launchViewer(cmdStr, filePath); err != nil {
+			destPath, saveErr := saveToDownloads(filePath)
+			if saveErr != nil {
+				return mediaPreviewErrMsg{Err: fmt.Errorf("open failed (%v) and save failed (%w)", err, saveErr)}
+			}
+			return docFallbackSavedMsg{DestPath: destPath, OpenErr: err}
+		}
+		return docOpenedMsg{Path: filePath}
+	}
+}
+
+func (m *Model) downloadAndSaveDocCmd(msg domain.Message) tea.Cmd {
+	m.previewStatus = "Downloading & saving document..."
+	m.confirmSave = false
+	return func() tea.Msg {
+		filePath, err := m.adapter.DownloadMedia(m.ctx, msg)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		destPath, err := saveToDownloads(filePath)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		return docSavedMsg{DestPath: destPath}
+	}
+}
+
 func saveToDownloads(srcPath string) (string, error) {
 	if srcPath == "" {
 		return "", fmt.Errorf("no media file to save")
@@ -1673,6 +1798,14 @@ func saveToDownloads(srcPath string) (string, error) {
 	}
 
 	fileName := filepath.Base(srcPath)
+	// If cached filename has prefix like <msgID>_<realFileName>, clean it up for ~/Downloads
+	if idx := strings.Index(fileName, "_"); idx != -1 && idx < len(fileName)-1 {
+		prefix := fileName[:idx]
+		if len(prefix) >= 8 {
+			fileName = fileName[idx+1:]
+		}
+	}
+
 	destPath := filepath.Join(downloadsDir, fileName)
 
 	// Avoid overwriting existing files

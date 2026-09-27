@@ -11,9 +11,10 @@ import (
 
 // PreviewConfig specifies commands used to preview media attachments on demand.
 type PreviewConfig struct {
-	Image   string `json:"image" yaml:"image"`
-	Video   string `json:"video" yaml:"video"`
-	Sticker string `json:"sticker" yaml:"sticker"`
+	Image    string `json:"image" yaml:"image"`
+	Video    string `json:"video" yaml:"video"`
+	Sticker  string `json:"sticker" yaml:"sticker"`
+	Document string `json:"document" yaml:"document"`
 }
 
 // Config represents declarative user configuration for watui.
@@ -51,11 +52,17 @@ func (c *Config) GetPreviewCommand(msgType string) string {
 			if c.Preview.Sticker != "" {
 				return c.Preview.Sticker
 			}
+		case "document":
+			if c.Preview.Document != "" {
+				return c.Preview.Document
+			}
 		}
 	}
 	switch strings.ToLower(msgType) {
 	case "video":
 		return "mpv"
+	case "document":
+		return "xdg-open"
 	default:
 		return "mpv --loop=inf"
 	}

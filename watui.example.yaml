@@ -24,16 +24,22 @@ mute:
   # - "+18005550199"
   # - "120363000000000000@g.us"
 
-# 3. Media Preview (Images, Videos, Stickers)
+# 3. Media Preview (Images, Videos, Stickers, Documents)
 # Command used to preview media attachments on demand.
-# Defaults to mpv if omitted.
-# Note: For images and stickers, --loop=inf keeps mpv from exiting immediately.
+# Defaults:
+#   image:    "mpv --loop=inf"
+#   video:    "mpv"
+#   sticker:  "mpv --loop=inf"
+#   document: "xdg-open" (opens in default OS viewer, e.g. PDF/office)
 preview:
   # image: "mpv --loop=inf"
   # video: "mpv"
   # sticker: "mpv --loop=inf"
+  # document: "xdg-open"
   #
   # Custom command examples:
   # image: "feh -."
   # video: "vlc"
+  # document: "zathura"
+
 

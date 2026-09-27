@@ -854,3 +854,80 @@ func TestMediaPreviewKeybindings(t *testing.T) {
 		t.Errorf("Expected previewStatus to say 'Saved to...', got %q", model.previewStatus)
 	}
 }
+
+func TestDocumentActionKeybindings(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// Add an unread chat with a Document message
+	model.handleIncomingMessage(domain.Message{
+		ID:         "DOC_001",
+		ChatID:     "12345@s.whatsapp.net",
+		ChatName:   "Colleague",
+		Sender:     "12345@s.whatsapp.net",
+		SenderName: "Colleague",
+		Timestamp:  time.Now(),
+		Type:       domain.MessageTypeDocument,
+		Body:       "[Document: Report.pdf]",
+	})
+
+	// 1. In ViewUnreadList: Press Alt+P on the document chat
+	altPCmd := model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	// Should NOT download yet; should set confirmDocAction to true
+	if altPCmd != nil {
+		t.Errorf("Expected nil cmd before user chooses open or save for document")
+	}
+	if !model.confirmDocAction {
+		t.Errorf("Expected confirmDocAction to be true")
+	}
+
+	// 2. Pressing 's' chooses to Save to Downloads
+	m, saveCmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = m.(*Model)
+	if saveCmd == nil {
+		t.Errorf("Expected non-nil saveCmd after pressing 's'")
+	}
+	if model.confirmDocAction {
+		t.Errorf("Expected confirmDocAction to be reset to false after choosing 's'")
+	}
+
+	// 3. Open chat to test in ViewChat
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat, got %v", model.view)
+	}
+
+	// Press Alt+P in ViewChat
+	chatAltPCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	if chatAltPCmd != nil {
+		t.Errorf("Expected nil cmd before choice in chat view")
+	}
+	if !model.confirmDocAction {
+		t.Errorf("Expected confirmDocAction to be true in chat view")
+	}
+
+	// Pressing 'o' chooses to Open
+	m2, openCmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	model = m2.(*Model)
+	if openCmd == nil {
+		t.Errorf("Expected non-nil openCmd after pressing 'o'")
+	}
+	if model.confirmDocAction {
+		t.Errorf("Expected confirmDocAction to be reset to false after choosing 'o'")
+	}
+
+	// Press Alt+P then 'esc' to cancel before downloading
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	if !model.confirmDocAction {
+		t.Errorf("Expected confirmDocAction to be true")
+	}
+	m3, escCmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = m3.(*Model)
+	if escCmd != nil {
+		t.Errorf("Expected nil cmd on esc cancellation")
+	}
+	if model.confirmDocAction {
+		t.Errorf("Expected confirmDocAction to be false after esc")
+	}
+}
+
