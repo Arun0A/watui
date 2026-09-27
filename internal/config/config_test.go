@@ -190,3 +190,18 @@ func TestDefaultDBPath(t *testing.T) {
 		t.Fatalf("expected non-empty default db path")
 	}
 }
+
+func TestExampleConfigIsUnconfigured(t *testing.T) {
+	examplePath := filepath.Join("..", "..", "watui.example.yaml")
+	cfg, err := Load(examplePath)
+	if err != nil {
+		t.Fatalf("Failed to load watui.example.yaml: %v", err)
+	}
+	if len(cfg.GetPinned()) != 0 {
+		t.Errorf("watui.example.yaml must have 0 pinned items by default, got %v", cfg.GetPinned())
+	}
+	if len(cfg.GetMuted()) != 0 {
+		t.Errorf("watui.example.yaml must have 0 muted items by default, got %v", cfg.GetMuted())
+	}
+}
+
