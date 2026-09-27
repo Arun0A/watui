@@ -19,7 +19,8 @@ import (
 )
 
 func main() {
-	dbPath := flag.String("db", "watui.db", "Path to SQLite session and cache database")
+	defaultDB := config.DefaultDBPath()
+	dbPath := flag.String("db", "", "Path to SQLite session and cache database (default: "+defaultDB+")")
 	logFile := flag.String("log-file", "watui.log", "File to write protocol and network logs to (or 'none' to disable)")
 	logLevel := flag.String("log", "WARN", "Protocol log level (DEBUG, INFO, WARN, ERROR)")
 	cliMode := flag.Bool("cli", false, "Run in headless CLI mode instead of interactive TUI")
@@ -34,6 +35,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	finalDBPath := *dbPath
+	if finalDBPath == "" {
+		if appCfg.DBPath != "" {
+			finalDBPath = appCfg.DBPath
+		} else {
+			finalDBPath = defaultDB
+		}
+	}
+
 	// 1. Set up context and termination signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -43,7 +53,7 @@ func main() {
 
 	// 2. Initialize WhatsApp Adapter (Encapsulated Protocol Layer)
 	adapter, err := whatsapp.NewAdapter(ctx, whatsapp.Config{
-		DBPath:     *dbPath,
+		DBPath:     finalDBPath,
 		LogFile:    *logFile,
 		LogLevel:   *logLevel,
 		DeviceName: appCfg.GetDeviceName(),

@@ -1109,5 +1109,44 @@ func TestResolvePickerAndTerminalPickerCmd(t *testing.T) {
 	}
 }
 
+func TestChatHeaderDisplaysJIDOnlyInChatWindow(t *testing.T) {
+	adapter := &mockAdapter{}
+	m := NewModel(context.Background(), adapter)
+	m.width = 80
+	m.height = 24
+
+	testJID := "919007088779-1525273602@g.us"
+	m.activeChatID = testJID
+	m.activeName = "Special Group"
+
+	// 1. In ViewUnreadList: JID should NOT appear
+	m.view = ViewUnreadList
+	unreadView := m.View()
+	if strings.Contains(unreadView, testJID) {
+		t.Errorf("JID %q should NOT appear in ViewUnreadList", testJID)
+	}
+
+	// 2. In ViewContactPicker: JID should NOT appear
+	m.view = ViewContactPicker
+	contactView := m.View()
+	if strings.Contains(contactView, testJID) {
+		t.Errorf("JID %q should NOT appear in ViewContactPicker", testJID)
+	}
+
+	// 3. In ViewChat: JID MUST appear in the top-right header
+	m.view = ViewChat
+	chatLines := m.renderChatView()
+	if len(chatLines) == 0 {
+		t.Fatalf("Expected non-empty chat lines")
+	}
+	headerLine := chatLines[0]
+	if !strings.Contains(headerLine, testJID) {
+		t.Errorf("Expected chat header to contain JID %q, got: %s", testJID, headerLine)
+	}
+	if !strings.Contains(headerLine, "Special Group") {
+		t.Errorf("Expected chat header to contain active name, got: %s", headerLine)
+	}
+}
+
 
 

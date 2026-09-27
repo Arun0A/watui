@@ -1281,6 +1281,10 @@ var (
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#585B70"))
+
+	jidStyle = lipgloss.NewStyle().
+			Faint(true).
+			Foreground(lipgloss.Color("#585B70"))
 )
 
 func (m *Model) contentWidth() int {
@@ -1529,11 +1533,38 @@ func (m *Model) renderChatView() []string {
 	if strings.Contains(m.activeChatID, "@g.us") {
 		chatPrefix = "Group"
 	}
-	headerText := fmt.Sprintf("%s %s  %s",
-		titleStyle.Render(chatPrefix),
-		selectedTitleStyle.Render(m.activeName),
-		statusStyle.Render("· [Esc] Back"),
-	)
+	leftTitle := fmt.Sprintf("%s %s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(m.activeName))
+	escBack := statusStyle.Render("· [Esc] Back")
+	leftPart := fmt.Sprintf("%s  %s", leftTitle, escBack)
+
+	rightPart := ""
+	if m.activeChatID != "" {
+		rightPart = jidStyle.Render(m.activeChatID)
+	}
+
+	leftW := lipgloss.Width(leftPart)
+	rightW := lipgloss.Width(rightPart)
+
+	var headerText string
+	if rightPart != "" && leftW+2+rightW <= cw {
+		spaces := strings.Repeat(" ", max(1, cw-leftW-rightW))
+		headerText = leftPart + spaces + rightPart
+	} else if rightPart != "" && rightW+10 < cw {
+		// Truncate name so JID still fits flush to the right
+		availForName := max(3, cw-rightW-len(chatPrefix)-len(" · [Esc] Back")-5)
+		truncName := m.activeName
+		if len(truncName) > availForName {
+			truncName = truncName[:max(1, availForName-1)] + "…"
+		}
+		leftTitle = fmt.Sprintf("%s %s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(truncName))
+		leftPart = fmt.Sprintf("%s  %s", leftTitle, escBack)
+		leftW = lipgloss.Width(leftPart)
+		spaces := strings.Repeat(" ", max(1, cw-leftW-rightW))
+		headerText = leftPart + spaces + rightPart
+	} else {
+		headerText = leftPart
+	}
+
 	divider := dividerStyle.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
 

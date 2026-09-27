@@ -3,7 +3,7 @@
 *.exe
 
 # SQLite databases & temp files
-*.db
+*.db*
 *.db-wal
 *.db-shm
 *.db-journal
@@ -16,3 +16,5 @@
 .direnv/
 .vscode/
 
+# Config
+watui.yaml
