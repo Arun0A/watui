@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -36,6 +37,17 @@ type Config struct {
 	SourcePath string `json:"-" yaml:"-"`
 }
 
+func defaultDocumentCommand() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "rundll32 url.dll,FileProtocolHandler"
+	case "darwin":
+		return "open"
+	default:
+		return "xdg-open"
+	}
+}
+
 // GetPreviewCommand returns the command string for previewing the given message type.
 func (c *Config) GetPreviewCommand(msgType string) string {
 	if c != nil {
@@ -62,7 +74,7 @@ func (c *Config) GetPreviewCommand(msgType string) string {
 	case "video":
 		return "mpv"
 	case "document":
-		return "xdg-open"
+		return defaultDocumentCommand()
 	default:
 		return "mpv --loop=inf"
 	}

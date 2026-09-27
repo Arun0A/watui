@@ -155,8 +155,9 @@ preview:
 	if emptyCfg.GetPreviewCommand("sticker") != "mpv --loop=inf" {
 		t.Errorf("Expected default mpv --loop=inf for sticker, got %s", emptyCfg.GetPreviewCommand("sticker"))
 	}
-	if emptyCfg.GetPreviewCommand("document") != "xdg-open" {
-		t.Errorf("Expected default xdg-open for document, got %s", emptyCfg.GetPreviewCommand("document"))
+	expectedDoc := defaultDocumentCommand()
+	if emptyCfg.GetPreviewCommand("document") != expectedDoc {
+		t.Errorf("Expected default %s for document, got %s", expectedDoc, emptyCfg.GetPreviewCommand("document"))
 	}
 }
 

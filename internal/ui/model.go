@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1846,7 +1847,11 @@ func launchViewer(cmdStr string, filePath string) error {
 	var cmd *exec.Cmd
 	if strings.Contains(cmdStr, "%s") {
 		fullCmd := fmt.Sprintf(cmdStr, filePath)
-		cmd = exec.Command("sh", "-c", fullCmd)
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command("cmd", "/c", fullCmd)
+		} else {
+			cmd = exec.Command("sh", "-c", fullCmd)
+		}
 	} else {
 		parts := strings.Fields(cmdStr)
 		if len(parts) == 0 {
