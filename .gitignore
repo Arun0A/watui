@@ -18,3 +18,7 @@
 
 # Config
 watui.yaml
+
+# Nix build outputs
+result
+result-*
