@@ -29,6 +29,9 @@ type Config struct {
 	// DeviceName specifies the companion client name registered in WhatsApp Linked Devices (default: "WA-TUI").
 	DeviceName string `json:"device_name" yaml:"device_name"`
 
+	// DBPath optionally specifies the path to SQLite session and cache database.
+	DBPath string `json:"db_path" yaml:"db_path"`
+
 	// Muted lists chat JIDs, phone numbers, or group/contact names to hide from unread.
 	Muted []string `json:"muted" yaml:"muted"`
 
@@ -41,6 +44,22 @@ type Config struct {
 
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
+}
+
+// DefaultDBPath returns the appropriate default path for the database file.
+// If ./watui.db exists in the working directory, it returns that for backward compatibility.
+// Otherwise, it returns $XDG_DATA_HOME/watui/watui.db (or ~/.local/share/watui/watui.db).
+func DefaultDBPath() string {
+	if _, err := os.Stat("watui.db"); err == nil {
+		return "watui.db"
+	}
+	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+		return filepath.Join(xdgData, "watui", "watui.db")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share", "watui", "watui.db")
+	}
+	return "watui.db"
 }
 
 func defaultDocumentCommand() string {

@@ -185,4 +185,11 @@ file_picker: "ranger --choosefile=/tmp/watui_test && cat /tmp/watui_test"
 	}
 }
 
+func TestDefaultDBPath(t *testing.T) {
+	path := DefaultDBPath()
+	if path == "" {
+		t.Fatalf("expected non-empty default db path")
+	}
+}
+
 

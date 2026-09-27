@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/mutecomm/go-sqlcipher/v4"
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
@@ -27,6 +27,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"watui/internal/domain"
+	"watui/internal/security"
 )
 
 func init() {
@@ -114,7 +115,31 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		clientLog = waLog.Noop
 	}
 
-	container, err := sqlstore.New(ctx, "sqlite3", "file:"+cfg.DBPath+"?_foreign_keys=on", dbLog)
+	dbDir := filepath.Dir(cfg.DBPath)
+	if dbDir == "" || dbDir == "." {
+		if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+			dbDir = filepath.Join(xdgData, "watui")
+		} else if home, err := os.UserHomeDir(); err == nil {
+			dbDir = filepath.Join(home, ".local", "share", "watui")
+		} else {
+			dbDir = "."
+		}
+	}
+	dbKey, err := security.DeriveDatabaseKey(dbDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive database encryption key: %w", err)
+	}
+
+	// Auto-migrate any existing unencrypted SQLite database to SQLCipher
+	if security.IsPlaintextSQLite(cfg.DBPath) {
+		if err := security.MigratePlaintextDatabase(cfg.DBPath, dbKey); err != nil {
+			return nil, fmt.Errorf("failed to migrate existing plaintext database: %w", err)
+		}
+	}
+
+	dsn := security.BuildEncryptedDSN(cfg.DBPath, dbKey)
+
+	container, err := sqlstore.New(ctx, "sqlite3", dsn, dbLog)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session store: %w", err)
 	}
@@ -126,7 +151,11 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 
-	localDB, _ := sql.Open("sqlite3", "file:"+cfg.DBPath+"?_foreign_keys=on")
+	localDB, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open local database: %w", err)
+	}
+	security.EnsureSecurePermissions(cfg.DBPath)
 	if localDB != nil {
 		_, _ = localDB.Exec(`CREATE TABLE IF NOT EXISTS watui_groups (
 			jid TEXT PRIMARY KEY,
