@@ -686,6 +686,25 @@ func (a *Adapter) saveLocalGroups(groups []*types.GroupInfo) {
 	_ = tx.Commit()
 }
 
+func (a *Adapter) getLIDMap() map[string]string {
+	m := make(map[string]string)
+	if a.localDB == nil {
+		return m
+	}
+	rows, err := a.localDB.Query("SELECT lid, pn FROM whatsmeow_lid_map")
+	if err != nil {
+		return m
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var lid, pn string
+		if err := rows.Scan(&lid, &pn); err == nil && lid != "" && pn != "" {
+			m[lid] = pn
+		}
+	}
+	return m
+}
+
 func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 	var list []domain.Contact
 
@@ -696,28 +715,34 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 	if a.client != nil && a.client.Store != nil && a.client.Store.Contacts != nil {
 		rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
 		if err == nil {
+			lidMap := a.getLIDMap()
 			for jid, info := range rawMap {
 				if jid.Server != types.DefaultUserServer && jid.Server != "lid" {
-					// Whatsmeow's contact store contains group participants and group JIDs without human names.
-					// Groups are loaded authoritatively from watui_groups.
 					continue
-				}
-				actualJID := jid
-				if jid.Server == "lid" {
-					if pn := a.ResolveLIDToPhone(jid.User); pn != "" {
-						actualJID = types.NewJID(pn, types.DefaultUserServer)
-					}
 				}
 				name := strings.TrimSpace(info.FullName)
 				if name == "" {
 					name = strings.TrimSpace(info.BusinessName)
 				}
+				// Skip anonymous LIDs that have no address book name
+				if jid.Server == "lid" && name == "" {
+					continue
+				}
 				if name == "" {
 					name = strings.TrimSpace(info.PushName)
 				}
+				// Skip contacts without any human name or push name
 				if name == "" {
-					name = actualJID.User
+					continue
 				}
+
+				actualJID := jid
+				if jid.Server == "lid" {
+					if pn, ok := lidMap[jid.User]; ok && pn != "" {
+						actualJID = types.NewJID(pn, types.DefaultUserServer)
+					}
+				}
+
 				list = append(list, domain.Contact{
 					JID:          actualJID.String(),
 					Name:         name,
@@ -730,7 +755,7 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 	}
 
 	// 3. Deduplicate by JID (preferring real human names over generic IDs)
-	best := make(map[string]domain.Contact)
+	best := make(map[string]domain.Contact, len(list))
 	for _, c := range list {
 		existing, found := best[c.JID]
 		if !found {
@@ -751,47 +776,7 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 	return deduped
 }
 
-func (a *Adapter) fetchMissingGroupNames(ctx context.Context) {
-	if a.localDB == nil || a.client == nil || !a.client.IsConnected() {
-		return
-	}
-
-	query := `
-		SELECT DISTINCT chat_jid FROM (
-			SELECT chat_jid FROM whatsmeow_chat_settings WHERE chat_jid LIKE '%@g.us'
-			UNION
-			SELECT chat_id AS chat_jid FROM watui_unread_messages WHERE chat_id LIKE '%@g.us'
-		) WHERE chat_jid NOT IN (SELECT jid FROM watui_groups WHERE name NOT LIKE 'Group (%' AND name != '')
-	`
-	rows, err := a.localDB.Query(query)
-	if err != nil {
-		return
-	}
-	var missingJIDs []string
-	for rows.Next() {
-		var jid string
-		if err := rows.Scan(&jid); err == nil && jid != "" {
-			missingJIDs = append(missingJIDs, jid)
-		}
-	}
-	_ = rows.Close()
-
-	for _, jidStr := range missingJIDs {
-		parsedJID, err := types.ParseJID(jidStr)
-		if err != nil {
-			continue
-		}
-		infoCtx, infoCancel := context.WithTimeout(ctx, 5*time.Second)
-		info, err := a.client.GetGroupInfo(infoCtx, parsedJID.ToNonAD())
-		infoCancel()
-		if err == nil && info != nil && info.Name != "" {
-			name := strings.TrimSpace(info.Name)
-			_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", parsedJID.ToNonAD().String(), name)
-		}
-	}
-}
-
-// EnsureGroupNames ensures that metadata for the provided group JIDs is fetched and cached.
+// EnsureGroupNames ensures that metadata for the provided group JIDs is fetched and cached in background.
 func (a *Adapter) EnsureGroupNames(ctx context.Context, jids []string) {
 	if len(jids) == 0 || a.localDB == nil {
 		return
@@ -812,9 +797,13 @@ func (a *Adapter) EnsureGroupNames(ctx context.Context, jids []string) {
 		return
 	}
 
+	if len(needed) > 3 {
+		needed = needed[:3]
+	}
+
 	go func() {
 		if a.client != nil && !a.client.IsConnected() {
-			if !a.client.WaitForConnection(10 * time.Second) {
+			if !a.client.WaitForConnection(5 * time.Second) {
 				return
 			}
 		}
@@ -824,7 +813,7 @@ func (a *Adapter) EnsureGroupNames(ctx context.Context, jids []string) {
 			if err != nil {
 				continue
 			}
-			reqCtx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+			reqCtx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
 			info, err := a.client.GetGroupInfo(reqCtx, parsedJID.ToNonAD())
 			cancel()
 			if err == nil && info != nil && info.Name != "" {
@@ -834,7 +823,7 @@ func (a *Adapter) EnsureGroupNames(ctx context.Context, jids []string) {
 			}
 		}
 		if updated {
-			a.refreshContactsCache(a.ctx)
+			go a.refreshContactsCache(a.ctx)
 		}
 	}()
 }
@@ -858,25 +847,17 @@ func (a *Adapter) refreshContactsCache(ctx context.Context) {
 		a.refreshMu.Unlock()
 	}()
 
-	// Wait up to 10 seconds for socket connection if not yet connected
-	if !a.client.IsConnected() {
-		if !a.client.WaitForConnection(10 * time.Second) {
-			return
+	// If socket is connected, fetch joined groups from WhatsApp in a fast single network call
+	if a.client.IsConnected() {
+		groupCtx, groupCancel := context.WithTimeout(ctx, 8*time.Second)
+		groups, err := a.client.GetJoinedGroups(groupCtx)
+		groupCancel()
+		if err == nil && len(groups) > 0 {
+			a.saveLocalGroups(groups)
 		}
 	}
 
-	// 1. Fetch joined groups from WhatsApp with 15-second timeout
-	groupCtx, groupCancel := context.WithTimeout(ctx, 15*time.Second)
-	groups, err := a.client.GetJoinedGroups(groupCtx)
-	groupCancel()
-	if err == nil && len(groups) > 0 {
-		a.saveLocalGroups(groups)
-	}
-
-	// 2. Fetch missing group metadata for groups in chat_settings / unread_messages
-	a.fetchMissingGroupNames(ctx)
-
-	// 3. Re-read combined local list
+	// Re-read combined local list
 	combined := a.fetchLocalContacts(ctx)
 
 	a.contactsMu.Lock()

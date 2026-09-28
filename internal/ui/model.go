@@ -73,6 +73,8 @@ type Model struct {
 
 	// Contact search view
 	contacts       []domain.Contact
+	contactsByJID  map[string]*domain.Contact
+	contactsByUser map[string]*domain.Contact
 	filteredList   []domain.Contact
 	contactSearch  textinput.Model
 	contactCursor  int
@@ -158,20 +160,22 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 	}
 
 	m := &Model{
-		adapter:       adapter,
-		ctx:           ctx,
-		cfg:           cfg,
-		view:          ViewUnreadList,
-		unreadChats:   make(map[string]*UnreadChat),
-		chatOrder:     make([]string, 0),
-		input:         ti,
-		contactSearch: si,
-		openWithInput: oi,
-		status:        domain.StatusConnecting,
-		msgChan:       make(chan domain.Message, 200),
-		statusChan:    make(chan domain.ConnectionStatus, 10),
-		dismissChan:   make(chan string, 50),
-		contactsChan:  make(chan []domain.Contact, 10),
+		adapter:        adapter,
+		ctx:            ctx,
+		cfg:            cfg,
+		view:           ViewUnreadList,
+		unreadChats:    make(map[string]*UnreadChat),
+		chatOrder:      make([]string, 0),
+		input:          ti,
+		contactSearch:  si,
+		openWithInput:  oi,
+		status:         domain.StatusConnecting,
+		msgChan:        make(chan domain.Message, 200),
+		statusChan:     make(chan domain.ConnectionStatus, 10),
+		dismissChan:    make(chan string, 50),
+		contactsChan:   make(chan []domain.Contact, 10),
+		contactsByJID:  make(map[string]*domain.Contact),
+		contactsByUser: make(map[string]*domain.Contact),
 	}
 
 	m.initPinnedChats()
@@ -312,7 +316,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForMessages())
 
 	case contactsLoadedMsg:
-		m.contacts = []domain.Contact(msg)
+		m.setContacts([]domain.Contact(msg))
 		m.filterContacts(m.contactSearch.Value())
 		m.loadingContact = false
 		m.updateUnreadChatNames()
@@ -566,6 +570,29 @@ func isRealChatName(name string, chatID string) bool {
 	return true
 }
 
+func (m *Model) setContacts(contacts []domain.Contact) {
+	m.contacts = contacts
+	byJID := make(map[string]*domain.Contact, len(contacts)*2)
+	byUser := make(map[string]*domain.Contact, len(contacts))
+	for i := range m.contacts {
+		c := &m.contacts[i]
+		clean := c.JID
+		if idx := strings.Index(clean, ":"); idx != -1 {
+			if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+				clean = clean[:idx] + clean[atIdx:]
+			}
+		}
+		byJID[clean] = c
+		byJID[c.JID] = c
+		user := strings.Split(clean, "@")[0]
+		if _, ok := byUser[user]; !ok {
+			byUser[user] = c
+		}
+	}
+	m.contactsByJID = byJID
+	m.contactsByUser = byUser
+}
+
 func (m *Model) resolveChatName(chatID string, msgChatName string, fallback string) (string, bool) {
 	isGroup := strings.Contains(chatID, "@g.us")
 
@@ -577,14 +604,23 @@ func (m *Model) resolveChatName(chatID string, msgChatName string, fallback stri
 	}
 	baseUser := strings.Split(cleanID, "@")[0]
 
-	// 1. Check m.contacts first (contains address book contacts & local groups)
-	for _, c := range m.contacts {
-		cBase := strings.Split(c.JID, "@")[0]
-		if c.JID == cleanID || cBase == baseUser {
-			if isRealChatName(c.Name, c.JID) {
-				return c.Name, c.IsGroup || isGroup
-			}
+	if len(m.contacts) > 0 && len(m.contactsByJID) < len(m.contacts) {
+		m.setContacts(m.contacts)
+	}
+
+	// 1. Check m.contacts first (O(1) map lookup)
+	var contact *domain.Contact
+	if m.contactsByJID != nil {
+		contact = m.contactsByJID[cleanID]
+		if contact == nil {
+			contact = m.contactsByJID[chatID]
 		}
+	}
+	if contact == nil && m.contactsByUser != nil {
+		contact = m.contactsByUser[baseUser]
+	}
+	if contact != nil && isRealChatName(contact.Name, contact.JID) {
+		return contact.Name, contact.IsGroup || isGroup
 	}
 
 	// 2. If message already had a real group or chat name
@@ -613,21 +649,33 @@ func (m *Model) getChatMatchNames(chatID string, explicitNames ...string) []stri
 		}
 	}
 	baseUser := strings.Split(cleanID, "@")[0]
-	for _, c := range m.contacts {
-		cBase := strings.Split(c.JID, "@")[0]
-		if c.JID == cleanID || cBase == baseUser {
-			if c.Name != "" {
-				names = append(names, c.Name)
-			}
-			if c.PushName != "" {
-				names = append(names, c.PushName)
-			}
-			if c.BusinessName != "" {
-				names = append(names, c.BusinessName)
-			}
-			if c.JID != "" && c.JID != chatID {
-				names = append(names, c.JID)
-			}
+
+	if len(m.contacts) > 0 && len(m.contactsByJID) < len(m.contacts) {
+		m.setContacts(m.contacts)
+	}
+
+	var c *domain.Contact
+	if m.contactsByJID != nil {
+		c = m.contactsByJID[cleanID]
+		if c == nil {
+			c = m.contactsByJID[chatID]
+		}
+	}
+	if c == nil && m.contactsByUser != nil {
+		c = m.contactsByUser[baseUser]
+	}
+	if c != nil {
+		if c.Name != "" {
+			names = append(names, c.Name)
+		}
+		if c.PushName != "" {
+			names = append(names, c.PushName)
+		}
+		if c.BusinessName != "" {
+			names = append(names, c.BusinessName)
+		}
+		if c.JID != "" && c.JID != chatID {
+			names = append(names, c.JID)
 		}
 	}
 	return names
