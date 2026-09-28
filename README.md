@@ -6,7 +6,7 @@
 
 A minimal WhatsApp TUI, specifically designed to reduce dependency on WA web or desktop application.
 
-**Philosophy**: Most of the time you do not require past conversation context visible for a reply. And you often have to keep open whatsapp (either in web or desktop-app) anticipating a message from someone, this eats up a lot of RAM of your system (which you were saving for absolutely nothing).
+**Philosophy**: Most of the time you do not require past conversation context visible for a reply. And you often have to keep whatsapp (either in web or desktop-app) open anticipating a message from someone, this eats up a lot of RAM of your system (which you were saving for absolutely nothing).
 
 So WA-TUI, just shows you the unread messages with message context persisting only for your active session. Although, you can start a new chat with any contact on demand. It is however a stripped down version of WhatsApp.
 
@@ -15,8 +15,10 @@ So WA-TUI, just shows you the unread messages with message context persisting on
 - Your 5 years chat history is not loaded
 - You don't get to see their profile picture
 
-idk, probably much more... but i dont really see need for them.
-However, if you really feel that you would not want to compromise on these, you continue using the official web or desktop version.
+idk, probably much more... but i dont really see the need for them.
+However, if you really feel that you would not want to compromise on these, you should be using the official web or desktop version for such tasks.
+
+I must repeat, WATUI is not a replacement to the official WhatsApp, it's just what you need most of the time.
 
 ### What you get:
 - Media and document preview (and saving them ofc)
@@ -129,6 +131,7 @@ nix develop github:Arun0A/watui
 | <kbd>a</kbd> | Toggle Archived chats section (press again or <kbd>Esc</kbd> to return) |
 | <kbd>n</kbd> | Start a new chat (search all contacts & groups) |
 | <kbd>d</kbd> / <kbd>r</kbd> | Dismiss selected unread conversation |
+| <kbd>?</kbd> | Toggle keybind hints |
 | <kbd>q</kbd> / <kbd>Ctrl</kbd>+<kbd>c</kbd> | Quit watui |
 
 ### Chat View
@@ -137,9 +140,10 @@ nix develop github:Arun0A/watui
 | `Type text` + <kbd>Enter</kbd> | Send message |
 | <kbd>Esc</kbd> | Back to inbox |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Scroll conversation history up / down |
+| <kbd>Alt</kbd> + <kbd>Enter</kbd> / <kbd>C-j</kbd> | Multi-line message |
 | <kbd>Alt</kbd> + <kbd>p</kbd> | Preview selected media attachment |
 | <kbd>Alt</kbd> + <kbd>x</kbd> | Stop media / audio playback immediately |
-| <kbd>Alt</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd> | Cycle targeted media in the message thread |
+| <kbd>Alt</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Cycle targeted media in the message thread |
 | <kbd>Alt</kbd> + <kbd>f</kbd> | Open file picker to attach and send a file |
 | <kbd>Ctrl</kbd> + <kbd>u</kbd> | Clear current input line |
 
