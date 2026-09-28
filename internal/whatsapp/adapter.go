@@ -155,6 +155,9 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	container, err := sqlstore.New(ctx, "sqlite3", dsn, dbLog)
 	if err != nil {
+		if strings.Contains(err.Error(), "file is not a database") {
+			return nil, fmt.Errorf("failed to open encrypted database %q: encryption key mismatch or file corrupted (is this database from another machine or user?): %w", cfg.DBPath, err)
+		}
 		return nil, fmt.Errorf("failed to open session store: %w", err)
 	}
 
