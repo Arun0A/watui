@@ -44,6 +44,7 @@ func (m *mockAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, 
 func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error { return nil }
 func (m *mockAdapter) Sync(ctx context.Context) error                         { return nil }
 func (m *mockAdapter) OnChatDismissed(h func(chatID string))                  {}
+func (m *mockAdapter) EnsureGroupNames(ctx context.Context, jids []string)    {}
 func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
 	return "/tmp/mock_media.jpg", nil
 }
@@ -1171,5 +1172,109 @@ func TestChatHeaderDisplaysJIDOnlyInChatWindow(t *testing.T) {
 	}
 	if !strings.Contains(headerLine, "Special Group") {
 		t.Errorf("Expected chat header to contain active name, got: %s", headerLine)
+	}
+}
+
+func TestPinnedGroupJIDResolution(t *testing.T) {
+	groupJID := "919007088779-1525273602@g.us"
+	cfg := &config.Config{
+		Pin: []string{groupJID},
+	}
+
+	var requestedJIDs []string
+	adapter := &mockAdapter{}
+	// Custom adapter tracking EnsureGroupNames
+	adapterTracker := &mockGroupAdapter{
+		mockAdapter: *adapter,
+		onEnsure: func(jids []string) {
+			requestedJIDs = append(requestedJIDs, jids...)
+		},
+	}
+
+	m := NewModel(context.Background(), adapterTracker, cfg)
+
+	// 1. Initial pinned chat name must NOT be raw JID with "@g.us"
+	chat, ok := m.unreadChats[groupJID]
+	if !ok {
+		t.Fatalf("Expected pinned chat for %s", groupJID)
+	}
+	if strings.Contains(chat.Name, "@") {
+		t.Errorf("Pinned chat name must NOT contain '@', got %q", chat.Name)
+	}
+	if chat.Name != "Group (919007088779-1525273602)" {
+		t.Errorf("Expected fallback 'Group (919007088779-1525273602)', got %q", chat.Name)
+	}
+
+	// 2. EnsureGroupNames should have been requested
+	if len(requestedJIDs) != 1 || requestedJIDs[0] != groupJID {
+		t.Errorf("Expected EnsureGroupNames with %s, got %v", groupJID, requestedJIDs)
+	}
+
+	// 3. Now simulate contacts update providing the real group name
+	m.Update(contactsLoadedMsg([]domain.Contact{
+		{
+			JID:     groupJID,
+			Name:    "Family Vacation 2024",
+			IsGroup: true,
+		},
+	}))
+
+	updatedChat := m.unreadChats[groupJID]
+	if updatedChat.Name != "Family Vacation 2024" {
+		t.Errorf("Expected updated chat name 'Family Vacation 2024', got %q", updatedChat.Name)
+	}
+}
+
+type mockGroupAdapter struct {
+	mockAdapter
+	onEnsure func(jids []string)
+}
+
+func (m *mockGroupAdapter) EnsureGroupNames(ctx context.Context, jids []string) {
+	if m.onEnsure != nil {
+		m.onEnsure(jids)
+	}
+}
+
+func TestContactPickerShowsAllAndFiltersAll(t *testing.T) {
+	adapter := &mockAdapter{}
+	m := NewModel(context.Background(), adapter)
+
+	// Create 60 contacts
+	var allContacts []domain.Contact
+	for i := 1; i <= 60; i++ {
+		allContacts = append(allContacts, domain.Contact{
+			JID:     fmt.Sprintf("user%d@s.whatsapp.net", i),
+			Name:    fmt.Sprintf("Contact %02d", i),
+			IsGroup: false,
+		})
+	}
+	// Add 5 groups
+	for i := 1; i <= 5; i++ {
+		allContacts = append(allContacts, domain.Contact{
+			JID:     fmt.Sprintf("120363000%d@g.us", i),
+			Name:    fmt.Sprintf("Group Alpha %d", i),
+			IsGroup: true,
+		})
+	}
+
+	m.contacts = allContacts
+
+	// 1. Empty filter should show all 65 contacts/groups, not truncated to 40
+	m.filterContacts("")
+	if len(m.filteredList) != 65 {
+		t.Errorf("Expected 65 contacts in filtered list, got %d", len(m.filteredList))
+	}
+
+	// 2. Search query matching all 60 contacts ("contact") should return all 60, not capped at 40
+	m.filterContacts("contact")
+	if len(m.filteredList) != 60 {
+		t.Errorf("Expected 60 matching contacts, got %d", len(m.filteredList))
+	}
+
+	// 3. Search query matching groups ("alpha") should return all 5 groups
+	m.filterContacts("alpha")
+	if len(m.filteredList) != 5 {
+		t.Errorf("Expected 5 matching groups, got %d", len(m.filteredList))
 	}
 }

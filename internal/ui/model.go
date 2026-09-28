@@ -146,7 +146,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 	si.Width = 50
 
 	oi := textinput.New()
-	oi.Placeholder = "e.g. nvim, zathura, code"
+	oi.Placeholder = ""
 	oi.CharLimit = 100
 	oi.Width = 35
 
@@ -529,6 +529,43 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func isRealChatName(name string, chatID string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if strings.Contains(name, "@") {
+		return false
+	}
+	if strings.HasPrefix(name, "Group (") {
+		return false
+	}
+	if strings.HasPrefix(name, "120363") {
+		return false
+	}
+	cleanID := chatID
+	if idx := strings.Index(cleanID, ":"); idx != -1 {
+		if atIdx := strings.Index(cleanID, "@"); atIdx != -1 {
+			cleanID = cleanID[:idx] + cleanID[atIdx:]
+		}
+	}
+	baseUser := strings.Split(cleanID, "@")[0]
+	if name == chatID || name == cleanID || name == baseUser {
+		return false
+	}
+	isDigitsAndHyphens := true
+	for _, r := range name {
+		if (r < '0' || r > '9') && r != '-' && r != '+' && r != ' ' {
+			isDigitsAndHyphens = false
+			break
+		}
+	}
+	if isDigitsAndHyphens && (strings.Contains(name, "-") || len(strings.ReplaceAll(name, " ", "")) >= 10) {
+		return false
+	}
+	return true
+}
+
 func (m *Model) resolveChatName(chatID string, msgChatName string, fallback string) (string, bool) {
 	isGroup := strings.Contains(chatID, "@g.us")
 
@@ -544,14 +581,14 @@ func (m *Model) resolveChatName(chatID string, msgChatName string, fallback stri
 	for _, c := range m.contacts {
 		cBase := strings.Split(c.JID, "@")[0]
 		if c.JID == cleanID || cBase == baseUser {
-			if c.Name != "" && !strings.HasPrefix(c.Name, "Group (") && !strings.HasPrefix(c.Name, "120363") {
+			if isRealChatName(c.Name, c.JID) {
 				return c.Name, c.IsGroup || isGroup
 			}
 		}
 	}
 
 	// 2. If message already had a real group or chat name
-	if msgChatName != "" && !strings.HasPrefix(msgChatName, "120363") && !strings.HasPrefix(msgChatName, "Group (") {
+	if isRealChatName(msgChatName, chatID) {
 		return msgChatName, isGroup
 	}
 
@@ -561,7 +598,7 @@ func (m *Model) resolveChatName(chatID string, msgChatName string, fallback stri
 	}
 
 	// 4. Fallback for 1-on-1:
-	if fallback != "" && fallback != chatID && !strings.HasPrefix(fallback, "120363") {
+	if isRealChatName(fallback, chatID) {
 		return fallback, false
 	}
 	return baseUser, false
@@ -619,6 +656,7 @@ func (m *Model) initPinnedChats() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	var groupJIDs []string
 	for _, rule := range m.cfg.GetPinned() {
 		chatID := rule
 		if !strings.Contains(chatID, "@") {
@@ -631,7 +669,10 @@ func (m *Model) initPinnedChats() {
 				}
 			}
 		}
-		name, isGroup := m.resolveChatName(chatID, rule, rule)
+		if strings.Contains(chatID, "@g.us") {
+			groupJIDs = append(groupJIDs, chatID)
+		}
+		name, isGroup := m.resolveChatName(chatID, "", "")
 		chat := &UnreadChat{
 			ChatID:   chatID,
 			Name:     name,
@@ -641,6 +682,10 @@ func (m *Model) initPinnedChats() {
 		m.unreadChats[chatID] = chat
 	}
 	m.sortChatOrderLocked()
+
+	if len(groupJIDs) > 0 && m.adapter != nil {
+		m.adapter.EnsureGroupNames(m.ctx, groupJIDs)
+	}
 }
 
 func (m *Model) syncPinnedChats() {
@@ -670,23 +715,36 @@ func (m *Model) syncPinnedChatsLocked() {
 		}
 
 		if matchedContact != nil {
+			realName := matchedContact.Name
+			if !isRealChatName(realName, matchedContact.JID) {
+				realName = ""
+			}
+
 			if matchedID != "" && matchedID != matchedContact.JID {
 				chat := m.unreadChats[matchedID]
 				delete(m.unreadChats, matchedID)
 				chat.ChatID = matchedContact.JID
-				chat.Name = matchedContact.Name
+				if realName != "" {
+					chat.Name = realName
+				}
 				chat.IsGroup = matchedContact.IsGroup
 				chat.IsPinned = true
 				m.unreadChats[matchedContact.JID] = chat
 			} else if matchedID != "" {
 				chat := m.unreadChats[matchedID]
-				chat.Name = matchedContact.Name
+				if realName != "" {
+					chat.Name = realName
+				}
 				chat.IsGroup = matchedContact.IsGroup
 				chat.IsPinned = true
 			} else {
+				chatName := realName
+				if chatName == "" {
+					chatName, _ = m.resolveChatName(matchedContact.JID, "", "")
+				}
 				m.unreadChats[matchedContact.JID] = &UnreadChat{
 					ChatID:   matchedContact.JID,
-					Name:     matchedContact.Name,
+					Name:     chatName,
 					IsGroup:  matchedContact.IsGroup,
 					IsPinned: true,
 				}
@@ -1270,11 +1328,7 @@ func (m *Model) filterContacts(query string) {
 	trimmed := strings.TrimSpace(query)
 	q := strings.ToLower(trimmed)
 	if q == "" {
-		if len(m.contacts) > 40 {
-			m.filteredList = m.contacts[:40]
-		} else {
-			m.filteredList = m.contacts
-		}
+		m.filteredList = m.contacts
 		m.contactCursor = 0
 		m.contactOffset = 0
 		return
@@ -1296,16 +1350,12 @@ func (m *Model) filterContacts(query string) {
 		})
 	}
 
-	maxMatches := 40
 	for _, c := range m.contacts {
 		nameMatch := strings.Contains(strings.ToLower(c.Name), q)
 		if c.IsGroup {
 			// Never match group JID (e.g. 120363@g.us)
 			if nameMatch {
 				res = append(res, c)
-				if len(res) >= maxMatches {
-					break
-				}
 			}
 			continue
 		}
@@ -1319,9 +1369,6 @@ func (m *Model) filterContacts(query string) {
 
 		if nameMatch || pushMatch || phoneMatch {
 			res = append(res, c)
-			if len(res) >= maxMatches {
-				break
-			}
 		}
 	}
 	m.filteredList = res

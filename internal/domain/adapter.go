@@ -69,4 +69,7 @@ type WhatsAppAdapter interface {
 
 	// DownloadMedia downloads the media attachment for a message on demand and returns the local file path.
 	DownloadMedia(ctx context.Context, msg Message) (string, error)
+
+	// EnsureGroupNames ensures that metadata for the provided group JIDs is fetched and cached.
+	EnsureGroupNames(ctx context.Context, jids []string)
 }

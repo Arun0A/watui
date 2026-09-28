@@ -630,6 +630,37 @@ func (a *Adapter) getLocalGroups() []domain.Contact {
 	return groups
 }
 
+func isGenericName(name, jid string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return true
+	}
+	if strings.Contains(name, "@") {
+		return true
+	}
+	if strings.HasPrefix(name, "Group (") {
+		return true
+	}
+	cleanJID := jid
+	if idx := strings.Index(cleanJID, "@"); idx != -1 {
+		cleanJID = cleanJID[:idx]
+	}
+	if name == cleanJID || name == jid {
+		return true
+	}
+	isDigitsAndHyphens := true
+	for _, r := range name {
+		if (r < '0' || r > '9') && r != '-' && r != '+' && r != ' ' {
+			isDigitsAndHyphens = false
+			break
+		}
+	}
+	if isDigitsAndHyphens && (strings.Contains(name, "-") || len(strings.ReplaceAll(name, " ", "")) >= 10) {
+		return true
+	}
+	return false
+}
+
 func (a *Adapter) saveLocalGroups(groups []*types.GroupInfo) {
 	if a.localDB == nil || len(groups) == 0 {
 		return
@@ -648,9 +679,9 @@ func (a *Adapter) saveLocalGroups(groups []*types.GroupInfo) {
 	for _, g := range groups {
 		name := strings.TrimSpace(g.Name)
 		if name == "" {
-			name = "Group (" + g.JID.User + ")"
+			continue
 		}
-		_, _ = stmt.Exec(g.JID.String(), name)
+		_, _ = stmt.Exec(g.JID.ToNonAD().String(), name)
 	}
 	_ = tx.Commit()
 }
@@ -666,7 +697,9 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 		rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
 		if err == nil {
 			for jid, info := range rawMap {
-				if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer && jid.Server != "lid" {
+				if jid.Server != types.DefaultUserServer && jid.Server != "lid" {
+					// Whatsmeow's contact store contains group participants and group JIDs without human names.
+					// Groups are loaded authoritatively from watui_groups.
 					continue
 				}
 				actualJID := jid
@@ -690,14 +723,120 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 					Name:         name,
 					PushName:     info.PushName,
 					BusinessName: info.BusinessName,
-					IsGroup:      actualJID.Server == types.GroupServer,
+					IsGroup:      false,
 				})
 			}
 		}
 	}
 
-	sortContacts(list)
-	return list
+	// 3. Deduplicate by JID (preferring real human names over generic IDs)
+	best := make(map[string]domain.Contact)
+	for _, c := range list {
+		existing, found := best[c.JID]
+		if !found {
+			best[c.JID] = c
+			continue
+		}
+		if isGenericName(existing.Name, existing.JID) && !isGenericName(c.Name, c.JID) {
+			best[c.JID] = c
+		}
+	}
+
+	deduped := make([]domain.Contact, 0, len(best))
+	for _, c := range best {
+		deduped = append(deduped, c)
+	}
+
+	sortContacts(deduped)
+	return deduped
+}
+
+func (a *Adapter) fetchMissingGroupNames(ctx context.Context) {
+	if a.localDB == nil || a.client == nil || !a.client.IsConnected() {
+		return
+	}
+
+	query := `
+		SELECT DISTINCT chat_jid FROM (
+			SELECT chat_jid FROM whatsmeow_chat_settings WHERE chat_jid LIKE '%@g.us'
+			UNION
+			SELECT chat_id AS chat_jid FROM watui_unread_messages WHERE chat_id LIKE '%@g.us'
+		) WHERE chat_jid NOT IN (SELECT jid FROM watui_groups WHERE name NOT LIKE 'Group (%' AND name != '')
+	`
+	rows, err := a.localDB.Query(query)
+	if err != nil {
+		return
+	}
+	var missingJIDs []string
+	for rows.Next() {
+		var jid string
+		if err := rows.Scan(&jid); err == nil && jid != "" {
+			missingJIDs = append(missingJIDs, jid)
+		}
+	}
+	_ = rows.Close()
+
+	for _, jidStr := range missingJIDs {
+		parsedJID, err := types.ParseJID(jidStr)
+		if err != nil {
+			continue
+		}
+		infoCtx, infoCancel := context.WithTimeout(ctx, 5*time.Second)
+		info, err := a.client.GetGroupInfo(infoCtx, parsedJID.ToNonAD())
+		infoCancel()
+		if err == nil && info != nil && info.Name != "" {
+			name := strings.TrimSpace(info.Name)
+			_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", parsedJID.ToNonAD().String(), name)
+		}
+	}
+}
+
+// EnsureGroupNames ensures that metadata for the provided group JIDs is fetched and cached.
+func (a *Adapter) EnsureGroupNames(ctx context.Context, jids []string) {
+	if len(jids) == 0 || a.localDB == nil {
+		return
+	}
+	var needed []string
+	for _, jid := range jids {
+		jid = strings.TrimSpace(jid)
+		if !strings.Contains(jid, "@g.us") && !strings.HasPrefix(jid, "120363") {
+			continue
+		}
+		var name string
+		err := a.localDB.QueryRow("SELECT name FROM watui_groups WHERE (jid = ? OR jid LIKE ?) AND name NOT LIKE 'Group (%' AND name != ''", jid, strings.Split(jid, "@")[0]+"%").Scan(&name)
+		if err != nil || name == "" {
+			needed = append(needed, jid)
+		}
+	}
+	if len(needed) == 0 {
+		return
+	}
+
+	go func() {
+		if a.client != nil && !a.client.IsConnected() {
+			if !a.client.WaitForConnection(10 * time.Second) {
+				return
+			}
+		}
+		updated := false
+		for _, jidStr := range needed {
+			parsedJID, err := NormalizeJID(jidStr)
+			if err != nil {
+				continue
+			}
+			reqCtx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+			info, err := a.client.GetGroupInfo(reqCtx, parsedJID.ToNonAD())
+			cancel()
+			if err == nil && info != nil && info.Name != "" {
+				name := strings.TrimSpace(info.Name)
+				_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", parsedJID.ToNonAD().String(), name)
+				updated = true
+			}
+		}
+		if updated {
+			a.refreshContactsCache(a.ctx)
+		}
+	}()
 }
 
 func (a *Adapter) refreshContactsCache(ctx context.Context) {
@@ -719,36 +858,29 @@ func (a *Adapter) refreshContactsCache(ctx context.Context) {
 		a.refreshMu.Unlock()
 	}()
 
-	// Wait up to 3 seconds for socket connection to complete
-	if !a.client.WaitForConnection(3 * time.Second) {
-		return
+	// Wait up to 10 seconds for socket connection if not yet connected
+	if !a.client.IsConnected() {
+		if !a.client.WaitForConnection(10 * time.Second) {
+			return
+		}
 	}
 
-	// 1. Fetch joined groups from WhatsApp with 4-second timeout
-	groupCtx, groupCancel := context.WithTimeout(ctx, 4*time.Second)
+	// 1. Fetch joined groups from WhatsApp with 15-second timeout
+	groupCtx, groupCancel := context.WithTimeout(ctx, 15*time.Second)
 	groups, err := a.client.GetJoinedGroups(groupCtx)
 	groupCancel()
 	if err == nil && len(groups) > 0 {
 		a.saveLocalGroups(groups)
 	}
 
-	// 2. Re-read combined local list
+	// 2. Fetch missing group metadata for groups in chat_settings / unread_messages
+	a.fetchMissingGroupNames(ctx)
+
+	// 3. Re-read combined local list
 	combined := a.fetchLocalContacts(ctx)
 
-	// Deduplicate by JID
-	seen := make(map[string]bool)
-	var deduped []domain.Contact
-	for _, c := range combined {
-		if !seen[c.JID] {
-			seen[c.JID] = true
-			deduped = append(deduped, c)
-		}
-	}
-
-	sortContacts(deduped)
-
 	a.contactsMu.Lock()
-	a.cachedContacts = deduped
+	a.cachedContacts = combined
 	a.contactsLoaded = true
 	var handlers []func([]domain.Contact)
 	if len(a.contactsHandlers) > 0 {
@@ -758,7 +890,7 @@ func (a *Adapter) refreshContactsCache(ctx context.Context) {
 	a.contactsMu.Unlock()
 
 	for _, h := range handlers {
-		h(deduped)
+		h(combined)
 	}
 }
 
@@ -1088,6 +1220,22 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		}
 
 		a.notifyMessage(domainMsg)
+
+	case *events.GroupInfo:
+		if evt.Name != nil && evt.Name.Name != "" {
+			name := strings.TrimSpace(evt.Name.Name)
+			if a.localDB != nil {
+				_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", evt.JID.ToNonAD().String(), name)
+			}
+			go a.refreshContactsCache(a.ctx)
+		}
+
+	case *events.JoinedGroup:
+		name := strings.TrimSpace(evt.GroupName.Name)
+		if name != "" && a.localDB != nil {
+			_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", evt.JID.ToNonAD().String(), name)
+		}
+		go a.refreshContactsCache(a.ctx)
 	}
 }
 
@@ -1144,12 +1292,14 @@ func (a *Adapter) resolveChatName(chat types.JID) string {
 	if chatNonAD.Server == types.GroupServer {
 		if a.localDB != nil {
 			var name string
-			if err := a.localDB.QueryRow("SELECT name FROM watui_groups WHERE jid = ? OR jid LIKE ?", chatStr, chatNonAD.User+"%").Scan(&name); err == nil && name != "" {
+			if err := a.localDB.QueryRow("SELECT name FROM watui_groups WHERE (jid = ? OR jid LIKE ?) AND name NOT LIKE 'Group (%' AND name != ''", chatStr, chatNonAD.User+"%").Scan(&name); err == nil && name != "" {
 				return name
 			}
 		}
-		if a.client != nil {
-			info, err := a.client.GetGroupInfo(context.Background(), chatNonAD)
+		if a.client != nil && a.client.IsConnected() {
+			infoCtx, infoCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			info, err := a.client.GetGroupInfo(infoCtx, chatNonAD)
+			infoCancel()
 			if err == nil && info != nil && info.Name != "" {
 				name := strings.TrimSpace(info.Name)
 				if a.localDB != nil {
