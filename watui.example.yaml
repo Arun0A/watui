@@ -31,24 +31,18 @@
 
 # 3. Media Preview (Images, Videos, Audio, Stickers, Documents)
 # Command used to preview media attachments on demand.
-# Defaults:
-#   image:    "mpv --loop=inf"
-#   video:    "mpv"
-#   audio:    "mpv --force-window"
-#   sticker:  "mpv --loop=inf"
-#   document: "xdg-open" (opens in default OS viewer, e.g. PDF/office)
+# Defaults to your operating system's native / MIME default viewer:
+#   - Windows: rundll32 url.dll,FileProtocolHandler (Photos, Media Player, Acrobat, etc.)
+#   - macOS:   open (Preview, QuickTime, etc.)
+#   - Linux:   xdg-open (Desktop environment default viewer)
+#
+# If you prefer dedicated media players (e.g. mpv, feh, sioyek), customize them below:
 #
 # preview:
-#   image: "mpv --loop=inf"
+#   image: "feh -."
 #   video: "mpv"
 #   audio: "mpv --force-window"
 #   sticker: "mpv --loop=inf"
-#   document: "xdg-open"
-#
-# Custom command examples:
-#   image: "feh -."
-#   video: "vlc"
-#   audio: "ffplay -nodisp -autoexit"
 #   document: "zathura"
 
 # 4. File Picker Command (Alt+F)

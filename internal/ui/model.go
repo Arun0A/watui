@@ -1968,13 +1968,15 @@ func (m *Model) stopActiveViewer() {
 func (m *Model) launchViewer(cmdStr string, filePath string) error {
 	m.stopActiveViewer()
 
-	if cmdStr == "" {
-		cmdStr = "mpv --force-window"
+	if strings.TrimSpace(cmdStr) == "" {
+		cmdStr = config.DefaultOpenCommand()
 	}
+
+	cleanPath := filepath.Clean(filePath)
 
 	var cmd *exec.Cmd
 	if strings.Contains(cmdStr, "%s") {
-		fullCmd := fmt.Sprintf(cmdStr, filePath)
+		fullCmd := fmt.Sprintf(cmdStr, cleanPath)
 		if runtime.GOOS == "windows" {
 			cmd = exec.Command("cmd", "/c", fullCmd)
 		} else {
@@ -1983,9 +1985,9 @@ func (m *Model) launchViewer(cmdStr string, filePath string) error {
 	} else {
 		parts := strings.Fields(cmdStr)
 		if len(parts) == 0 {
-			parts = []string{"mpv", "--force-window"}
+			parts = strings.Fields(config.DefaultOpenCommand())
 		}
-		args := append(parts[1:], filePath)
+		args := append(parts[1:], cleanPath)
 		cmd = exec.Command(parts[0], args...)
 	}
 

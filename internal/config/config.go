@@ -94,7 +94,11 @@ func DefaultDBPath() string {
 	return "watui.db"
 }
 
-func defaultDocumentCommand() string {
+// DefaultOpenCommand returns the OS-native command to open files with their default application:
+// - Windows: "rundll32 url.dll,FileProtocolHandler"
+// - Darwin (macOS): "open"
+// - Linux / others: "xdg-open"
+func DefaultOpenCommand() string {
 	switch runtime.GOOS {
 	case "windows":
 		return "rundll32 url.dll,FileProtocolHandler"
@@ -106,6 +110,7 @@ func defaultDocumentCommand() string {
 }
 
 // GetPreviewCommand returns the command string for previewing the given message type.
+// If not customized in configuration, it defaults to the OS-native default opener.
 func (c *Config) GetPreviewCommand(msgType string) string {
 	if c != nil {
 		switch strings.ToLower(msgType) {
@@ -131,16 +136,7 @@ func (c *Config) GetPreviewCommand(msgType string) string {
 			}
 		}
 	}
-	switch strings.ToLower(msgType) {
-	case "video":
-		return "mpv"
-	case "audio":
-		return "mpv --force-window"
-	case "document":
-		return defaultDocumentCommand()
-	default:
-		return "mpv --loop=inf"
-	}
+	return DefaultOpenCommand()
 }
 
 // GetFilePickerCommand returns any user-configured file picker command, or empty string.

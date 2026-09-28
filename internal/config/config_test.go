@@ -148,23 +148,13 @@ preview:
 		t.Errorf("Expected zathura, got %s", cfg.GetPreviewCommand("document"))
 	}
 
-	// Test default commands on empty config
+	// Test default commands on empty config (should return OS default opener)
 	emptyCfg := &Config{}
-	if emptyCfg.GetPreviewCommand("image") != "mpv --loop=inf" {
-		t.Errorf("Expected default mpv --loop=inf for image, got %s", emptyCfg.GetPreviewCommand("image"))
-	}
-	if emptyCfg.GetPreviewCommand("video") != "mpv" {
-		t.Errorf("Expected default mpv for video, got %s", emptyCfg.GetPreviewCommand("video"))
-	}
-	if emptyCfg.GetPreviewCommand("audio") != "mpv --force-window" {
-		t.Errorf("Expected default mpv --force-window for audio, got %s", emptyCfg.GetPreviewCommand("audio"))
-	}
-	if emptyCfg.GetPreviewCommand("sticker") != "mpv --loop=inf" {
-		t.Errorf("Expected default mpv --loop=inf for sticker, got %s", emptyCfg.GetPreviewCommand("sticker"))
-	}
-	expectedDoc := defaultDocumentCommand()
-	if emptyCfg.GetPreviewCommand("document") != expectedDoc {
-		t.Errorf("Expected default %s for document, got %s", expectedDoc, emptyCfg.GetPreviewCommand("document"))
+	expectedDefault := DefaultOpenCommand()
+	for _, msgType := range []string{"image", "video", "audio", "sticker", "document", "other"} {
+		if emptyCfg.GetPreviewCommand(msgType) != expectedDefault {
+			t.Errorf("Expected default %s for %s, got %s", expectedDefault, msgType, emptyCfg.GetPreviewCommand(msgType))
+		}
 	}
 	if emptyCfg.GetFilePickerCommand() != "" {
 		t.Errorf("Expected empty default file picker command, got %s", emptyCfg.GetFilePickerCommand())

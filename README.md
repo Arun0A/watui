@@ -16,8 +16,7 @@ Most of the time, you don't need your entire 5-year conversation history loaded 
 
 - **Lightweight & Instant:** Starts in milliseconds, uses under 30MB RAM (compared to ~800MB for WhatsApp Web).
 - **Inbox Zero Philosophy:** Displays unread conversations. Open a chat, reply, and keep your inbox clean.
-- **Machine-Bound Encrypted Storage:** Local SQLite database is encrypted with AES-256 via SQLCipher, mathematically bound to your hardware/OS identity with strict owner-only file permissions (`0600`).
-- **On-Demand Media Preview:** Preview images, videos, audio, and documents using your preferred external viewers (`mpv`, `feh`, `xdg-open`, etc.).
+- **On-Demand Media Preview:** Preview images, videos, audio, and documents using your OS default applications out of the box, or customize your preferred external viewers (`mpv`, `feh`, `sioyek`, etc.).
 - **File Attachments:** Launch terminal file managers (`yazi`, `ranger`, `fzf`) or GUI dialogs (`zenity`, `kdialog`) to attach and send files with <kbd>Alt</kbd>+<kbd>F</kbd>.
 - **Pin & Mute Support:** Pin VIP contacts/groups and mute noisy chats via a simple declarative `watui.yaml`.
 
@@ -164,11 +163,11 @@ mute:
   - "Crazy Scammer"
   - "Crypto Man"
 
-# 3. Media Preview Commands
+# 3. Media Preview Commands (defaults to OS / MIME default: xdg-open on Linux, open on macOS, default app on Windows)
 preview:
-  image: "feh -."        # Default: mpv --loop=inf
-  video: "mpv"           # Default: mpv
-  document: "sioyek"     # Default: xdg-open
+  image: "feh -."        # Optional override (e.g. feh, mpv --loop=inf)
+  video: "mpv"           # Optional override
+  document: "sioyek"     # Optional override
 
 # 4. File Picker Command (Alt+F)
 # Supported: yazi, ranger, lf, nnn, fzf, zenity, kdialog

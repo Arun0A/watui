@@ -201,7 +201,6 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			rows, err := localDB.Query(`SELECT DISTINCT m.chat_id, l.pn FROM watui_unread_messages m 
 				JOIN whatsmeow_lid_map l ON (m.chat_id = l.lid || '@lid' OR m.chat_id LIKE l.lid || ':%@lid')`)
 			if err == nil {
-				defer func() { _ = rows.Close() }()
 				type lidUpdate struct {
 					oldChatID string
 					newChatID string
@@ -213,7 +212,9 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 						updates = append(updates, lidUpdate{oldChatID: oldID, newChatID: pn + "@s.whatsapp.net"})
 					}
 				}
-				if err := rows.Err(); err == nil {
+				iterErr := rows.Err()
+				_ = rows.Close()
+				if iterErr == nil {
 					for _, u := range updates {
 						_, _ = localDB.Exec("UPDATE watui_unread_messages SET chat_id = ? WHERE chat_id = ?", u.newChatID, u.oldChatID)
 					}
