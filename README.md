@@ -1,24 +1,32 @@
-# watui 
+# watui
 
 [![CI](https://github.com/Arun0A/watui/actions/workflows/ci.yaml/badge.svg)](https://github.com/Arun0A/watui/actions/workflows/ci.yaml)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)](https://github.com/Arun0A/watui/releases)
 
-> Are you tired of your friends texting you on WhatsApp, having to open a 600MB bloated browser or Electron app just to reply "ok"?
-> 
-> **Then WA-TUI is for you.**
+A minimal WhatsApp TUI, specifically designed to reduce dependency on WA web or desktop application.
 
-Most of the time, you don't need your entire 5-year conversation history loaded into memory just to reply to someone. **watui** adopts an **Inbox Zero** philosophy: it shows only your unread messages, with message context persisting only for your active session. You can also start a new chat with any contact on demand, preview media (images, videos, audio, documents), and send file attachments.
+**Philosophy**: Most of the time you do not require past conversation context visible for a reply. And you often have to keep open whatsapp (either in web or desktop-app) anticipating a message from someone, this eats up a lot of RAM of your system (which you were saving for absolutely nothing).
 
----
+So WA-TUI, just shows you the unread messages with message context persisting only for your active session. Although, you can start a new chat with any contact on demand. It is however a stripped down version of WhatsApp.
 
-## Features
+### What you dont get:
+- No read-receipts (be honest, do you really care?)
+- Your 5 years chat history is not loaded
+- You don't get to see their profile picture
 
-- **Lightweight & Instant:** Starts in milliseconds, uses under 30MB RAM (compared to ~800MB for WhatsApp Web).
-- **Inbox Zero Philosophy:** Displays unread conversations. Open a chat, reply, and keep your inbox clean.
-- **On-Demand Media Preview:** Preview images, videos, audio, and documents using your OS default applications out of the box, or customize your preferred external viewers (`mpv`, `feh`, `sioyek`, etc.).
-- **File Attachments:** Launch terminal file managers (`yazi`, `ranger`, `fzf`) or GUI dialogs (`zenity`, `kdialog`) to attach and send files with <kbd>Alt</kbd>+<kbd>F</kbd>.
-- **Pin & Mute Support:** Pin VIP contacts/groups and mute noisy chats via a simple declarative `watui.yaml`.
+idk, probably much more... but i dont really see need for them.
+However, if you really feel that you would not want to compromise on these, you continue using the official web or desktop version.
+
+### What you get:
+- Media and document preview (and saving them ofc)
+- View statuses of your contacts
+- Read-receipts are updated realtime (if you wish to bypass, you must be smart enough)
+- Attach files without leaving the terminal emulator
+- Initiate a message to a WA number
+- Ghost your nemesis by adding them in your config
+
+If you are concerned about security, the db is only accessible in your machine, encrypted with a key and your machine-id (guid).
 
 ---
 
@@ -70,6 +78,8 @@ nix develop github:Arun0A/watui
 
 ### macOS
 
+[I don't own a macOS machine, reporting any reviews/issues is appreciated]
+
 1. Download `watui-darwin-arm64.tar.gz` (Apple Silicon) from the Releases page:
    ```bash
    tar -xzf watui-darwin-arm64.tar.gz
@@ -108,6 +118,8 @@ nix develop github:Arun0A/watui
 ---
 
 ## Keybindings
+
+[Most of them are provided as hint as you use watui.]
 
 ### Inbox View (Main Screen)
 | Key | Action |
@@ -155,13 +167,11 @@ See [**`watui.example.yaml`**](watui.example.yaml) for a full documented templat
 ```yaml
 # 1. Pinned chats (always appear at top of inbox with [PIN] badge)
 pin:
-  - "bleh bleh"
   - "91XXXXXX9-15XXXXXX2@g.us" # JID or name supported
 
 # 2. Muted chats (hidden from unread inbox)
 mute:
-  - "Crazy Scammer"
-  - "Crypto Man"
+  - "my_enemy"
 
 # 3. Media Preview Commands (defaults to OS / MIME default: xdg-open on Linux, open on macOS, default app on Windows)
 preview:
@@ -169,7 +179,7 @@ preview:
   video: "mpv"           # Optional override
   document: "xdg-open"   # General document fallback
   extensions:            # Per-file-extension overrides (GUI or terminal viewers like nvim/less)
-    pdf: "zathura"
+    pdf: "sioyek"
     txt: "nvim"
     log: "less"
 
@@ -190,16 +200,6 @@ device_name: "WA-TUI"
 
 ---
 
-## Security & Privacy
-
-- **Machine-Bound AES-256 Encryption:** The database (`watui.db`) is encrypted using **SQLCipher**. The key is derived automatically at startup via HKDF-SHA256 from your hardware/OS identity (`/etc/machine-id` on Linux, `MachineGuid` registry on Windows, `IOPlatformUUID` on macOS) plus an owner-only salt file (`.key`).
-- **Theft Resistance:** If someone copies your `watui.db` to another computer, it is completely undecryptable ciphertext without your host machine.
-- **Strict File Permissions:** Files are restricted to mode `0600` (read/write only by your user account).
-- **Remote Revocation:** If you ever lose access to a device, you can instantly revoke `watui` from your phone at any time:
-  - **Phone ➔ WhatsApp ➔ Settings ➔ Linked Devices ➔ Tap "WA-TUI" ➔ Log out**.
-
----
-
 ## Building from Source
 
 ### Prerequisites
@@ -217,6 +217,18 @@ go build -o watui ./cmd/watui
 # 3. Run
 ./watui
 ```
+
+---
+
+## Questions?
+
+If you have any questions, go to the discussion panel.
+
+If find any major issues, create an issue.
+
+If you want to contribute, create an issue, and then create a PR (resolving the issue).
+
+If you want to thank me... your welcome :) (consider giving me a star?)
 
 ---
 
