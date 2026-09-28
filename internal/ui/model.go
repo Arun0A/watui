@@ -178,6 +178,10 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		contactsByUser: make(map[string]*domain.Contact),
 	}
 
+	if preloaded, err := adapter.GetContacts(ctx); err == nil && len(preloaded) > 0 {
+		m.setContacts(preloaded)
+	}
+
 	m.initPinnedChats()
 
 	adapter.OnMessage(func(msg domain.Message) {
@@ -277,7 +281,7 @@ func (m *Model) loadContacts() tea.Cmd {
 	return func() tea.Msg {
 		contacts, err := m.adapter.GetContacts(m.ctx)
 		if err != nil {
-			return nil
+			return contactsLoadedMsg(nil)
 		}
 		return contactsLoadedMsg(contacts)
 	}
@@ -316,8 +320,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForMessages())
 
 	case contactsLoadedMsg:
-		m.setContacts([]domain.Contact(msg))
-		m.filterContacts(m.contactSearch.Value())
+		if len(msg) > 0 {
+			m.setContacts([]domain.Contact(msg))
+			m.filterContacts(m.contactSearch.Value())
+		}
 		m.loadingContact = false
 		m.updateUnreadChatNames()
 		m.syncPinnedChats()
@@ -364,6 +370,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case unreadsLoadedMsg:
 		m.rebuildUnreadChats(msg)
+		m.updateUnreadChatNames()
 
 	case mediaPreviewErrMsg:
 		m.confirmSave = false
@@ -857,6 +864,9 @@ func (m *Model) sortChatOrderLocked() {
 func (m *Model) updateUnreadChatNames() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if len(m.contacts) > 0 {
+		m.setContacts(m.contacts)
+	}
 	for id, chat := range m.unreadChats {
 		lastMsgName := ""
 		if len(chat.Messages) > 0 {

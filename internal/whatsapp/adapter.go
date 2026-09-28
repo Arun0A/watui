@@ -172,8 +172,8 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open local database: %w", err)
 	}
-	localDB.SetMaxOpenConns(1)
-	localDB.SetMaxIdleConns(1)
+	localDB.SetMaxOpenConns(10)
+	localDB.SetMaxIdleConns(5)
 
 	security.EnsureSecurePermissions(cfg.DBPath)
 	if localDB != nil {
@@ -239,6 +239,15 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	}
 
 	client.AddEventHandler(adapter.handleEvent)
+
+	// Preload local SQLite contacts and cached groups immediately so UI starts with full names
+	if adapter.IsLoggedIn() {
+		initial := adapter.fetchLocalContacts(adapterCtx)
+		if len(initial) > 0 {
+			adapter.cachedContacts = initial
+			adapter.contactsLoaded = true
+		}
+	}
 
 	return adapter, nil
 }
@@ -597,6 +606,11 @@ func (a *Adapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
 	// If not preloaded yet, do an instant local SQLite read (contacts + cached groups)
 	contacts := a.fetchLocalContacts(ctx)
 
+	a.contactsMu.Lock()
+	a.cachedContacts = contacts
+	a.contactsLoaded = true
+	a.contactsMu.Unlock()
+
 	// Refresh cache in background (including network groups from WhatsApp)
 	go a.refreshContactsCache(a.ctx)
 
@@ -701,6 +715,9 @@ func (a *Adapter) getLIDMap() map[string]string {
 		if err := rows.Scan(&lid, &pn); err == nil && lid != "" && pn != "" {
 			m[lid] = pn
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return m
 	}
 	return m
 }
@@ -1016,6 +1033,8 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 	if a.localDB == nil {
 		return nil, nil
 	}
+	lidMap := a.getLIDMap()
+
 	rows, err := a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, raw_message
 		FROM watui_unread_messages ORDER BY timestamp ASC`)
 	if err != nil {
@@ -1048,13 +1067,19 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 			m.Status = domain.MessageStatusDelivered
 			if strings.HasSuffix(m.ChatID, "@lid") {
 				lidUser := strings.TrimSuffix(m.ChatID, "@lid")
-				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+				if idx := strings.Index(lidUser, ":"); idx != -1 {
+					lidUser = lidUser[:idx]
+				}
+				if pn, ok := lidMap[lidUser]; ok && pn != "" {
 					m.ChatID = pn + "@s.whatsapp.net"
 				}
 			}
 			if strings.HasSuffix(m.Sender, "@lid") {
 				lidUser := strings.TrimSuffix(m.Sender, "@lid")
-				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+				if idx := strings.Index(lidUser, ":"); idx != -1 {
+					lidUser = lidUser[:idx]
+				}
+				if pn, ok := lidMap[lidUser]; ok && pn != "" {
 					m.Sender = pn + "@s.whatsapp.net"
 				}
 			}
