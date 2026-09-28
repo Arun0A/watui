@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -63,7 +65,7 @@ type Model struct {
 	activeName       string
 	activeMsgs       []domain.Message
 	chatScrollOffset int
-	input            textinput.Model
+	input            textarea.Model
 
 	// Media navigation & saving
 	selectedMediaIdx int             // targeted media index within activeChat (0-based)
@@ -109,6 +111,7 @@ type unreadsLoadedMsg []domain.Message
 type chatDismissedMsg string
 type sendErrMsg struct {
 	ChatID string
+	Text   string
 	Err    error
 }
 type mediaPreviewErrMsg struct {
@@ -140,10 +143,30 @@ type docDownloadedToOpenMsg struct {
 
 // NewModel initializes the TUI model.
 func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*config.Config) *Model {
-	ti := textinput.New()
-	ti.Placeholder = "Type a message... (Enter to send, Esc to back)"
-	ti.CharLimit = 1000
-	ti.Width = 60
+	ti := textarea.New()
+	ti.Placeholder = "Type a message..."
+	ti.CharLimit = 4096
+	ti.SetWidth(60)
+	ti.SetHeight(1)
+	ti.ShowLineNumbers = false
+	ti.EndOfBufferCharacter = 0
+	ti.KeyMap.InsertNewline = key.NewBinding(key.WithDisabled())
+	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ti.FocusedStyle.Base = lipgloss.NewStyle()
+	ti.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
+	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB"))
+	ti.FocusedStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
+	ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	ti.BlurredStyle.Base = lipgloss.NewStyle()
+	ti.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
+	ti.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
+	ti.BlurredStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8"))
+	ti.SetPromptFunc(2, func(lineIdx int) string {
+		if lineIdx == 0 {
+			return "> "
+		}
+		return "  "
+	})
 
 	si := textinput.New()
 	si.Placeholder = "Search contact name, group, or phone number..."
@@ -299,7 +322,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		cw := m.contentWidth()
-		m.input.Width = max(20, cw-6)
+		m.input.SetWidth(max(20, cw-6))
 		m.contactSearch.Width = max(20, cw-6)
 		return m, nil
 
@@ -353,6 +376,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewStatus = ""
 		}
 		if m.activeChatID == msg.ChatID {
+			if m.input.Value() == "" && msg.Text != "" {
+				m.input.SetValue(msg.Text)
+				m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+				m.input.CursorEnd()
+			}
 			m.activeMsgs = append(m.activeMsgs, domain.Message{
 				ID:         "err-" + time.Now().Format("150405"),
 				ChatID:     msg.ChatID,
@@ -429,7 +457,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Path != "" {
 			cleanPath := strings.TrimSpace(msg.Path)
 			m.input.SetValue("file://" + cleanPath + " ")
-			m.input.SetCursor(len(m.input.Value()))
+			m.input.CursorEnd()
 			m.previewStatus = fmt.Sprintf("Attached %s (press Enter to send)", filepath.Base(cleanPath))
 		} else {
 			m.previewStatus = ""
@@ -1130,6 +1158,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			m.activeMsgs = append([]domain.Message(nil), chat.Messages...)
 			m.chatScrollOffset = 0
 			m.input.Reset()
+			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
 			mediaIndices := m.getChatMediaIndices()
@@ -1342,6 +1371,11 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 
+	case "shift+enter", "alt+enter", "ctrl+j", "ctrl+enter":
+		m.input.InsertString("\n")
+		m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+		return nil
+
 	case "enter":
 		text := strings.TrimSpace(m.input.Value())
 		if text == "" {
@@ -1349,6 +1383,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		}
 		m.previewStatus = "Sending..."
 		m.input.Reset()
+		m.input.SetHeight(1)
 		chatID := m.activeChatID
 
 		if strings.HasPrefix(text, "file://") {
@@ -1356,7 +1391,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			return func() tea.Msg {
 				sentMsg, err := m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption)
 				if err != nil {
-					return sendErrMsg{ChatID: chatID, Err: err}
+					return sendErrMsg{ChatID: chatID, Text: text, Err: err}
 				}
 				return messageSentMsg(sentMsg)
 			}
@@ -1365,7 +1400,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		return func() tea.Msg {
 			sentMsg, err := m.adapter.SendTextMessage(m.ctx, chatID, text)
 			if err != nil {
-				return sendErrMsg{ChatID: chatID, Err: err}
+				return sendErrMsg{ChatID: chatID, Text: text, Err: err}
 			}
 			return messageSentMsg(sentMsg)
 		}
@@ -1373,6 +1408,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.input.SetHeight(min(5, max(1, m.input.LineCount())))
 	return cmd
 }
 
@@ -1416,6 +1452,7 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeMsgs = nil
 			m.chatScrollOffset = 0
 			m.input.Reset()
+			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
 			return tea.Batch(tea.ClearScreen, textinput.Blink)
@@ -1434,6 +1471,7 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeMsgs = nil
 			m.chatScrollOffset = 0
 			m.input.Reset()
+			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
 			return tea.Batch(tea.ClearScreen, textinput.Blink)
@@ -1977,7 +2015,10 @@ func (m *Model) renderChatView() []string {
 		}
 	}
 
-	availH := max(3, m.maxCanvasHeight()-6)
+	m.input.SetWidth(max(20, cw-6))
+	inputLines := strings.Split(m.input.View(), "\n")
+	inputH := len(inputLines)
+	availH := max(3, m.maxCanvasHeight()-5-inputH)
 	scrollInfo := ""
 
 	if len(msgLines) <= availH {
@@ -2007,7 +2048,7 @@ func (m *Model) renderChatView() []string {
 
 	// One line padding on top of the message box
 	lines = append(lines, "")
-	lines = append(lines, m.input.View())
+	lines = append(lines, inputLines...)
 
 	mediaIndices := m.getChatMediaIndices()
 	mediaHelp := ""

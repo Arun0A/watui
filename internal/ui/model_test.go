@@ -20,6 +20,7 @@ type mockAdapter struct {
 	msgHandler    domain.MessageHandler
 	statusHandler domain.StatusHandler
 	archivedChats map[string]bool
+	lastSentText  string
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -28,6 +29,7 @@ func (m *mockAdapter) IsLoggedIn() bool                  { return true }
 func (m *mockAdapter) OnMessage(h domain.MessageHandler) { m.msgHandler = h }
 func (m *mockAdapter) OnStatus(h domain.StatusHandler)   { m.statusHandler = h }
 func (m *mockAdapter) SendTextMessage(ctx context.Context, c, t string) (domain.Message, error) {
+	m.lastSentText = t
 	return domain.Message{ID: "SENT1", ChatID: c, Body: t}, nil
 }
 func (m *mockAdapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
@@ -1488,5 +1490,86 @@ func TestHelpToggleAndDynamicMediaBinds(t *testing.T) {
 		t.Errorf("Static hints should be shown in contact picker when showHelp is true")
 	}
 }
+
+func TestMultiLineMessageShiftEnter(t *testing.T) {
+	adapter := &mockAdapter{}
+	m := NewModel(context.Background(), adapter)
+	m.width = 80
+	m.height = 24
+	m.view = ViewChat
+	m.activeChatID = "12345@s.whatsapp.net"
+	m.activeName = "Tester"
+	m.input.Focus()
+
+	// 1. Initial height is 1
+	if m.input.Height() != 1 {
+		t.Fatalf("Expected initial height to be 1, got %d", m.input.Height())
+	}
+
+	// 2. Type "First Line"
+	for _, r := range "First Line" {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.input.LineCount() != 1 {
+		t.Errorf("Expected 1 line, got %d", m.input.LineCount())
+	}
+
+	// 3. Press Shift+Enter
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("shift+enter")})
+	if m.input.LineCount() != 2 {
+		t.Fatalf("Expected 2 lines after shift+enter, got %d", m.input.LineCount())
+	}
+	if m.input.Height() != 2 {
+		t.Fatalf("Expected input height to be 2, got %d", m.input.Height())
+	}
+
+	// 4. Type "Second Line"
+	for _, r := range "Second Line" {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	// 5. Also test alt+enter for line 3
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("alt+enter")})
+	for _, r := range "Third Line" {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.input.LineCount() != 3 {
+		t.Fatalf("Expected 3 lines, got %d", m.input.LineCount())
+	}
+	if m.input.Height() != 3 {
+		t.Fatalf("Expected input height to be 3, got %d", m.input.Height())
+	}
+
+	// 6. Verify renderChatView line count never overflows terminal height
+	chatLines := m.renderChatView()
+	if len(chatLines) > m.height {
+		t.Errorf("Chat view rendered %d lines, exceeding terminal height %d", len(chatLines), m.height)
+	}
+	chatStr := strings.Join(chatLines, "\n")
+	if !strings.Contains(chatStr, "First Line") || !strings.Contains(chatStr, "Second Line") || !strings.Contains(chatStr, "Third Line") {
+		t.Errorf("Expected multi-line input to be rendered in chat view")
+	}
+
+	// 7. Press Enter (without Shift) to send
+	m2, sendCmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if sendCmd == nil {
+		t.Fatalf("Expected sendCmd on enter")
+	}
+	// Execute sendCmd
+	_ = sendCmd()
+	if adapter.lastSentText != "First Line\nSecond Line\nThird Line" {
+		t.Errorf("Expected sent message to preserve newlines, got: %q", adapter.lastSentText)
+	}
+
+	// 8. Verify input collapses back to height 1 and is empty
+	model := m2.(*Model)
+	if model.input.Value() != "" {
+		t.Errorf("Expected input to be reset after send, got %q", model.input.Value())
+	}
+	if model.input.Height() != 1 {
+		t.Errorf("Expected input height to reset to 1 after send, got %d", model.input.Height())
+	}
+}
+
 
 
