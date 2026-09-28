@@ -36,6 +36,7 @@ type UnreadChat struct {
 	Name         string
 	IsGroup      bool
 	IsPinned     bool
+	IsArchived   bool
 	Sender       string
 	Messages     []domain.Message
 	LastReceived time.Time
@@ -50,10 +51,11 @@ type Model struct {
 	view ViewState
 
 	// Unread state
-	mu          sync.RWMutex
-	unreadChats map[string]*UnreadChat // chatID -> UnreadChat
-	chatOrder   []string               // pinned chats first, then sorted by LastReceived desc
-	cursor      int
+	mu           sync.RWMutex
+	unreadChats  map[string]*UnreadChat // chatID -> UnreadChat
+	chatOrder    []string               // visible chats according to view mode
+	cursor       int
+	showArchived bool                   // true when viewing archived chats section
 
 	// Active conversation view
 	activeChatID     string
@@ -728,11 +730,16 @@ func (m *Model) initPinnedChats() {
 			groupJIDs = append(groupJIDs, chatID)
 		}
 		name, isGroup := m.resolveChatName(chatID, "", "")
+		isArchived := false
+		if m.adapter != nil {
+			isArchived = m.adapter.IsChatArchived(chatID)
+		}
 		chat := &UnreadChat{
-			ChatID:   chatID,
-			Name:     name,
-			IsGroup:  isGroup,
-			IsPinned: true,
+			ChatID:     chatID,
+			Name:       name,
+			IsGroup:    isGroup,
+			IsPinned:   true,
+			IsArchived: isArchived,
 		}
 		m.unreadChats[chatID] = chat
 	}
@@ -797,11 +804,16 @@ func (m *Model) syncPinnedChatsLocked() {
 				if chatName == "" {
 					chatName, _ = m.resolveChatName(matchedContact.JID, "", "")
 				}
+				isArchived := false
+				if m.adapter != nil {
+					isArchived = m.adapter.IsChatArchived(matchedContact.JID)
+				}
 				m.unreadChats[matchedContact.JID] = &UnreadChat{
-					ChatID:   matchedContact.JID,
-					Name:     chatName,
-					IsGroup:  matchedContact.IsGroup,
-					IsPinned: true,
+					ChatID:     matchedContact.JID,
+					Name:       chatName,
+					IsGroup:    matchedContact.IsGroup,
+					IsPinned:   true,
+					IsArchived: isArchived,
 				}
 			}
 		}
@@ -813,32 +825,44 @@ func (m *Model) sortChatOrderLocked() {
 	var pinned []string
 	var unpinned []string
 
+	filterChat := func(chat *UnreadChat) bool {
+		if chat == nil {
+			return false
+		}
+		if m.showArchived {
+			return chat.IsArchived
+		}
+		return !chat.IsArchived
+	}
+
 	pinnedRules := m.cfg.GetPinned()
 	used := make(map[string]bool)
 
-	// 1. Pinned chats matching config order
-	for _, rule := range pinnedRules {
-		for id, chat := range m.unreadChats {
-			if chat != nil && chat.IsPinned && !used[id] {
-				if config.MatchTarget(rule, id, chat.Name) {
-					pinned = append(pinned, id)
-					used[id] = true
-					break
+	// 1. Pinned chats matching config order (only shown in active unread view)
+	if !m.showArchived {
+		for _, rule := range pinnedRules {
+			for id, chat := range m.unreadChats {
+				if filterChat(chat) && chat.IsPinned && !used[id] {
+					if config.MatchTarget(rule, id, chat.Name) {
+						pinned = append(pinned, id)
+						used[id] = true
+						break
+					}
 				}
 			}
 		}
-	}
-	// 2. Any other pinned chats
-	for id, chat := range m.unreadChats {
-		if chat != nil && chat.IsPinned && !used[id] {
-			pinned = append(pinned, id)
-			used[id] = true
+		// 2. Any other pinned chats
+		for id, chat := range m.unreadChats {
+			if filterChat(chat) && chat.IsPinned && !used[id] {
+				pinned = append(pinned, id)
+				used[id] = true
+			}
 		}
 	}
 
-	// 3. Unpinned chats
+	// 3. Unpinned chats (or all matching chats when in archived mode)
 	for id, chat := range m.unreadChats {
-		if chat != nil && !chat.IsPinned && !used[id] {
+		if filterChat(chat) && (!chat.IsPinned || m.showArchived) && !used[id] {
 			unpinned = append(unpinned, id)
 			used[id] = true
 		}
@@ -875,6 +899,9 @@ func (m *Model) updateUnreadChatNames() {
 		name, isGroup := m.resolveChatName(chat.ChatID, lastMsgName, chat.Name)
 		chat.Name = name
 		chat.IsGroup = isGroup
+		if m.adapter != nil {
+			chat.IsArchived = m.adapter.IsChatArchived(chat.ChatID)
+		}
 
 		if !chat.IsPinned && m.isMuted(chat.ChatID, chat.Name) {
 			delete(m.unreadChats, id)
@@ -914,6 +941,10 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 		}
 
 		isPinned := m.isPinned(msg.ChatID, msg.ChatName)
+		isArchived := false
+		if m.adapter != nil {
+			isArchived = m.adapter.IsChatArchived(msg.ChatID)
+		}
 		if !exists {
 			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 			chat = &UnreadChat{
@@ -921,6 +952,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 				Name:         name,
 				IsGroup:      isGroup,
 				IsPinned:     isPinned,
+				IsArchived:   isArchived,
 				Sender:       msg.Sender,
 				Messages:     []domain.Message{msg},
 				LastReceived: msg.Timestamp,
@@ -932,6 +964,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 			if isPinned {
 				chat.IsPinned = true
 			}
+			chat.IsArchived = isArchived
 			if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
 				name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
 				chat.Name = name
@@ -988,6 +1021,10 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 	}
 
 	isPinned := m.isPinned(msg.ChatID, msg.ChatName)
+	isArchived := false
+	if m.adapter != nil {
+		isArchived = m.adapter.IsChatArchived(msg.ChatID)
+	}
 	if !exists {
 		name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 		chat = &UnreadChat{
@@ -995,6 +1032,7 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 			Name:         name,
 			IsGroup:      isGroup,
 			IsPinned:     isPinned,
+			IsArchived:   isArchived,
 			Sender:       msg.Sender,
 			Messages:     []domain.Message{msg},
 			LastReceived: msg.Timestamp,
@@ -1006,6 +1044,7 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		if isPinned {
 			chat.IsPinned = true
 		}
+		chat.IsArchived = isArchived
 		if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
 			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
 			chat.Name = name
@@ -1105,6 +1144,24 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 
 			m.dismissUnread(chatID)
 			return tea.Batch(tea.ClearScreen, textinput.Blink)
+		}
+
+	case "a": // toggle archived chats
+		m.mu.Lock()
+		m.showArchived = !m.showArchived
+		m.cursor = 0
+		m.sortChatOrderLocked()
+		m.mu.Unlock()
+		return tea.ClearScreen
+
+	case "esc":
+		if m.showArchived {
+			m.mu.Lock()
+			m.showArchived = false
+			m.cursor = 0
+			m.sortChatOrderLocked()
+			m.mu.Unlock()
+			return tea.ClearScreen
 		}
 
 	case "n", "c": // new message / contact picker
@@ -1563,32 +1620,68 @@ func (m *Model) renderUnreadListView() []string {
 	cw := m.contentWidth()
 	var lines []string
 
-	// Header: count chats that actually have unread messages
+	// Header: count active unread vs archived chats
 	unreadCount := 0
+	archivedCount := 0
 	for _, chat := range m.unreadChats {
-		if len(chat.Messages) > 0 {
-			unreadCount++
+		if chat != nil {
+			if chat.IsArchived {
+				if len(chat.Messages) > 0 {
+					archivedCount++
+				}
+			} else {
+				if len(chat.Messages) > 0 {
+					unreadCount++
+				}
+			}
 		}
 	}
+
 	statusText := string(m.status)
-	if m.status == domain.StatusConnected {
+	if m.showArchived {
+		statusText = fmt.Sprintf("archived (%d chats) · [a/Esc] back to unreads", len(m.chatOrder))
+	} else if m.status == domain.StatusConnected {
 		statusText = fmt.Sprintf("connected · %d unread", unreadCount)
 	}
+	if !m.showArchived && archivedCount > 0 {
+		statusText += fmt.Sprintf(" · [a] %d archived", archivedCount)
+	}
 
-	headerText := fmt.Sprintf("%s  %s",
-		titleStyle.Render("watui"),
-		statusStyle.Render("· "+statusText),
-	)
+	var headerText string
+	if m.showArchived {
+		headerText = fmt.Sprintf("%s  %s",
+			titleStyle.Render("watui"),
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("· [ARCHIVED CHATS]")+statusStyle.Render(fmt.Sprintf(" (%d)", len(m.chatOrder))),
+		)
+	} else {
+		headerText = fmt.Sprintf("%s  %s",
+			titleStyle.Render("watui"),
+			statusStyle.Render("· "+statusText),
+		)
+	}
 	divider := dividerStyle.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
 
 	if len(m.chatOrder) == 0 {
-		lines = append(lines, "  Inbox Zero")
-		lines = append(lines, "")
-		lines = append(lines, "  No unread messages.")
-		lines = append(lines, "")
-		lines = append(lines, statusStyle.Render("  Press [n] to compose to a contact, or wait for incoming messages."))
-		lines = append(lines, "")
+		if m.showArchived {
+			lines = append(lines, "  Archived Inbox Zero")
+			lines = append(lines, "")
+			lines = append(lines, "  No archived chats with unread messages.")
+			lines = append(lines, "")
+			lines = append(lines, statusStyle.Render("  Press [a] or [Esc] to return to unread messages."))
+			lines = append(lines, "")
+		} else {
+			lines = append(lines, "  Inbox Zero")
+			lines = append(lines, "")
+			lines = append(lines, "  No unread messages.")
+			lines = append(lines, "")
+			if archivedCount > 0 {
+				lines = append(lines, statusStyle.Render(fmt.Sprintf("  Press [a] to view %d archived chat(s) with unread messages.", archivedCount)))
+				lines = append(lines, "")
+			}
+			lines = append(lines, statusStyle.Render("  Press [n] to compose to a contact, or wait for incoming messages."))
+			lines = append(lines, "")
+		}
 	} else {
 		maxChats := m.maxVisibleChats()
 		start := 0
@@ -1703,6 +1796,11 @@ func (m *Model) renderUnreadListView() []string {
 	}
 
 	helpText := "[Enter] Open · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit"
+	if m.showArchived {
+		helpText = "[Enter] Open · [a/Esc] Back to Unreads · [Alt+P] Preview · [r] Dismiss · [q] Quit"
+	} else if archivedCount > 0 {
+		helpText = fmt.Sprintf("[Enter] Open · [a] Archived (%d) · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit", archivedCount)
+	}
 	if statusNotice != "" {
 		if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
 			if cw >= lipgloss.Width(statusNotice)+12 {

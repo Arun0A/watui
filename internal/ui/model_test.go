@@ -19,6 +19,7 @@ import (
 type mockAdapter struct {
 	msgHandler    domain.MessageHandler
 	statusHandler domain.StatusHandler
+	archivedChats map[string]bool
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -45,6 +46,12 @@ func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error { 
 func (m *mockAdapter) Sync(ctx context.Context) error                         { return nil }
 func (m *mockAdapter) OnChatDismissed(h func(chatID string))                  {}
 func (m *mockAdapter) EnsureGroupNames(ctx context.Context, jids []string)    {}
+func (m *mockAdapter) IsChatArchived(chatID string) bool {
+	if m.archivedChats != nil {
+		return m.archivedChats[chatID]
+	}
+	return false
+}
 func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
 	return "/tmp/mock_media.jpg", nil
 }
@@ -1278,3 +1285,88 @@ func TestContactPickerShowsAllAndFiltersAll(t *testing.T) {
 		t.Errorf("Expected 5 matching groups, got %d", len(m.filteredList))
 	}
 }
+
+func TestArchivedChatsFilteringAndToggle(t *testing.T) {
+	adapter := &mockAdapter{
+		archivedChats: map[string]bool{
+			"archived_group@g.us": true,
+		},
+	}
+	m := NewModel(context.Background(), adapter)
+	m.width = 80
+	m.height = 24
+
+	// Message 1 to active chat
+	m.handleIncomingMessage(domain.Message{
+		ID:         "M1",
+		ChatID:     "normal@s.whatsapp.net",
+		ChatName:   "Active Friend",
+		Body:       "Hello active",
+		Timestamp:  time.Now(),
+		Sender:     "normal@s.whatsapp.net",
+		SenderName: "Active Friend",
+	})
+
+	// Message 2 to archived group
+	m.handleIncomingMessage(domain.Message{
+		ID:         "M2",
+		ChatID:     "archived_group@g.us",
+		ChatName:   "Archived High Volume",
+		Body:       "Spam update",
+		Timestamp:  time.Now(),
+		Sender:     "sender@s.whatsapp.net",
+		SenderName: "Group Member",
+	})
+
+	// 1. By default, showArchived is false: only normal chat is in chatOrder
+	if len(m.chatOrder) != 1 {
+		t.Fatalf("Expected 1 visible chat in unread list, got %d", len(m.chatOrder))
+	}
+	if m.chatOrder[0] != "normal@s.whatsapp.net" {
+		t.Errorf("Expected active chat in unread list, got %s", m.chatOrder[0])
+	}
+
+	viewStr := strings.Join(m.renderUnreadListView(), "\n")
+	if !strings.Contains(viewStr, "Active Friend") {
+		t.Errorf("Expected 'Active Friend' in unread list view")
+	}
+	if strings.Contains(viewStr, "Archived High Volume") {
+		t.Errorf("Archived chat should NOT appear in default unread list view")
+	}
+	if !strings.Contains(viewStr, "[a] 1 archived") {
+		t.Errorf("Expected '[a] 1 archived' badge in header, got view:\n%s", viewStr)
+	}
+
+	// 2. Press 'a' to toggle into archived view
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.showArchived {
+		t.Fatalf("Expected showArchived to be true after pressing 'a'")
+	}
+	if len(m.chatOrder) != 1 {
+		t.Fatalf("Expected 1 chat in archived list, got %d", len(m.chatOrder))
+	}
+	if m.chatOrder[0] != "archived_group@g.us" {
+		t.Errorf("Expected archived chat in archived list, got %s", m.chatOrder[0])
+	}
+
+	archivedViewStr := strings.Join(m.renderUnreadListView(), "\n")
+	if !strings.Contains(archivedViewStr, "Archived High Volume") {
+		t.Errorf("Expected 'Archived High Volume' in archived list view, got:\n%s", archivedViewStr)
+	}
+	if strings.Contains(archivedViewStr, "Active Friend") {
+		t.Errorf("Active unread chat should NOT appear in archived list view")
+	}
+	if !strings.Contains(archivedViewStr, "[ARCHIVED CHATS]") {
+		t.Errorf("Expected '[ARCHIVED CHATS]' in header, got view:\n%s", archivedViewStr)
+	}
+
+	// 3. Press 'esc' to toggle back to unread view
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.showArchived {
+		t.Fatalf("Expected showArchived to be false after pressing 'esc'")
+	}
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != "normal@s.whatsapp.net" {
+		t.Errorf("Expected back to active unread chats, got %v", m.chatOrder)
+	}
+}
+

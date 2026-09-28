@@ -68,6 +68,9 @@ type Adapter struct {
 	mediaMu    sync.RWMutex
 	mediaCache map[string]*waE2E.Message
 
+	archivedMu    sync.RWMutex
+	archivedChats map[string]bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -234,14 +237,16 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		config:        cfg,
 		currentStatus: domain.StatusDisconnected,
 		mediaCache:    make(map[string]*waE2E.Message),
+		archivedChats: make(map[string]bool),
 		ctx:           adapterCtx,
 		cancel:        cancel,
 	}
 
 	client.AddEventHandler(adapter.handleEvent)
 
-	// Preload local SQLite contacts and cached groups immediately so UI starts with full names
+	// Preload local SQLite contacts, cached groups, and archived chats immediately
 	if adapter.IsLoggedIn() {
+		adapter.loadArchivedChats()
 		initial := adapter.fetchLocalContacts(adapterCtx)
 		if len(initial) > 0 {
 			adapter.cachedContacts = initial
@@ -402,6 +407,66 @@ func (a *Adapter) ResolvePhoneToLID(phoneUser string) string {
 	var lid string
 	_ = a.localDB.QueryRow("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", phoneUser).Scan(&lid)
 	return lid
+}
+
+func (a *Adapter) loadArchivedChats() {
+	if a.localDB == nil {
+		return
+	}
+	rows, err := a.localDB.Query("SELECT chat_jid FROM whatsmeow_chat_settings WHERE archived = 1")
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	lidMap := a.getLIDMap()
+	archived := make(map[string]bool)
+	for rows.Next() {
+		var jid string
+		if err := rows.Scan(&jid); err == nil && jid != "" {
+			archived[jid] = true
+			clean := jid
+			if idx := strings.Index(clean, ":"); idx != -1 {
+				if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+					clean = clean[:idx] + clean[atIdx:]
+				}
+			}
+			archived[clean] = true
+			if strings.HasSuffix(clean, "@lid") {
+				lidUser := strings.TrimSuffix(clean, "@lid")
+				if pn, ok := lidMap[lidUser]; ok && pn != "" {
+					archived[pn+"@s.whatsapp.net"] = true
+				}
+			}
+		}
+	}
+	_ = rows.Err()
+
+	a.archivedMu.Lock()
+	a.archivedChats = archived
+	a.archivedMu.Unlock()
+}
+
+// IsChatArchived checks whether the specified chat JID is archived in WhatsApp.
+func (a *Adapter) IsChatArchived(chatID string) bool {
+	if chatID == "" {
+		return false
+	}
+	clean := chatID
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+
+	a.archivedMu.RLock()
+	defer a.archivedMu.RUnlock()
+	if a.archivedChats != nil {
+		if a.archivedChats[chatID] || a.archivedChats[clean] {
+			return true
+		}
+	}
+	return false
 }
 
 // SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number.
@@ -985,6 +1050,7 @@ func (a *Adapter) Sync(ctx context.Context) error {
 	// Fetch regular_low (contains read/unread statuses) and regular_high
 	_ = a.client.FetchAppState(ctx, appstate.WAPatchRegularLow, false, false)
 	_ = a.client.FetchAppState(ctx, appstate.WAPatchRegularHigh, false, false)
+	a.loadArchivedChats()
 	return nil
 }
 
@@ -1134,7 +1200,12 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		go func() {
 			// Catch up on any app state mutations (e.g. chats read on other devices)
 			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularLow, false, false)
+			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularHigh, false, false)
+			a.loadArchivedChats()
 		}()
+
+	case *events.AppState:
+		go a.loadArchivedChats()
 
 	case *events.LoggedOut:
 		a.setStatus(domain.StatusLoggedOut)

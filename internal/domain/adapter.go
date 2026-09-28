@@ -72,4 +72,7 @@ type WhatsAppAdapter interface {
 
 	// EnsureGroupNames ensures that metadata for the provided group JIDs is fetched and cached.
 	EnsureGroupNames(ctx context.Context, jids []string)
+
+	// IsChatArchived checks whether the specified chat JID is archived in WhatsApp.
+	IsChatArchived(chatID string) bool
 }

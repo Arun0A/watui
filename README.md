@@ -126,8 +126,9 @@ nix develop github:Arun0A/watui
 | :--- | :--- |
 | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↓</kbd> / <kbd>↑</kbd> | Navigate unread / pinned conversations |
 | <kbd>Enter</kbd> | Open selected conversation |
+| <kbd>a</kbd> | Toggle Archived chats section (press again or <kbd>Esc</kbd> to return) |
 | <kbd>n</kbd> | Start a new chat (search all contacts & groups) |
-| <kbd>d</kbd> | Dismiss selected unread conversation |
+| <kbd>d</kbd> / <kbd>r</kbd> | Dismiss selected unread conversation |
 | <kbd>q</kbd> / <kbd>Ctrl</kbd>+<kbd>c</kbd> | Quit watui |
 
 ### Chat View
