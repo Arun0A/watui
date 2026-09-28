@@ -209,4 +209,119 @@ func TestExampleConfigIsUnconfigured(t *testing.T) {
 	if len(cfg.GetMuted()) != 0 {
 		t.Errorf("watui.example.yaml must have 0 muted items by default, got %v", cfg.GetMuted())
 	}
+	if cfg.GetDBPath() != "" {
+		t.Errorf("watui.example.yaml must have empty db path by default, got %q", cfg.GetDBPath())
+	}
+}
+
+func TestConfigDBDirAndDBPath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Test db_dir option
+	cfgYAML1 := `
+db_dir: "/var/watui/data"
+`
+	f1 := filepath.Join(tmpDir, "cfg1.yaml")
+	_ = os.WriteFile(f1, []byte(cfgYAML1), 0644)
+	c1, err := Load(f1)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	expected1 := filepath.Join("/var/watui/data", "watui.db")
+	if c1.GetDBPath() != expected1 {
+		t.Errorf("Expected %s, got %s", expected1, c1.GetDBPath())
+	}
+
+	// 2. Test db_path option
+	cfgYAML2 := `
+db_path: "/custom/path/my_session.db"
+`
+	f2 := filepath.Join(tmpDir, "cfg2.yaml")
+	_ = os.WriteFile(f2, []byte(cfgYAML2), 0644)
+	c2, err := Load(f2)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	expected2 := filepath.Clean("/custom/path/my_session.db")
+	if c2.GetDBPath() != expected2 {
+		t.Errorf("Expected %s, got %s", expected2, c2.GetDBPath())
+	}
+
+	// 3. Test db pointing to directory
+	dataDir := filepath.Join(tmpDir, "mysessiondir")
+	_ = os.MkdirAll(dataDir, 0700)
+	cfgYAML3 := "db: " + dataDir + "\n"
+	f3 := filepath.Join(tmpDir, "cfg3.yaml")
+	_ = os.WriteFile(f3, []byte(cfgYAML3), 0644)
+	c3, err := Load(f3)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	expected3 := filepath.Join(dataDir, "watui.db")
+	if c3.GetDBPath() != expected3 {
+		t.Errorf("Expected %s, got %s", expected3, c3.GetDBPath())
+	}
+}
+
+func TestConfigFileChaining(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Base config with common settings
+	baseYAML := `
+device_name: "BaseDevice"
+pin:
+  - "Alice"
+db_dir: "/base/db"
+`
+	basePath := filepath.Join(tmpDir, "base.yaml")
+	_ = os.WriteFile(basePath, []byte(baseYAML), 0644)
+
+	// Child config that includes base.yaml and overrides device_name
+	childYAML := "config_file: " + basePath + `
+device_name: "ChildDevice"
+mute:
+  - "Bob"
+`
+	childPath := filepath.Join(tmpDir, "child.yaml")
+	_ = os.WriteFile(childPath, []byte(childYAML), 0644)
+
+	loaded, err := Load(childPath)
+	if err != nil {
+		t.Fatalf("Failed to load chained config: %v", err)
+	}
+
+	if loaded.GetDeviceName() != "ChildDevice" {
+		t.Errorf("Expected ChildDevice, got %q", loaded.GetDeviceName())
+	}
+	if len(loaded.GetPinned()) != 1 || loaded.GetPinned()[0] != "Alice" {
+		t.Errorf("Expected inherited pin 'Alice', got %v", loaded.GetPinned())
+	}
+	if len(loaded.GetMuted()) != 1 || loaded.GetMuted()[0] != "Bob" {
+		t.Errorf("Expected child mute 'Bob', got %v", loaded.GetMuted())
+	}
+	if loaded.GetDBPath() != filepath.Join("/base/db", "watui.db") {
+		t.Errorf("Expected inherited db_dir, got %s", loaded.GetDBPath())
+	}
+}
+
+func TestResolveDBPath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Directory with trailing slash
+	p1 := ResolveDBPath("/tmp/some_dir/")
+	if !strings.HasSuffix(p1, "watui.db") {
+		t.Errorf("Expected trailing slash to resolve to watui.db, got %s", p1)
+	}
+
+	// 2. Existing directory
+	p2 := ResolveDBPath(tmpDir)
+	if p2 != filepath.Join(tmpDir, "watui.db") {
+		t.Errorf("Expected existing dir to resolve to watui.db, got %s", p2)
+	}
+
+	// 3. File path
+	p3 := ResolveDBPath("/tmp/custom.db")
+	if p3 != filepath.Clean("/tmp/custom.db") {
+		t.Errorf("Expected direct file path, got %s", p3)
+	}
 }

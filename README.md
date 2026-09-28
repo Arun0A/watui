@@ -175,6 +175,13 @@ file_picker: "yazi"
 
 # 5. Custom Companion Device Name
 device_name: "WA-TUI"
+
+# 6. Database Directory or Path (Optional)
+# db_dir: "~/.local/share/watui"      # Stores watui.db inside this folder
+# db_path: "~/.local/share/watui/watui.db"
+
+# 7. Include / Alternate Config File (Optional)
+# config_file: "~/.config/watui/config.yaml"
 ```
 
 ---

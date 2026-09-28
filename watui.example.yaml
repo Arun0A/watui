@@ -64,3 +64,20 @@
 # Default: "WA-TUI"
 #
 # device_name: "WA-TUI"
+
+# 6. Database Directory or Path
+# Explicitly set the directory containing watui.db (or the full database file path).
+# If a directory is specified, watui.db will be placed and managed inside that folder.
+#
+# Examples:
+# db_dir: "~/.local/share/watui"          # Custom directory (watui.db will be placed inside)
+# db_path: "~/.local/share/watui/watui.db" # Explicit file path
+# db: "./data"                             # Relative directory or database file path
+
+# 7. Include / Alternate Config File
+# Optionally load, inherit, or chain settings from another config file or directory.
+#
+# Examples:
+# config_file: "~/.config/watui/config.yaml"
+# config_dir:  "~/.config/watui"
+

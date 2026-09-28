@@ -45,12 +45,13 @@ func main() {
 
 	finalDBPath := *dbPath
 	if finalDBPath == "" {
-		if appCfg.DBPath != "" {
-			finalDBPath = appCfg.DBPath
+		if appCfg.GetDBPath() != "" {
+			finalDBPath = appCfg.GetDBPath()
 		} else {
 			finalDBPath = defaultDB
 		}
 	}
+	finalDBPath = config.ResolveDBPath(finalDBPath)
 
 	// 1. Set up context and termination signal handling
 	ctx, cancel := context.WithCancel(context.Background())

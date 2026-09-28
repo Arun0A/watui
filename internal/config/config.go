@@ -30,8 +30,17 @@ type Config struct {
 	// DeviceName specifies the companion client name registered in WhatsApp Linked Devices (default: "WA-TUI").
 	DeviceName string `json:"device_name" yaml:"device_name"`
 
-	// DBPath optionally specifies the path to SQLite session and cache database.
-	DBPath string `json:"db_path" yaml:"db_path"`
+	// DB / DBPath / DBDir / DBDirectory optionally specifies the SQLite database location.
+	// Can be a directory (containing watui.db) or an explicit database file path.
+	DB          string `json:"db" yaml:"db"`
+	DBPath      string `json:"db_path" yaml:"db_path"`
+	DBDir       string `json:"db_dir" yaml:"db_dir"`
+	DBDirectory string `json:"db_directory" yaml:"db_directory"`
+
+	// Config / ConfigFile / ConfigDir optionally specifies another config file or directory to load/include.
+	Config     string `json:"config" yaml:"config"`
+	ConfigFile string `json:"config_file" yaml:"config_file"`
+	ConfigDir  string `json:"config_dir" yaml:"config_dir"`
 
 	// Muted lists chat JIDs, phone numbers, or group/contact names to hide from unread.
 	Muted []string `json:"muted" yaml:"muted"`
@@ -158,6 +167,100 @@ func (c *Config) GetDeviceName() string {
 	return "WA-TUI"
 }
 
+// ExpandHome replaces a leading ~/ with the user's home directory.
+func ExpandHome(path string) string {
+	if strings.HasPrefix(path, "~/") || path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			if path == "~" {
+				return home
+			}
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
+// ResolveDBPath normalizes and expands a database path or directory into a full database file path.
+func ResolveDBPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	expanded := ExpandHome(trimmed)
+	if strings.HasSuffix(trimmed, "/") || strings.HasSuffix(trimmed, "\\") {
+		return filepath.Join(expanded, "watui.db")
+	}
+	if fi, err := os.Stat(expanded); err == nil && fi.IsDir() {
+		return filepath.Join(expanded, "watui.db")
+	}
+	return filepath.Clean(expanded)
+}
+
+// GetDBPath returns the configured database path if specified via db, db_path, db_dir, or db_directory.
+// If a directory was provided, it joins the directory with "watui.db".
+// If none was specified, it returns an empty string.
+func (c *Config) GetDBPath() string {
+	if c == nil {
+		return ""
+	}
+
+	// 1. Explicit directory options
+	dir := strings.TrimSpace(c.DBDir)
+	if dir == "" {
+		dir = strings.TrimSpace(c.DBDirectory)
+	}
+	if dir != "" {
+		return filepath.Join(ExpandHome(dir), "watui.db")
+	}
+
+	// 2. Path or directory options
+	raw := strings.TrimSpace(c.DB)
+	if raw == "" {
+		raw = strings.TrimSpace(c.DBPath)
+	}
+	if raw == "" {
+		return ""
+	}
+
+	expanded := ExpandHome(raw)
+	if strings.HasSuffix(raw, "/") || strings.HasSuffix(raw, "\\") {
+		return filepath.Join(expanded, "watui.db")
+	}
+	if fi, err := os.Stat(expanded); err == nil && fi.IsDir() {
+		return filepath.Join(expanded, "watui.db")
+	}
+
+	return filepath.Clean(expanded)
+}
+
+// GetConfigFile returns any specified included/target config file or directory, expanded.
+func (c *Config) GetConfigFile() string {
+	if c == nil {
+		return ""
+	}
+	file := strings.TrimSpace(c.ConfigFile)
+	if file == "" {
+		file = strings.TrimSpace(c.Config)
+	}
+	if file != "" {
+		return ExpandHome(file)
+	}
+
+	dir := strings.TrimSpace(c.ConfigDir)
+	if dir != "" {
+		expandedDir := ExpandHome(dir)
+		for _, name := range []string{"watui.yaml", "watui.yml", "watui.json", "config.yaml", "config.yml", "config.json"} {
+			candidate := filepath.Join(expandedDir, name)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+		return filepath.Join(expandedDir, "watui.yaml")
+	}
+
+	return ""
+}
+
 // Load loads configuration from an explicit path or checks default paths.
 // If explicitPath is empty, it tries default paths:
 // 1. ./watui.yaml, ./watui.yml, ./watui.json
@@ -178,6 +281,14 @@ func Load(explicitPath string) (*Config, error) {
 }
 
 func loadFile(path string) (*Config, error) {
+	return loadFileWithDepth(path, 0)
+}
+
+func loadFileWithDepth(path string, depth int) (*Config, error) {
+	if depth > 5 {
+		return nil, fmt.Errorf("config include cycle detected at %q", path)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file %q: %w", path, err)
@@ -190,7 +301,66 @@ func loadFile(path string) (*Config, error) {
 	}
 
 	cfg.SourcePath = path
+
+	includedPath := cfg.GetConfigFile()
+	if includedPath != "" && filepath.Clean(includedPath) != filepath.Clean(path) {
+		baseCfg, err := loadFileWithDepth(includedPath, depth+1)
+		if err == nil && baseCfg != nil {
+			mergeConfig(baseCfg, &cfg)
+			baseCfg.SourcePath = path
+			return baseCfg, nil
+		}
+	}
+
 	return &cfg, nil
+}
+
+func mergeConfig(base, overlay *Config) {
+	if overlay.Preview.Image != "" {
+		base.Preview.Image = overlay.Preview.Image
+	}
+	if overlay.Preview.Video != "" {
+		base.Preview.Video = overlay.Preview.Video
+	}
+	if overlay.Preview.Audio != "" {
+		base.Preview.Audio = overlay.Preview.Audio
+	}
+	if overlay.Preview.Sticker != "" {
+		base.Preview.Sticker = overlay.Preview.Sticker
+	}
+	if overlay.Preview.Document != "" {
+		base.Preview.Document = overlay.Preview.Document
+	}
+	if overlay.FilePicker != "" {
+		base.FilePicker = overlay.FilePicker
+	}
+	if overlay.DeviceName != "" {
+		base.DeviceName = overlay.DeviceName
+	}
+	if overlay.DB != "" {
+		base.DB = overlay.DB
+	}
+	if overlay.DBPath != "" {
+		base.DBPath = overlay.DBPath
+	}
+	if overlay.DBDir != "" {
+		base.DBDir = overlay.DBDir
+	}
+	if overlay.DBDirectory != "" {
+		base.DBDirectory = overlay.DBDirectory
+	}
+	if len(overlay.Pinned) > 0 {
+		base.Pinned = overlay.Pinned
+	}
+	if len(overlay.Pin) > 0 {
+		base.Pin = overlay.Pin
+	}
+	if len(overlay.Muted) > 0 {
+		base.Muted = overlay.Muted
+	}
+	if len(overlay.Mute) > 0 {
+		base.Mute = overlay.Mute
+	}
 }
 
 func defaultCandidatePaths() []string {
