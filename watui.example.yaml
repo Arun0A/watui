@@ -36,14 +36,21 @@
 #   - macOS:   open (Preview, QuickTime, etc.)
 #   - Linux:   xdg-open (Desktop environment default viewer)
 #
-# If you prefer dedicated media players (e.g. mpv, feh, sioyek), customize them below:
+# If you prefer dedicated media players or per-file-extension applications
+# (e.g. zathura for PDF, nvim for TXT/LOG, mpv, feh), customize them below:
 #
 # preview:
 #   image: "feh -."
 #   video: "mpv"
 #   audio: "mpv --force-window"
 #   sticker: "mpv --loop=inf"
-#   document: "zathura"
+#   document: "xdg-open"       # General fallback for documents
+#   extensions:               # Per-file-extension custom viewers:
+#     pdf: "zathura"          # GUI PDF viewer
+#     txt: "nvim"             # Terminal editor (opens full-screen in terminal)
+#     log: "less"             # Terminal pager
+#     csv: "vd"               # VisiData
+#     md: "glow -p"           # Markdown pager
 
 # 4. File Picker Command (Alt+F)
 # Custom command executed when pressing Alt+F to pick a file to attach.

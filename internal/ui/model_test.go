@@ -945,6 +945,26 @@ func TestDocumentActionKeybindings(t *testing.T) {
 	if model.confirmDocAction {
 		t.Errorf("Expected confirmDocAction to be false after esc")
 	}
+
+	// Press Alt+P then 'w' to choose "Open with"
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	if !model.confirmDocAction {
+		t.Errorf("Expected confirmDocAction to be true")
+	}
+	m4, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	model = m4.(*Model)
+	if !model.promptOpenWith {
+		t.Errorf("Expected promptOpenWith to be true after pressing 'w'")
+	}
+	model.openWithInput.SetValue("nvim")
+	m5, openWithCmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = m5.(*Model)
+	if model.promptOpenWith {
+		t.Errorf("Expected promptOpenWith to be false after pressing Enter")
+	}
+	if openWithCmd == nil {
+		t.Errorf("Expected non-nil openWithCmd after pressing Enter")
+	}
 }
 
 func TestFileAttachmentAndSending(t *testing.T) {

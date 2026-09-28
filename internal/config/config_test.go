@@ -122,6 +122,10 @@ preview:
   audio: "custom-audio-player"
   sticker: "custom-sticker-cmd"
   document: "zathura"
+  extensions:
+    pdf: "sioyek"
+    txt: "nvim"
+  log: "less"
 `
 	tmpDir := t.TempDir()
 	cfgFile := filepath.Join(tmpDir, "watui.yaml")
@@ -148,6 +152,21 @@ preview:
 	}
 	if cfg.GetPreviewCommand("document") != "zathura" {
 		t.Errorf("Expected zathura, got %s", cfg.GetPreviewCommand("document"))
+	}
+
+	// Test per-extension command resolution
+	if cfg.GetPreviewCommandForFile("/tmp/report.pdf", "document") != "sioyek" {
+		t.Errorf("Expected sioyek for .pdf, got %s", cfg.GetPreviewCommandForFile("/tmp/report.pdf", "document"))
+	}
+	if cfg.GetPreviewCommandForFile("notes.txt", "document") != "nvim" {
+		t.Errorf("Expected nvim for .txt, got %s", cfg.GetPreviewCommandForFile("notes.txt", "document"))
+	}
+	if cfg.GetPreviewCommandForFile("server.log", "document") != "less" {
+		t.Errorf("Expected less for .log, got %s", cfg.GetPreviewCommandForFile("server.log", "document"))
+	}
+	// Fallback to document command for unconfigured extensions
+	if cfg.GetPreviewCommandForFile("presentation.pptx", "document") != "zathura" {
+		t.Errorf("Expected zathura for .pptx fallback, got %s", cfg.GetPreviewCommandForFile("presentation.pptx", "document"))
 	}
 
 	// Test default commands on empty config (should return OS default opener)

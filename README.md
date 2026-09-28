@@ -167,7 +167,11 @@ mute:
 preview:
   image: "feh -."        # Optional override (e.g. feh, mpv --loop=inf)
   video: "mpv"           # Optional override
-  document: "sioyek"     # Optional override
+  document: "xdg-open"   # General document fallback
+  extensions:            # Per-file-extension overrides (GUI or terminal viewers like nvim/less)
+    pdf: "zathura"
+    txt: "nvim"
+    log: "less"
 
 # 4. File Picker Command (Alt+F)
 # Supported: yazi, ranger, lf, nnn, fzf, zenity, kdialog

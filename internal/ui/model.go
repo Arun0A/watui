@@ -66,7 +66,9 @@ type Model struct {
 	selectedMediaIdx int             // targeted media index within activeChat (0-based)
 	confirmSave      bool            // true when prompting "save? (y/N)"
 	pendingSavePath  string          // path of the media file awaiting save confirmation
-	confirmDocAction bool            // true when prompting "Document: Open [o] or Save [s]?"
+	confirmDocAction bool            // true when prompting "Document: Open [o], Open with [w], or Save [s]?"
+	promptOpenWith   bool            // true when typing custom viewer in "Open with: "
+	openWithInput    textinput.Model // textinput for custom application name
 	pendingDocMsg    *domain.Message // message awaiting document action choice
 
 	// Contact search view
@@ -126,6 +128,10 @@ type filePickedMsg struct {
 type filePickErrMsg struct {
 	Err error
 }
+type docDownloadedToOpenMsg struct {
+	Path string
+	Cmd  string
+}
 
 // NewModel initializes the TUI model.
 func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*config.Config) *Model {
@@ -138,6 +144,11 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 	si.Placeholder = "Search contact name, group, or phone number..."
 	si.CharLimit = 100
 	si.Width = 50
+
+	oi := textinput.New()
+	oi.Placeholder = "e.g. nvim, zathura, code"
+	oi.CharLimit = 100
+	oi.Width = 35
 
 	var cfg *config.Config
 	if len(cfgs) > 0 && cfgs[0] != nil {
@@ -155,6 +166,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		chatOrder:     make([]string, 0),
 		input:         ti,
 		contactSearch: si,
+		openWithInput: oi,
 		status:        domain.StatusConnecting,
 		msgChan:       make(chan domain.Message, 200),
 		statusChan:    make(chan domain.ConnectionStatus, 10),
@@ -373,6 +385,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirmSave = false
 		m.previewStatus = fmt.Sprintf("No default app; saved to %s", msg.DestPath)
 
+	case docDownloadedToOpenMsg:
+		m.previewStatus = ""
+		if isTerminalViewer(msg.Cmd) {
+			execCmd := buildTerminalViewerCmd(msg.Cmd, msg.Path)
+			return m, tea.ExecProcess(execCmd, func(err error) tea.Msg {
+				if err != nil {
+					return mediaPreviewErrMsg{Err: err}
+				}
+				return docOpenedMsg{Path: msg.Path}
+			})
+		}
+		if err := m.launchViewer(msg.Cmd, msg.Path); err != nil {
+			destPath, saveErr := saveToDownloads(msg.Path)
+			if saveErr != nil {
+				return m, func() tea.Msg {
+					return mediaPreviewErrMsg{Err: fmt.Errorf("open failed (%v) and save failed (%w)", err, saveErr)}
+				}
+			}
+			return m, func() tea.Msg {
+				return docFallbackSavedMsg{DestPath: destPath, OpenErr: err}
+			}
+		}
+		return m, func() tea.Msg {
+			return docOpenedMsg{Path: msg.Path}
+		}
+
 	case filePickedMsg:
 		if msg.Path != "" {
 			cleanPath := strings.TrimSpace(msg.Path)
@@ -393,6 +431,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 
 	case tea.KeyMsg:
+		if m.promptOpenWith {
+			switch msg.String() {
+			case "enter":
+				appCmd := strings.TrimSpace(m.openWithInput.Value())
+				m.promptOpenWith = false
+				if appCmd != "" && m.pendingDocMsg != nil {
+					targetMsg := *m.pendingDocMsg
+					m.pendingDocMsg = nil
+					return m, m.downloadAndOpenDocCmd(targetMsg, appCmd)
+				}
+				m.pendingDocMsg = nil
+				return m, nil
+			case "esc":
+				m.promptOpenWith = false
+				m.pendingDocMsg = nil
+				m.previewStatus = ""
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.openWithInput, cmd = m.openWithInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		if m.confirmDocAction {
 			switch msg.String() {
 			case "o", "O":
@@ -403,6 +465,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.downloadAndOpenDocCmd(targetMsg)
 				}
 				return m, nil
+			case "w", "W":
+				m.confirmDocAction = false
+				m.promptOpenWith = true
+				m.openWithInput.SetValue("")
+				m.openWithInput.Focus()
+				return m, textinput.Blink
 			case "s", "S":
 				m.confirmDocAction = false
 				if m.pendingDocMsg != nil {
@@ -854,6 +922,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		m.previewStatus = ""
 		m.confirmSave = false
 		m.confirmDocAction = false
+		m.promptOpenWith = false
 		m.pendingDocMsg = nil
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
@@ -863,6 +932,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 	case "alt+p": // preview media from unread chat
 		m.confirmSave = false
 		m.confirmDocAction = false
+		m.promptOpenWith = false
 		m.pendingDocMsg = nil
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
@@ -878,6 +948,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 				if targetMsg != nil {
 					if targetMsg.Type == domain.MessageTypeDocument {
 						m.confirmDocAction = true
+						m.promptOpenWith = false
 						m.pendingDocMsg = targetMsg
 						m.previewStatus = ""
 						return nil
@@ -893,6 +964,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		m.previewStatus = ""
 		m.confirmSave = false
 		m.confirmDocAction = false
+		m.promptOpenWith = false
 		m.pendingDocMsg = nil
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
@@ -996,6 +1068,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.previewStatus = ""
 		m.confirmSave = false
 		m.confirmDocAction = false
+		m.promptOpenWith = false
 		m.pendingDocMsg = nil
 		m.view = ViewUnreadList
 		return tea.ClearScreen
@@ -1012,6 +1085,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	case "alt+p":
 		m.confirmSave = false
 		m.confirmDocAction = false
+		m.promptOpenWith = false
 		m.pendingDocMsg = nil
 		mediaIndices := m.getChatMediaIndices()
 		if len(mediaIndices) == 0 {
@@ -1024,6 +1098,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		targetMsg := m.activeMsgs[mediaIndices[m.selectedMediaIdx]]
 		if targetMsg.Type == domain.MessageTypeDocument {
 			m.confirmDocAction = true
+			m.promptOpenWith = false
 			m.pendingDocMsg = &targetMsg
 			m.previewStatus = ""
 			return nil
@@ -1032,6 +1107,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 
 	case "alt+up", "alt+k", "alt+left":
 		m.confirmDocAction = false
+		m.promptOpenWith = false
 		m.pendingDocMsg = nil
 		mediaIndices := m.getChatMediaIndices()
 		if len(mediaIndices) > 0 {
@@ -1511,8 +1587,10 @@ func (m *Model) renderUnreadListView() []string {
 	}
 
 	statusNotice := ""
-	if m.confirmDocAction {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
+	if m.promptOpenWith {
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Open with: ") + m.openWithInput.View() + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" (Enter to open, Esc to cancel)")
+	} else if m.confirmDocAction {
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], or Save [s]? (Esc to cancel)")
 	} else if m.confirmSave {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
 	} else if m.previewStatus != "" {
@@ -1686,8 +1764,10 @@ func (m *Model) renderChatView() []string {
 	helpText := "[Enter] Send · [Alt+F] Attach · [Esc] Back" + mediaHelp + scrollInfo
 
 	statusNotice := ""
-	if m.confirmDocAction {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o] or Save [s]? (Esc to cancel)")
+	if m.promptOpenWith {
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Open with: ") + m.openWithInput.View() + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" (Enter to open, Esc to cancel)")
+	} else if m.confirmDocAction {
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], or Save [s]? (Esc to cancel)")
 	} else if m.confirmSave {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
 	} else if m.previewStatus != "" {
@@ -1860,23 +1940,23 @@ func (m *Model) scrollToMediaMessage(msgIdx int) {
 	m.chatScrollOffset = linesAfter
 }
 
-func (m *Model) downloadAndOpenDocCmd(msg domain.Message) tea.Cmd {
+func (m *Model) downloadAndOpenDocCmd(msg domain.Message, customCmd ...string) tea.Cmd {
 	m.previewStatus = "Downloading document..."
 	m.confirmSave = false
-	cmdStr := m.cfg.GetPreviewCommand("document")
+	m.confirmDocAction = false
+	m.promptOpenWith = false
 	return func() tea.Msg {
 		filePath, err := m.adapter.DownloadMedia(m.ctx, msg)
 		if err != nil {
 			return mediaPreviewErrMsg{Err: err}
 		}
-		if err := m.launchViewer(cmdStr, filePath); err != nil {
-			destPath, saveErr := saveToDownloads(filePath)
-			if saveErr != nil {
-				return mediaPreviewErrMsg{Err: fmt.Errorf("open failed (%v) and save failed (%w)", err, saveErr)}
-			}
-			return docFallbackSavedMsg{DestPath: destPath, OpenErr: err}
+		cmdStr := ""
+		if len(customCmd) > 0 && strings.TrimSpace(customCmd[0]) != "" {
+			cmdStr = strings.TrimSpace(customCmd[0])
+		} else {
+			cmdStr = m.cfg.GetPreviewCommandForFile(filePath, "document")
 		}
-		return docOpenedMsg{Path: filePath}
+		return docDownloadedToOpenMsg{Path: filePath, Cmd: cmdStr}
 	}
 }
 
@@ -2012,6 +2092,42 @@ func (m *Model) launchViewer(cmdStr string, filePath string) error {
 		m.viewerMu.Unlock()
 	}()
 	return nil
+}
+
+var knownTerminalViewers = []string{
+	"nvim", "vim", "vi", "nano", "less", "more", "bat", "cat", "micro",
+	"helix", "hx", "kak", "glow", "mdcat", "vd", "visidata", "emacs",
+}
+
+func isTerminalViewer(cmdStr string) bool {
+	fields := strings.Fields(cmdStr)
+	if len(fields) == 0 {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(fields[0]))
+	for _, term := range knownTerminalViewers {
+		if base == term {
+			return true
+		}
+	}
+	return false
+}
+
+func buildTerminalViewerCmd(cmdStr string, filePath string) *exec.Cmd {
+	cleanPath := filepath.Clean(filePath)
+	if strings.Contains(cmdStr, "%s") {
+		fullCmd := fmt.Sprintf(cmdStr, cleanPath)
+		if runtime.GOOS == "windows" {
+			return exec.Command("cmd", "/c", fullCmd)
+		}
+		return exec.Command("sh", "-c", fullCmd)
+	}
+	parts := strings.Fields(cmdStr)
+	if len(parts) == 0 {
+		parts = []string{"less"}
+	}
+	args := append(parts[1:], cleanPath)
+	return exec.Command(parts[0], args...)
 }
 
 var errNoFilePicker = errors.New("no file selector found")

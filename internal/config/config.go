@@ -12,11 +12,40 @@ import (
 
 // PreviewConfig specifies commands used to preview media attachments on demand.
 type PreviewConfig struct {
-	Image    string `json:"image" yaml:"image"`
-	Video    string `json:"video" yaml:"video"`
-	Audio    string `json:"audio" yaml:"audio"`
-	Sticker  string `json:"sticker" yaml:"sticker"`
-	Document string `json:"document" yaml:"document"`
+	Image      string            `json:"image" yaml:"image"`
+	Video      string            `json:"video" yaml:"video"`
+	Audio      string            `json:"audio" yaml:"audio"`
+	Sticker    string            `json:"sticker" yaml:"sticker"`
+	Document   string            `json:"document" yaml:"document"`
+	Extensions map[string]string `json:"extensions" yaml:"extensions"`
+}
+
+// UnmarshalYAML decodes PreviewConfig and also populates Extensions from direct keys (e.g. pdf: zathura).
+func (p *PreviewConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawPreview PreviewConfig
+	var raw rawPreview
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*p = PreviewConfig(raw)
+	if p.Extensions == nil {
+		p.Extensions = make(map[string]string)
+	}
+
+	var m map[string]interface{}
+	if err := value.Decode(&m); err == nil {
+		for k, v := range m {
+			kLower := strings.ToLower(strings.TrimSpace(k))
+			if kLower == "image" || kLower == "video" || kLower == "audio" || kLower == "sticker" || kLower == "document" || kLower == "extensions" {
+				continue
+			}
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				ext := strings.TrimPrefix(kLower, ".")
+				p.Extensions[ext] = strings.TrimSpace(s)
+			}
+		}
+	}
+	return nil
 }
 
 // Config represents declarative user configuration for watui.
@@ -149,6 +178,24 @@ func (c *Config) GetPreviewCommand(msgType string) string {
 		}
 	}
 	return DefaultOpenCommand()
+}
+
+// GetPreviewCommandForFile returns the preview command for a given file and message type.
+// If the file has an extension matching an entry in preview.extensions (e.g. pdf, txt, log),
+// that extension command is used. Otherwise it falls back to GetPreviewCommand(msgType).
+func (c *Config) GetPreviewCommandForFile(filePath string, msgType string) string {
+	if c != nil && len(c.Preview.Extensions) > 0 && filePath != "" {
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filePath), "."))
+		if ext != "" {
+			if cmd, ok := c.Preview.Extensions[ext]; ok && strings.TrimSpace(cmd) != "" {
+				return strings.TrimSpace(cmd)
+			}
+			if cmd, ok := c.Preview.Extensions["."+ext]; ok && strings.TrimSpace(cmd) != "" {
+				return strings.TrimSpace(cmd)
+			}
+		}
+	}
+	return c.GetPreviewCommand(msgType)
 }
 
 // GetFilePickerCommand returns any user-configured file picker command, or empty string.
@@ -330,6 +377,14 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if overlay.Preview.Document != "" {
 		base.Preview.Document = overlay.Preview.Document
+	}
+	if len(overlay.Preview.Extensions) > 0 {
+		if base.Preview.Extensions == nil {
+			base.Preview.Extensions = make(map[string]string)
+		}
+		for k, v := range overlay.Preview.Extensions {
+			base.Preview.Extensions[k] = v
+		}
 	}
 	if overlay.FilePicker != "" {
 		base.FilePicker = overlay.FilePicker
