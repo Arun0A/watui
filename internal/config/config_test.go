@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -185,6 +187,13 @@ func TestDefaultDBPath(t *testing.T) {
 	path := DefaultDBPath()
 	if path == "" {
 		t.Fatalf("expected non-empty default db path")
+	}
+
+	if runtime.GOOS != "windows" {
+		// On Unix (Linux / macOS), the default db path must be in XDG or ~/.local/share
+		if !strings.Contains(path, "watui") {
+			t.Errorf("expected standard watui path on Unix, got %s", path)
+		}
 	}
 }
 

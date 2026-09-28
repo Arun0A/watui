@@ -49,34 +49,19 @@ type Config struct {
 
 // DefaultDBPath returns the appropriate default path for the database file.
 // Priority:
-// 1. ./watui.db in current working directory (if it exists)
-// 2. watui.db next to the resolved executable (handles symlinks and portable installs)
-// 3. If watui.yaml exists next to the resolved executable, use <exeDir>/watui.db
-// 4. Windows default: <exeDir>/watui.db or ./watui.db
-// 5. Unix default: $XDG_DATA_HOME/watui/watui.db or ~/.local/share/watui/watui.db
+// 1. ./watui.db in current working directory (if it already exists)
+// 2. Windows default: <exeDir>/watui.db (portable by default)
+// 3. watui.db next to the resolved executable on Unix (only if it already exists, e.g. portable setup)
+// 4. Unix default: $XDG_DATA_HOME/watui/watui.db or ~/.local/share/watui/watui.db
 func DefaultDBPath() string {
-	// 1. Current working directory watui.db
+	// 1. Current working directory watui.db (if it already exists)
 	if _, err := os.Stat("watui.db"); err == nil {
 		return "watui.db"
 	}
 
 	exeDir := GetExeDir()
-	if exeDir != "" && exeDir != "." {
-		// 2. Next to the resolved executable (handles symlinked binaries pointing to original setup)
-		candidate := filepath.Join(exeDir, "watui.db")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
 
-		// 3. If a config exists in exeDir, it's a self-contained portable directory
-		for _, cfgName := range []string{"watui.yaml", "watui.yml", "watui.json"} {
-			if _, err := os.Stat(filepath.Join(exeDir, cfgName)); err == nil {
-				return candidate
-			}
-		}
-	}
-
-	// 4. Windows portable default
+	// 2. Windows default: self-contained next to the executable
 	if runtime.GOOS == "windows" {
 		if exeDir != "" && exeDir != "." {
 			return filepath.Join(exeDir, "watui.db")
@@ -84,7 +69,25 @@ func DefaultDBPath() string {
 		return "watui.db"
 	}
 
-	// 5. Unix XDG standard path
+	// 3. Next to the resolved executable on Unix only if watui.db already exists there
+	if exeDir != "" && exeDir != "." {
+		candidate := filepath.Join(exeDir, "watui.db")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	// 4. macOS: check if existing database is in Application Support
+	if runtime.GOOS == "darwin" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			macSupport := filepath.Join(home, "Library", "Application Support", "watui", "watui.db")
+			if _, err := os.Stat(macSupport); err == nil {
+				return macSupport
+			}
+		}
+	}
+
+	// 5. Standard OS data directory on Unix (Linux & macOS)
 	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
 		return filepath.Join(xdgData, "watui", "watui.db")
 	}
