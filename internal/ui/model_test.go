@@ -1370,3 +1370,123 @@ func TestArchivedChatsFilteringAndToggle(t *testing.T) {
 	}
 }
 
+func TestHelpToggleAndDynamicMediaBinds(t *testing.T) {
+	adapter := &mockAdapter{}
+	m := NewModel(context.Background(), adapter)
+	m.width = 100
+	m.height = 30
+
+	// Add two chats: one with media, one text only
+	chatWithMedia := &UnreadChat{
+		ChatID: "media@s.whatsapp.net",
+		Name:   "Media Sender",
+		Messages: []domain.Message{
+			{ID: "m1", Type: domain.MessageTypeImage, Body: "Photo"},
+		},
+		LastReceived: time.Now(),
+	}
+	chatTextOnly := &UnreadChat{
+		ChatID: "text@s.whatsapp.net",
+		Name:   "Text Sender",
+		Messages: []domain.Message{
+			{ID: "t1", Type: domain.MessageTypeText, Body: "Hello"},
+		},
+		LastReceived: time.Now().Add(-time.Minute),
+	}
+
+	m.unreadChats["media@s.whatsapp.net"] = chatWithMedia
+	m.unreadChats["text@s.whatsapp.net"] = chatTextOnly
+	m.chatOrder = []string{"media@s.whatsapp.net", "text@s.whatsapp.net"}
+	m.cursor = 0 // pointing at chatWithMedia
+
+	// 1. By default, showHelp is false
+	if m.showHelp {
+		t.Fatalf("Expected showHelp to be false by default")
+	}
+
+	// In ViewUnreadList with cursor on media chat:
+	// Static help should NOT be present
+	viewLines := m.renderUnreadListView()
+	viewStr := strings.Join(viewLines, "\n")
+	if strings.Contains(viewStr, "[Enter] Open") || strings.Contains(viewStr, "[r] Dismiss") {
+		t.Errorf("Static keybind hints should not be shown by default in unread list")
+	}
+	// Dynamic media preview hint SHOULD be present
+	if !strings.Contains(viewStr, "[Alt+P] Preview Media") {
+		t.Errorf("Expected '[Alt+P] Preview Media' to be shown for media chat by default")
+	}
+
+	// Move cursor to text only chat
+	m.cursor = 1
+	viewLines = m.renderUnreadListView()
+	viewStr = strings.Join(viewLines, "\n")
+	if strings.Contains(viewStr, "[Enter] Open") {
+		t.Errorf("Static keybind hints should not be shown by default for text chat")
+	}
+	if strings.Contains(viewStr, "[Alt+P] Preview") {
+		t.Errorf("Media preview hint should NOT be shown for chat without media")
+	}
+
+	// 2. Press '?' to toggle help ON
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if !m.showHelp {
+		t.Fatalf("Expected showHelp to be true after pressing '?'")
+	}
+	viewLines = m.renderUnreadListView()
+	viewStr = strings.Join(viewLines, "\n")
+	if !strings.Contains(viewStr, "[Enter] Open") || !strings.Contains(viewStr, "[r] Dismiss") {
+		t.Errorf("Expected static keybind hints to be visible when showHelp is true")
+	}
+
+	// 3. Press '?' again to toggle help OFF
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if m.showHelp {
+		t.Fatalf("Expected showHelp to be false after pressing '?' again")
+	}
+
+	// 4. Test ViewChat
+	m.view = ViewChat
+	m.activeChatID = "media@s.whatsapp.net"
+	m.activeName = "Media Sender"
+	m.activeMsgs = chatWithMedia.Messages
+
+	chatLines := m.renderChatView()
+	chatStr := strings.Join(chatLines, "\n")
+	// Static binds [Enter] Send / [Alt+F] Attach should NOT be visible by default
+	if strings.Contains(chatStr, "[Enter] Send") || strings.Contains(chatStr, "[Alt+F] Attach") {
+		t.Errorf("Static hints should not be shown by default in chat view")
+	}
+	// Dynamic media binds SHOULD be visible
+	if !strings.Contains(chatStr, "[Alt+P] Preview Media") {
+		t.Errorf("Media binds should be shown dynamically in chat view when media exists")
+	}
+
+	// Toggle help in chat view using alt+?
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}, Alt: true})
+	if !m.showHelp {
+		t.Fatalf("Expected showHelp to be true after alt+? in chat view")
+	}
+	chatLines = m.renderChatView()
+	chatStr = strings.Join(chatLines, "\n")
+	if !strings.Contains(chatStr, "[Enter] Send") || !strings.Contains(chatStr, "[Alt+F] Attach") {
+		t.Errorf("Expected static hints to be shown in chat view when showHelp is true")
+	}
+
+	// 5. Test ViewContactPicker
+	m.view = ViewContactPicker
+	m.showHelp = false
+	pickerLines := m.renderContactPickerView()
+	pickerStr := strings.Join(pickerLines, "\n")
+	if strings.Contains(pickerStr, "[Up/Down] Navigate") {
+		t.Errorf("Static hints should not be shown by default in contact picker")
+	}
+
+	m.showHelp = true
+	pickerLines = m.renderContactPickerView()
+	pickerStr = strings.Join(pickerLines, "\n")
+	if !strings.Contains(pickerStr, "[Up/Down] Navigate") {
+		t.Errorf("Static hints should be shown in contact picker when showHelp is true")
+	}
+}
+
+

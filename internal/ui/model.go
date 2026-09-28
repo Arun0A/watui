@@ -56,6 +56,7 @@ type Model struct {
 	chatOrder    []string               // visible chats according to view mode
 	cursor       int
 	showArchived bool                   // true when viewing archived chats section
+	showHelp     bool                   // toggled with '?' to show static keybinds
 
 	// Active conversation view
 	activeChatID     string
@@ -1164,6 +1165,10 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			return tea.ClearScreen
 		}
 
+	case "?", "alt+?", "f1":
+		m.showHelp = !m.showHelp
+		return nil
+
 	case "n", "c": // new message / contact picker
 		m.view = ViewContactPicker
 		m.contactSearch.Reset()
@@ -1245,6 +1250,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.pendingDocMsg = nil
 		m.view = ViewUnreadList
 		return tea.ClearScreen
+
+	case "alt+?", "f1":
+		m.showHelp = !m.showHelp
+		return nil
 
 	case "ctrl+c":
 		m.stopActiveViewer()
@@ -1372,6 +1381,10 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 	case "esc":
 		m.view = ViewUnreadList
 		return tea.ClearScreen
+
+	case "alt+?", "f1":
+		m.showHelp = !m.showHelp
+		return nil
 
 	case "ctrl+c":
 		return tea.Quit
@@ -1795,24 +1808,64 @@ func (m *Model) renderUnreadListView() []string {
 		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
 	}
 
-	helpText := "[Enter] Open · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit"
-	if m.showArchived {
-		helpText = "[Enter] Open · [a/Esc] Back to Unreads · [Alt+P] Preview · [r] Dismiss · [q] Quit"
-	} else if archivedCount > 0 {
-		helpText = fmt.Sprintf("[Enter] Open · [a] Archived (%d) · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit", archivedCount)
+	selectedHasMedia := false
+	if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
+		if chat := m.unreadChats[m.chatOrder[m.cursor]]; chat != nil {
+			for _, msg := range chat.Messages {
+				if msg.IsMedia() {
+					selectedHasMedia = true
+					break
+				}
+			}
+		}
 	}
-	if statusNotice != "" {
-		if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
-			if cw >= lipgloss.Width(statusNotice)+12 {
-				lines = append(lines, helpStyle.Render("[q] Quit")+" · "+statusNotice)
+
+	helpText := "[Enter] Open · [r] Dismiss · [n] New · [q] Quit"
+	if m.showArchived {
+		if selectedHasMedia {
+			helpText = "[Enter] Open · [a/Esc] Back to Unreads · [Alt+P] Preview · [r] Dismiss · [q] Quit"
+		} else {
+			helpText = "[Enter] Open · [a/Esc] Back to Unreads · [r] Dismiss · [q] Quit"
+		}
+	} else if archivedCount > 0 {
+		if selectedHasMedia {
+			helpText = fmt.Sprintf("[Enter] Open · [a] Archived (%d) · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit", archivedCount)
+		} else {
+			helpText = fmt.Sprintf("[Enter] Open · [a] Archived (%d) · [r] Dismiss · [n] New · [q] Quit", archivedCount)
+		}
+	} else if selectedHasMedia {
+		helpText = "[Enter] Open · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit"
+	}
+
+	if m.showHelp {
+		if statusNotice != "" {
+			if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
+				if cw >= lipgloss.Width(statusNotice)+12 {
+					lines = append(lines, helpStyle.Render("[q] Quit")+" · "+statusNotice)
+				} else {
+					lines = append(lines, statusNotice)
+				}
+			} else {
+				lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
+			}
+		} else {
+			lines = append(lines, helpStyle.Render(helpText))
+		}
+	} else {
+		if selectedHasMedia && statusNotice != "" {
+			mediaHint := "[Alt+P] Preview Media"
+			if lipgloss.Width(mediaHint)+3+lipgloss.Width(statusNotice) <= cw {
+				lines = append(lines, helpStyle.Render(mediaHint)+" · "+statusNotice)
 			} else {
 				lines = append(lines, statusNotice)
 			}
+		} else if selectedHasMedia {
+			lines = append(lines, helpStyle.Render("[Alt+P] Preview Media"))
+		} else if statusNotice != "" {
+			lines = append(lines, statusNotice)
 		} else {
-			lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
+			lines = append(lines, "")
 		}
-	} else {
-		lines = append(lines, helpStyle.Render(helpText))
 	}
 	return lines
 }
@@ -1959,12 +2012,23 @@ func (m *Model) renderChatView() []string {
 	mediaIndices := m.getChatMediaIndices()
 	mediaHelp := ""
 	if len(mediaIndices) > 1 {
-		mediaHelp = fmt.Sprintf(" · [Alt+P] Preview (%d/%d) · [Alt+↑/↓] Media · [Alt+X] Stop", m.selectedMediaIdx+1, len(mediaIndices))
+		mediaHelp = fmt.Sprintf("[Alt+P] Preview (%d/%d) · [Alt+↑/↓] Media · [Alt+X] Stop", m.selectedMediaIdx+1, len(mediaIndices))
 	} else if len(mediaIndices) == 1 {
-		mediaHelp = " · [Alt+P] Preview Media · [Alt+X] Stop"
+		mediaHelp = "[Alt+P] Preview Media · [Alt+X] Stop"
 	}
 
-	helpText := "[Enter] Send · [Alt+F] Attach · [Esc] Back" + mediaHelp + scrollInfo
+	helpText := "[Enter] Send · [Alt+F] Attach · [Esc] Back"
+	if mediaHelp != "" {
+		helpText += " · " + mediaHelp
+	}
+	helpText += scrollInfo
+
+	dynamicHelp := mediaHelp
+	if dynamicHelp != "" && scrollInfo != "" {
+		dynamicHelp = dynamicHelp + " " + scrollInfo
+	} else if dynamicHelp == "" && scrollInfo != "" {
+		dynamicHelp = strings.TrimPrefix(scrollInfo, " · ")
+	}
 
 	statusNotice := ""
 	if m.promptOpenWith {
@@ -1977,18 +2041,34 @@ func (m *Model) renderChatView() []string {
 		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
 	}
 
-	if statusNotice != "" {
-		if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
-			if cw >= lipgloss.Width(statusNotice)+14 {
-				lines = append(lines, helpStyle.Render("[Esc] Back")+" · "+statusNotice)
+	if m.showHelp {
+		if statusNotice != "" {
+			if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
+				if cw >= lipgloss.Width(statusNotice)+14 {
+					lines = append(lines, helpStyle.Render("[Esc] Back")+" · "+statusNotice)
+				} else {
+					lines = append(lines, statusNotice)
+				}
+			} else {
+				lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
+			}
+		} else {
+			lines = append(lines, helpStyle.Render(helpText))
+		}
+	} else {
+		if dynamicHelp != "" && statusNotice != "" {
+			if lipgloss.Width(dynamicHelp)+3+lipgloss.Width(statusNotice) <= cw {
+				lines = append(lines, helpStyle.Render(dynamicHelp)+" · "+statusNotice)
 			} else {
 				lines = append(lines, statusNotice)
 			}
+		} else if dynamicHelp != "" {
+			lines = append(lines, helpStyle.Render(dynamicHelp))
+		} else if statusNotice != "" {
+			lines = append(lines, statusNotice)
 		} else {
-			lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
+			lines = append(lines, "")
 		}
-	} else {
-		lines = append(lines, helpStyle.Render(helpText))
 	}
 
 	return lines
@@ -2083,7 +2163,11 @@ func (m *Model) renderContactPickerView() []string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, helpStyle.Render("[Up/Down] Navigate · [Enter] Select & Compose · [Esc] Cancel"))
+	if m.showHelp {
+		lines = append(lines, helpStyle.Render("[Up/Down] Navigate · [Enter] Select & Compose · [Esc] Cancel"))
+	} else {
+		lines = append(lines, "")
+	}
 
 	return lines
 }
