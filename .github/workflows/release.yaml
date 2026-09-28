@@ -53,6 +53,19 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Determine Version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v0.1.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
       - name: Build binary
         shell: bash
         run: |
@@ -64,7 +77,7 @@ jobs:
       - name: Package Linux Archive
         if: matrix.os == 'ubuntu-latest'
         run: |
-          PKG_NAME="watui-${{ matrix.target }}"
+          PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$PKG_NAME"
           cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
@@ -75,20 +88,26 @@ jobs:
       - name: Package macOS Archive
         if: matrix.os == 'macos-latest'
         run: |
-          PKG_NAME="watui-${{ matrix.target }}"
+          PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$PKG_NAME"
           cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
 
       # -----------------------------------------------------------
-      # Windows Packaging (Portable .zip)
+      # Windows Packaging (Portable .zip & Standard .zip)
       # -----------------------------------------------------------
       - name: Package Windows Archives
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
+          # Windows Standard Package
+          PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "$PKG_NAME"
+          cp watui.exe watui.example.yaml README.md LICENSE "$PKG_NAME/"
+          7z a "${PKG_NAME}.zip" "$PKG_NAME"
+
           # Windows Portable Package: contains binary + default watui.yaml (runs self-contained in folder)
-          PORTABLE_DIR="watui-${{ matrix.target }}-portable"
+          PORTABLE_DIR="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}-portable"
           mkdir -p "$PORTABLE_DIR"
           cp watui.exe "$PORTABLE_DIR/"
           cp watui.example.yaml "$PORTABLE_DIR/watui.yaml"
