@@ -204,10 +204,6 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		contactsByUser: make(map[string]*domain.Contact),
 	}
 
-	if preloaded, err := adapter.GetContacts(ctx); err == nil && len(preloaded) > 0 {
-		m.setContacts(preloaded)
-	}
-
 	m.initPinnedChats()
 
 	adapter.OnMessage(func(msg domain.Message) {
@@ -988,7 +984,12 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 			}
 			m.unreadChats[msg.ChatID] = chat
 		} else {
-			chat.Messages = append(chat.Messages, msg)
+			if len(chat.Messages) < 50 {
+				chat.Messages = append(chat.Messages, msg)
+			} else {
+				copy(chat.Messages, chat.Messages[1:])
+				chat.Messages[len(chat.Messages)-1] = msg
+			}
 			chat.LastReceived = msg.Timestamp
 			if isPinned {
 				chat.IsPinned = true
@@ -1070,7 +1071,12 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		}
 		m.unreadChats[msg.ChatID] = chat
 	} else {
-		chat.Messages = append(chat.Messages, msg)
+		if len(chat.Messages) < 50 {
+			chat.Messages = append(chat.Messages, msg)
+		} else {
+			copy(chat.Messages, chat.Messages[1:])
+			chat.Messages[len(chat.Messages)-1] = msg
+		}
 		chat.LastReceived = msg.Timestamp
 		if isPinned {
 			chat.IsPinned = true

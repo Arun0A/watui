@@ -76,6 +76,9 @@ type WhatsAppAdapter interface {
 	// IsChatArchived checks whether the specified chat JID is archived in WhatsApp.
 	IsChatArchived(chatID string) bool
 
+	// GetArchivedChats returns a map of all currently archived chat JIDs.
+	GetArchivedChats() map[string]bool
+
 	// SetChatArchived archives or unarchives the specified chat JID in WhatsApp.
 	SetChatArchived(ctx context.Context, chatID string, archived bool) error
 }

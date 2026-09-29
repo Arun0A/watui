@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -376,28 +377,37 @@ func (r *RemoteAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (
 }
 
 func (r *RemoteAdapter) EnsureGroupNames(ctx context.Context, jids []string) {
-	_ = r.call(ctx, "ensure_group_names", EnsureGroupsParams{JIDs: jids}, nil)
+	go func() {
+		_ = r.call(ctx, "ensure_group_names", EnsureGroupsParams{JIDs: jids}, nil)
+	}()
 }
 
 func (r *RemoteAdapter) IsChatArchived(chatID string) bool {
-	r.archivedMu.RLock()
-	archived, found := r.archivedChats[chatID]
-	r.archivedMu.RUnlock()
-	if found {
-		return archived
+	if chatID == "" {
+		return false
 	}
-
-	var res bool
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err := r.call(ctx, "is_chat_archived", DismissParams{ChatID: chatID}, &res)
-	if err == nil {
-		r.archivedMu.Lock()
-		r.archivedChats[chatID] = res
-		r.archivedMu.Unlock()
-		return res
+	clean := chatID
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+	r.archivedMu.RLock()
+	defer r.archivedMu.RUnlock()
+	if r.archivedChats != nil {
+		return r.archivedChats[chatID] || r.archivedChats[clean]
 	}
 	return false
+}
+
+func (r *RemoteAdapter) GetArchivedChats() map[string]bool {
+	r.archivedMu.RLock()
+	defer r.archivedMu.RUnlock()
+	res := make(map[string]bool, len(r.archivedChats))
+	for k, v := range r.archivedChats {
+		res[k] = v
+	}
+	return res
 }
 
 func (r *RemoteAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {

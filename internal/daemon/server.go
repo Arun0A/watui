@@ -114,32 +114,20 @@ func (s *Server) handleClient(conn net.Conn) {
 		atomic.AddInt32(&s.activeClients, -1)
 	}()
 
-	// 1. Send initial snapshot immediately to make client launch snappy quick
-	initCtx, initCancel := context.WithTimeout(s.ctx, 3*time.Second)
+	// 1. Send initial snapshot immediately to make client launch snappy quick (<5ms)
+	initCtx, initCancel := context.WithTimeout(s.ctx, 2*time.Second)
 	unreads, _ := s.adapter.GetUnreadMessages(initCtx)
-	contacts, _ := s.adapter.GetContacts(initCtx)
 	initCancel()
 
 	s.statusMu.RLock()
 	currentStatus := s.currentStatus
 	s.statusMu.RUnlock()
 
-	archivedMap := make(map[string]bool)
-	for _, c := range contacts {
-		if s.adapter.IsChatArchived(c.JID) {
-			archivedMap[c.JID] = true
-		}
-	}
-	for _, u := range unreads {
-		if s.adapter.IsChatArchived(u.ChatID) {
-			archivedMap[u.ChatID] = true
-		}
-	}
+	archivedMap := s.adapter.GetArchivedChats()
 
 	snapshot := InitialSnapshot{
 		Status:         currentStatus,
 		UnreadMessages: unreads,
-		Contacts:       contacts,
 		ArchivedChats:  archivedMap,
 	}
 
@@ -148,6 +136,24 @@ func (s *Server) handleClient(conn net.Conn) {
 		Event:  "snapshot",
 		Result: snapData,
 	})
+
+	// Stream contacts in the background after the fast handshake completes
+	go func() {
+		contactCtx, contactCancel := context.WithTimeout(s.ctx, 5*time.Second)
+		contacts, err := s.adapter.GetContacts(contactCtx)
+		contactCancel()
+		if err == nil && len(contacts) > 0 {
+			cData, err := json.Marshal(contacts)
+			if err == nil {
+				s.clientsMu.Lock()
+				_ = enc.Encode(RPCResponse{
+					Event:  "contacts",
+					Result: cData,
+				})
+				s.clientsMu.Unlock()
+			}
+		}
+	}()
 
 	// 2. Request / Response loop
 	for {

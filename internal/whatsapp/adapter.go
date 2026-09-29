@@ -228,6 +228,17 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 				}
 			}
 		}
+
+		// Prune any massive historical backlog from chats with > 100 messages to keep DB lean and fast
+		_, _ = localDB.Exec(`
+			DELETE FROM watui_unread_messages 
+			WHERE id NOT IN (
+				SELECT id FROM (
+					SELECT id, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) as rn 
+					FROM watui_unread_messages
+				) WHERE rn <= 100
+			);
+		`)
 	}
 
 	adapterCtx, cancel := context.WithCancel(ctx)
@@ -474,6 +485,17 @@ func (a *Adapter) IsChatArchived(chatID string) bool {
 		}
 	}
 	return false
+}
+
+// GetArchivedChats returns a copy of all currently known archived chat JIDs.
+func (a *Adapter) GetArchivedChats() map[string]bool {
+	a.archivedMu.RLock()
+	defer a.archivedMu.RUnlock()
+	res := make(map[string]bool, len(a.archivedChats))
+	for k, v := range a.archivedChats {
+		res[k] = v
+	}
+	return res
 }
 
 // SetChatArchived archives or unarchives the specified chat JID in WhatsApp.
@@ -1108,6 +1130,12 @@ func (a *Adapter) saveUnreadMessage(msg domain.Message, rawMsg ...*waE2E.Message
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, rawBytes,
 	)
+
+	// Keep unread messages table lean by pruning older messages beyond 100 per chat
+	_, _ = a.localDB.Exec(`DELETE FROM watui_unread_messages 
+		WHERE chat_id = ? AND id NOT IN (
+			SELECT id FROM watui_unread_messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 100
+		)`, msg.ChatID, msg.ChatID)
 }
 
 func (a *Adapter) isChatUnread(chatID string) bool {
@@ -1135,15 +1163,22 @@ func (a *Adapter) deleteUnreadMessageIDs(ids []types.MessageID) []string {
 	return affectedChats
 }
 
-// GetUnreadMessages returns all unread messages persisted in local SQLite.
+// GetUnreadMessages returns all unread messages persisted in local SQLite (capped to latest 50 per chat for instant startup).
 func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, error) {
 	if a.localDB == nil {
 		return nil, nil
 	}
 	lidMap := a.getLIDMap()
 
-	rows, err := a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, raw_message
-		FROM watui_unread_messages ORDER BY timestamp ASC`)
+	// Use partitioned window query to only pull the latest 50 unreads per chat, avoiding megabytes of stale backlog
+	rows, err := a.localDB.QueryContext(ctx, `
+		SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me
+		FROM (
+			SELECT id, chat_id, COALESCE(chat_name, '') AS chat_name, sender, sender_name, timestamp, body, type, is_from_me,
+			       ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) as rn
+			FROM watui_unread_messages
+		) WHERE rn <= 50
+		ORDER BY timestamp ASC`)
 	if err != nil {
 		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me
 			FROM watui_unread_messages ORDER BY timestamp ASC`)
@@ -1154,21 +1189,11 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 	defer func() { _ = rows.Close() }()
 
 	var msgs []domain.Message
-	cols, _ := rows.Columns()
-	hasRaw := len(cols) >= 10
-
 	for rows.Next() {
 		var m domain.Message
 		var ts int64
 		var tStr string
-		var rawBytes []byte
-		var scanErr error
-		if hasRaw {
-			scanErr = rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe, &rawBytes)
-		} else {
-			scanErr = rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe)
-		}
-		if scanErr == nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe); err == nil {
 			m.Timestamp = time.Unix(ts, 0)
 			m.Type = domain.MessageType(tStr)
 			m.Status = domain.MessageStatusDelivered
@@ -1190,18 +1215,10 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 					m.Sender = pn + "@s.whatsapp.net"
 				}
 			}
-			if len(rawBytes) > 0 {
-				var parsed waE2E.Message
-				if err := proto.Unmarshal(rawBytes, &parsed); err == nil {
-					a.cacheMediaMessage(m.ID, &parsed)
-				}
-			}
 			msgs = append(msgs, m)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return msgs, fmt.Errorf("failed during unread messages row iteration: %w", err)
-	}
+	_ = rows.Err()
 	return msgs, nil
 }
 

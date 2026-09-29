@@ -49,6 +49,9 @@ func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (st
 }
 func (m *mockAdapter) EnsureGroupNames(ctx context.Context, jids []string) {}
 func (m *mockAdapter) IsChatArchived(chatID string) bool                   { return chatID == "archived@g.us" }
+func (m *mockAdapter) GetArchivedChats() map[string]bool {
+	return map[string]bool{"archived@g.us": true}
+}
 func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
 	return nil
 }

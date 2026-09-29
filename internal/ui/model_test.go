@@ -54,6 +54,13 @@ func (m *mockAdapter) IsChatArchived(chatID string) bool {
 	}
 	return false
 }
+func (m *mockAdapter) GetArchivedChats() map[string]bool {
+	res := make(map[string]bool)
+	for k, v := range m.archivedChats {
+		res[k] = v
+	}
+	return res
+}
 func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
 	if m.archivedChats == nil {
 		m.archivedChats = make(map[string]bool)

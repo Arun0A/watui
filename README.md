@@ -4,7 +4,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)](https://github.com/Arun0A/watui/releases)
 
-A minimal WhatsApp TUI, specifically designed to reduce dependency on WA web or desktop application.
+A minimal WhatsApp TUI, specifically designed to reduce dependency on a browser or desktop application.
 
 **Philosophy**: Most of the time you do not require past conversation context visible for a reply. And you often have to keep whatsapp (either in web or desktop-app) open anticipating a message from someone, this eats up a lot of RAM of your system (which you were saving for absolutely nothing).
 
@@ -170,7 +170,7 @@ watui daemon restart      # Restart daemon (or: watui -d restart)
 | Key | Action |
 | :--- | :--- |
 | `Type query` | Real-time fuzzy filter contacts and groups |
-| <kbd>↓</kbd> / <kbd>↑</kbd> | Select contact / group |
+| <kbd>Ctrl</kbd> + <kbd>n</kbd> / <kbd>p</kbd> | Select contact / group |
 | <kbd>Enter</kbd> | Open chat window |
 | <kbd>Esc</kbd> | Cancel and return to inbox |
 
