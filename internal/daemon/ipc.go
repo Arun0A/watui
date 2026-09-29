@@ -57,3 +57,8 @@ type DownloadMediaParams struct {
 type EnsureGroupsParams struct {
 	JIDs []string `json:"jids"`
 }
+
+type SetChatArchivedParams struct {
+	ChatID   string `json:"chat_id"`
+	Archived bool   `json:"archived"`
+}

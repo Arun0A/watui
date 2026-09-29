@@ -130,6 +130,7 @@ nix develop github:Arun0A/watui
 | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↓</kbd> / <kbd>↑</kbd> | Navigate unread / pinned conversations |
 | <kbd>Enter</kbd> | Open selected conversation |
 | <kbd>a</kbd> | Toggle Archived chats section (press again or <kbd>Esc</kbd> to return) |
+| <kbd>Shift</kbd>+<kbd>a</kbd> / <kbd>A</kbd> | Archive / Unarchive selected conversation |
 | <kbd>n</kbd> | Start a new chat (search all contacts & groups) |
 | <kbd>d</kbd> / <kbd>r</kbd> | Dismiss selected unread conversation |
 | <kbd>?</kbd> | Toggle keybind hints |

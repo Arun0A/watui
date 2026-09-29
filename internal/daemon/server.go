@@ -265,6 +265,19 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			resp.Result, _ = json.Marshal(archived)
 		}
 
+	case "set_chat_archived":
+		var p SetChatArchivedParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			err := s.adapter.SetChatArchived(reqCtx, p.ChatID, p.Archived)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				s.BroadcastEvent("archived", p)
+			}
+		}
+
 	case "sync":
 		if err := s.adapter.Sync(reqCtx); err != nil {
 			resp.Error = err.Error()

@@ -177,10 +177,24 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 
 	case "archived":
 		var arch map[string]bool
-		if err := json.Unmarshal(resp.Result, &arch); err == nil {
+		if err := json.Unmarshal(resp.Result, &arch); err == nil && len(arch) > 0 {
 			r.archivedMu.Lock()
 			r.archivedChats = arch
 			r.archivedMu.Unlock()
+		} else {
+			var p SetChatArchivedParams
+			if err := json.Unmarshal(resp.Result, &p); err == nil && p.ChatID != "" {
+				r.archivedMu.Lock()
+				if r.archivedChats == nil {
+					r.archivedChats = make(map[string]bool)
+				}
+				if p.Archived {
+					r.archivedChats[p.ChatID] = true
+				} else {
+					delete(r.archivedChats, p.ChatID)
+				}
+				r.archivedMu.Unlock()
+			}
 		}
 	}
 }
@@ -384,4 +398,19 @@ func (r *RemoteAdapter) IsChatArchived(chatID string) bool {
 		return res
 	}
 	return false
+}
+
+func (r *RemoteAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
+	r.archivedMu.Lock()
+	if r.archivedChats == nil {
+		r.archivedChats = make(map[string]bool)
+	}
+	if archived {
+		r.archivedChats[chatID] = true
+	} else {
+		delete(r.archivedChats, chatID)
+	}
+	r.archivedMu.Unlock()
+
+	return r.call(ctx, "set_chat_archived", SetChatArchivedParams{ChatID: chatID, Archived: archived}, nil)
 }

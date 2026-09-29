@@ -49,6 +49,9 @@ func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (st
 }
 func (m *mockAdapter) EnsureGroupNames(ctx context.Context, jids []string) {}
 func (m *mockAdapter) IsChatArchived(chatID string) bool                   { return chatID == "archived@g.us" }
+func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
+	return nil
+}
 
 func TestIPCEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -102,6 +105,14 @@ func TestIPCEndToEnd(t *testing.T) {
 	}
 	if client.IsChatArchived("friend@s.whatsapp.net") {
 		t.Errorf("Expected archived false for friend")
+	}
+
+	// Verify SetChatArchived RPC
+	if err := client.SetChatArchived(context.Background(), "friend@s.whatsapp.net", true); err != nil {
+		t.Errorf("SetChatArchived failed: %v", err)
+	}
+	if !client.IsChatArchived("friend@s.whatsapp.net") {
+		t.Errorf("Expected friend to be archived after SetChatArchived")
 	}
 
 	// Verify live event broadcast

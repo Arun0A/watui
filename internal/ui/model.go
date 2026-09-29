@@ -1186,6 +1186,38 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		m.mu.Unlock()
 		return tea.ClearScreen
 
+	case "A", "shift+a": // archive / unarchive selected chat
+		m.mu.Lock()
+		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
+			chatID := m.chatOrder[m.cursor]
+			chat := m.unreadChats[chatID]
+			if chat != nil {
+				targetArchived := !chat.IsArchived
+				chat.IsArchived = targetArchived
+				if targetArchived {
+					chat.IsPinned = false
+					if len(chat.Messages) == 0 {
+						delete(m.unreadChats, chatID)
+					}
+				}
+				m.sortChatOrderLocked()
+				if m.cursor >= len(m.chatOrder) {
+					if len(m.chatOrder) > 0 {
+						m.cursor = len(m.chatOrder) - 1
+					} else {
+						m.cursor = 0
+					}
+				}
+				if m.adapter != nil {
+					go func(cID string, isArchived bool) {
+						_ = m.adapter.SetChatArchived(m.ctx, cID, isArchived)
+					}(chatID, targetArchived)
+				}
+			}
+		}
+		m.mu.Unlock()
+		return tea.ClearScreen
+
 	case "esc":
 		if m.showArchived {
 			m.mu.Lock()
@@ -1870,21 +1902,21 @@ func (m *Model) renderUnreadListView() []string {
 		}
 	}
 
-	helpText := "[Enter] Open · [r] Dismiss · [n] New · [q] Quit"
+	helpText := "[Enter] Open · [Shift+A] Archive · [r] Dismiss · [n] New · [q] Quit"
 	if m.showArchived {
 		if selectedHasMedia {
-			helpText = "[Enter] Open · [a/Esc] Back to Unreads · [Alt+P] Preview · [r] Dismiss · [q] Quit"
+			helpText = "[Enter] Open · [Shift+A] Unarchive · [a/Esc] Back to Unreads · [Alt+P] Preview · [r] Dismiss · [q] Quit"
 		} else {
-			helpText = "[Enter] Open · [a/Esc] Back to Unreads · [r] Dismiss · [q] Quit"
+			helpText = "[Enter] Open · [Shift+A] Unarchive · [a/Esc] Back to Unreads · [r] Dismiss · [q] Quit"
 		}
 	} else if archivedCount > 0 {
 		if selectedHasMedia {
-			helpText = fmt.Sprintf("[Enter] Open · [a] Archived (%d) · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit", archivedCount)
+			helpText = fmt.Sprintf("[Enter] Open · [Shift+A] Archive · [a] Archived (%d) · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit", archivedCount)
 		} else {
-			helpText = fmt.Sprintf("[Enter] Open · [a] Archived (%d) · [r] Dismiss · [n] New · [q] Quit", archivedCount)
+			helpText = fmt.Sprintf("[Enter] Open · [Shift+A] Archive · [a] Archived (%d) · [r] Dismiss · [n] New · [q] Quit", archivedCount)
 		}
 	} else if selectedHasMedia {
-		helpText = "[Enter] Open · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit"
+		helpText = "[Enter] Open · [Shift+A] Archive · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit"
 	}
 
 	if m.showHelp {

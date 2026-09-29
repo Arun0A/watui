@@ -54,6 +54,17 @@ func (m *mockAdapter) IsChatArchived(chatID string) bool {
 	}
 	return false
 }
+func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
+	if m.archivedChats == nil {
+		m.archivedChats = make(map[string]bool)
+	}
+	if archived {
+		m.archivedChats[chatID] = true
+	} else {
+		delete(m.archivedChats, chatID)
+	}
+	return nil
+}
 func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
 	return "/tmp/mock_media.jpg", nil
 }
@@ -1369,6 +1380,96 @@ func TestArchivedChatsFilteringAndToggle(t *testing.T) {
 	}
 	if len(m.chatOrder) != 1 || m.chatOrder[0] != "normal@s.whatsapp.net" {
 		t.Errorf("Expected back to active unread chats, got %v", m.chatOrder)
+	}
+}
+
+func TestArchiveUnarchiveShiftA(t *testing.T) {
+	adapter := &mockAdapter{
+		archivedChats: make(map[string]bool),
+	}
+	m := NewModel(context.Background(), adapter)
+	m.width = 100
+	m.height = 30
+
+	m.handleIncomingMessage(domain.Message{
+		ID:         "M1",
+		ChatID:     "chat1@s.whatsapp.net",
+		ChatName:   "Alice",
+		Body:       "Hello from Alice",
+		Timestamp:  time.Now().Add(-1 * time.Minute),
+		Sender:     "chat1@s.whatsapp.net",
+		SenderName: "Alice",
+	})
+	m.handleIncomingMessage(domain.Message{
+		ID:         "M2",
+		ChatID:     "chat2@s.whatsapp.net",
+		ChatName:   "Bob",
+		Body:       "Hello from Bob",
+		Timestamp:  time.Now(),
+		Sender:     "chat2@s.whatsapp.net",
+		SenderName: "Bob",
+	})
+
+	if len(m.chatOrder) != 2 {
+		t.Fatalf("Expected 2 chats in active unread list, got %d", len(m.chatOrder))
+	}
+
+	// Cursor is at 0 (Bob, due to latest timestamp). Move cursor to Alice or archive top chat.
+	topChatID := m.chatOrder[0]
+	otherChatID := m.chatOrder[1]
+
+	// 1. Press Shift+A ('A') on top chat to archive it
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	time.Sleep(10 * time.Millisecond)
+
+	if !adapter.IsChatArchived(topChatID) {
+		t.Errorf("Expected %s to be archived in adapter", topChatID)
+	}
+	if !m.unreadChats[topChatID].IsArchived {
+		t.Errorf("Expected %s to have IsArchived=true in model", topChatID)
+	}
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != otherChatID {
+		t.Errorf("Expected only %s in active list after archiving top chat, got %v", otherChatID, m.chatOrder)
+	}
+
+	// 2. Press 'a' to enter archived view
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.showArchived {
+		t.Fatalf("Expected to be in archived view")
+	}
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != topChatID {
+		t.Fatalf("Expected %s in archived view, got %v", topChatID, m.chatOrder)
+	}
+
+	// Verify footer shows Unarchive hint when help is enabled
+	m.showHelp = true
+	viewStr := strings.Join(m.renderUnreadListView(), "\n")
+	if !strings.Contains(viewStr, "[Shift+A] Unarchive") {
+		t.Errorf("Expected '[Shift+A] Unarchive' in footer, got:\n%s", viewStr)
+	}
+	m.showHelp = false
+
+	// 3. Press Shift+A ('A') in archived view to unarchive top chat
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	time.Sleep(10 * time.Millisecond)
+
+	if adapter.IsChatArchived(topChatID) {
+		t.Errorf("Expected %s to be unarchived in adapter", topChatID)
+	}
+	if m.unreadChats[topChatID].IsArchived {
+		t.Errorf("Expected %s to have IsArchived=false in model", topChatID)
+	}
+	if len(m.chatOrder) != 0 {
+		t.Errorf("Expected 0 chats in archived view after unarchiving, got %d", len(m.chatOrder))
+	}
+
+	// 4. Press 'a' to return to unread list
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if m.showArchived {
+		t.Fatalf("Expected to return to active unread view")
+	}
+	if len(m.chatOrder) != 2 {
+		t.Fatalf("Expected both chats back in active unread view, got %d", len(m.chatOrder))
 	}
 }
 

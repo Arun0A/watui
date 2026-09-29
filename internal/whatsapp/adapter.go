@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -473,6 +474,40 @@ func (a *Adapter) IsChatArchived(chatID string) bool {
 		}
 	}
 	return false
+}
+
+// SetChatArchived archives or unarchives the specified chat JID in WhatsApp.
+func (a *Adapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
+	jid, err := NormalizeJID(chatID)
+	if err != nil {
+		return err
+	}
+	clean := jid.String()
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+
+	a.archivedMu.Lock()
+	if a.archivedChats == nil {
+		a.archivedChats = make(map[string]bool)
+	}
+	if archived {
+		a.archivedChats[chatID] = true
+		a.archivedChats[clean] = true
+	} else {
+		delete(a.archivedChats, chatID)
+		delete(a.archivedChats, clean)
+	}
+	a.archivedMu.Unlock()
+
+	if a.client == nil {
+		return errors.New("whatsapp client not initialized")
+	}
+
+	patch := appstate.BuildArchive(jid, archived, time.Time{}, nil)
+	return a.client.SendAppState(ctx, patch)
 }
 
 // SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number.
