@@ -84,6 +84,15 @@ func TestIPCEndToEnd(t *testing.T) {
 		t.Errorf("Expected active client")
 	}
 
+	// Verify immediate connection status dispatch
+	var receivedStatus domain.ConnectionStatus
+	client.OnStatus(func(s domain.ConnectionStatus) {
+		receivedStatus = s
+	})
+	if receivedStatus != domain.StatusConnected {
+		t.Errorf("Expected initial status %q, got %q", domain.StatusConnected, receivedStatus)
+	}
+
 	// Verify contacts
 	contacts, err := client.GetContacts(context.Background())
 	if err != nil || len(contacts) != 1 || contacts[0].Name != "My Friend" {

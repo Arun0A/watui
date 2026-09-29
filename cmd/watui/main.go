@@ -208,12 +208,14 @@ func main() {
 				adapter.Disconnect()
 				return
 			}
-		} else if !*cliMode {
-			// Connect asynchronously in background so direct TUI launches quickly
-			go func() {
-				_ = adapter.Connect(ctx)
-			}()
 		}
+	}
+
+	if !*cliMode {
+		// Connect asynchronously in background so TUI launches quickly and status is synchronized
+		go func() {
+			_ = adapter.Connect(ctx)
+		}()
 	}
 
 	// 5. CLI Stream Mode

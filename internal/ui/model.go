@@ -213,6 +213,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		}
 	})
 	adapter.OnStatus(func(s domain.ConnectionStatus) {
+		m.status = s
 		select {
 		case m.statusChan <- s:
 		default:

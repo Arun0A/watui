@@ -284,8 +284,13 @@ func (a *Adapter) OnMessage(handler domain.MessageHandler) {
 // OnStatus registers a connection status handler.
 func (a *Adapter) OnStatus(handler domain.StatusHandler) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.statusHandlers = append(a.statusHandlers, handler)
+	st := a.currentStatus
+	a.mu.Unlock()
+
+	if st != "" {
+		handler(st)
+	}
 }
 
 func (a *Adapter) setStatus(status domain.ConnectionStatus) {

@@ -293,6 +293,13 @@ func (r *RemoteAdapter) OnStatus(handler domain.StatusHandler) {
 	r.handlersMu.Lock()
 	r.statusHandlers = append(r.statusHandlers, handler)
 	r.handlersMu.Unlock()
+
+	r.statusMu.RLock()
+	st := r.currentStatus
+	r.statusMu.RUnlock()
+	if st != "" {
+		handler(st)
+	}
 }
 
 func (r *RemoteAdapter) OnContactsUpdated(handler func([]domain.Contact)) {
