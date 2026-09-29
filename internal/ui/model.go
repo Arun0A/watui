@@ -57,8 +57,8 @@ type Model struct {
 	unreadChats  map[string]*UnreadChat // chatID -> UnreadChat
 	chatOrder    []string               // visible chats according to view mode
 	cursor       int
-	showArchived bool                   // true when viewing archived chats section
-	showHelp     bool                   // toggled with '?' to show static keybinds
+	showArchived bool // true when viewing archived chats section
+	showHelp     bool // toggled with '?' to show static keybinds
 
 	// Active conversation view
 	activeChatID     string
@@ -1496,7 +1496,13 @@ func (m *Model) filterContacts(query string) {
 	trimmed := strings.TrimSpace(query)
 	q := strings.ToLower(trimmed)
 	if q == "" {
-		m.filteredList = m.contacts
+		var list []domain.Contact
+		for _, c := range m.contacts {
+			if !m.isMuted(c.JID, c.Name, c.PushName) {
+				list = append(list, c)
+			}
+		}
+		m.filteredList = list
 		m.contactCursor = 0
 		m.contactOffset = 0
 		return
@@ -1519,6 +1525,10 @@ func (m *Model) filterContacts(query string) {
 	}
 
 	for _, c := range m.contacts {
+		if m.isMuted(c.JID, c.Name, c.PushName) {
+			continue
+		}
+
 		nameMatch := strings.Contains(strings.ToLower(c.Name), q)
 		if c.IsGroup {
 			// Never match group JID (e.g. 120363@g.us)

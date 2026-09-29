@@ -3,9 +3,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -707,10 +710,41 @@ func isUserServer(server string) bool {
 	return server == "s.whatsapp.net" || server == "c.us" || server == "lid"
 }
 
+var (
+	targetRegexMu  sync.RWMutex
+	targetRegexMap = make(map[string]*regexp.Regexp)
+)
+
+func getCompiledRegex(pattern string) *regexp.Regexp {
+	targetRegexMu.RLock()
+	re, exists := targetRegexMap[pattern]
+	targetRegexMu.RUnlock()
+	if exists {
+		return re
+	}
+
+	targetRegexMu.Lock()
+	defer targetRegexMu.Unlock()
+	if re, exists := targetRegexMap[pattern]; exists {
+		return re
+	}
+
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		targetRegexMap[pattern] = nil
+		return nil
+	}
+	targetRegexMap[pattern] = compiled
+	return compiled
+}
+
 // MatchTarget checks if a chat (identified by chatID and possible names) matches a rule.
 // A rule can be:
+// - A wildcard / glob pattern (e.g. "*@newsletter", "status@*", "*@broadcast")
+// - A regular expression (e.g. ".*@newsletter", "^status@broadcast$", "/(?i)newsletter/")
+// - A direct suffix starting with @ (e.g. "@newsletter", "@broadcast")
 // - A phone number (e.g. "+1 (234) 567-8900", "12345678900")
-// - A full JID or JID user (e.g. "120363311130744191@g.us", "120363311130744191")
+// - A full JID or JID user (e.g. "120363311130744191@g.us", "status@broadcast")
 // - A contact name or group name (case-insensitive exact or substring)
 func MatchTarget(rule string, chatID string, chatNames ...string) bool {
 	rule = strings.TrimSpace(rule)
@@ -726,7 +760,52 @@ func MatchTarget(rule string, chatID string, chatNames ...string) bool {
 		return true
 	}
 
-	// 2. Normalize both rule and chatID to base user & server
+	// 2. Direct @suffix match (e.g. "@newsletter" or "@broadcast")
+	if strings.HasPrefix(ruleLower, "@") {
+		if strings.HasSuffix(chatLower, ruleLower) {
+			return true
+		}
+	}
+
+	// 3. Glob / Wildcard matching (*, ?)
+	if strings.ContainsAny(ruleLower, "*?") {
+		if matched, _ := path.Match(ruleLower, chatLower); matched {
+			return true
+		}
+		for _, name := range chatNames {
+			nameLower := strings.ToLower(strings.TrimSpace(name))
+			if matched, _ := path.Match(ruleLower, nameLower); matched {
+				return true
+			}
+		}
+	}
+
+	// 4. Regex matching (slashed e.g. /pattern/ or implicit with .*, ^, $, |, \)
+	isSlashRegex := strings.HasPrefix(rule, "/") && strings.HasSuffix(rule, "/") && len(rule) > 2
+	isImplicitRegex := strings.Contains(rule, ".*") || strings.HasPrefix(rule, "^") || strings.HasSuffix(rule, "$") || strings.Contains(rule, "|") || strings.Contains(rule, `\`)
+
+	if isSlashRegex || isImplicitRegex {
+		pattern := rule
+		if isSlashRegex {
+			pattern = rule[1 : len(rule)-1]
+		}
+		if !strings.HasPrefix(pattern, "(?i)") {
+			pattern = "(?i)" + pattern
+		}
+		re := getCompiledRegex(pattern)
+		if re != nil {
+			if re.MatchString(chatID) || re.MatchString(chatLower) {
+				return true
+			}
+			for _, name := range chatNames {
+				if re.MatchString(name) || re.MatchString(strings.ToLower(name)) {
+					return true
+				}
+			}
+		}
+	}
+
+	// 5. Normalize both rule and chatID to base user & server
 	ruleUser, ruleServer := normalizeJID(ruleLower)
 	chatUser, chatServer := normalizeJID(chatLower)
 

@@ -186,20 +186,21 @@ watui daemon restart      # Restart daemon (or: watui -d restart)
 See [**`watui.example.yaml`**](watui.example.yaml) for a full documented template:
 
 ```yaml
-# 1. Pinned chats (always appear at top of inbox with [PIN] badge)
+# 1. Pinned chats
 pin:
   - "91XXXXXX9-15XXXXXX2@g.us" # JID or name supported
 
 # 2. Muted chats (hidden from unread inbox)
 mute:
-  - "my_enemy"
+  - "*@newsletter"         # Mute all WhatsApp Channels
+  - "status@broadcast"     # Mute WhatsApp Status updates
 
 # 3. Media Preview Commands (defaults to OS / MIME default: xdg-open on Linux, open on macOS, default app on Windows)
 preview:
   image: "feh -."        # Optional override (e.g. feh, mpv --loop=inf)
   video: "mpv"           # Optional override
   document: "xdg-open"   # General document fallback
-  extensions:            # Per-file-extension overrides (GUI or terminal viewers like nvim/less)
+  extensions:            
     pdf: "sioyek"
     txt: "nvim"
     log: "less"
@@ -221,10 +222,10 @@ device_name: "WA-TUI"
 # 8. Notifications (Banners & Sound Effects)
 # Disabled by default. Muted chats never trigger alerts.
 notifications:
-  enabled: false          # Master toggle: set to true to enable alerts
+  enabled: true          # Master toggle: set to true to enable alerts
   banner: true            # Desktop notification banner (notify-send on Linux, toast on Windows, macOS)
   sound: true             # Audio chime on incoming message
-  sound_path: ""          # Custom audio file path (defaults to whatsapp_notification.mp3)
+  # sound_path: ""          # Custom audio file path (defaults to whatsapp_notification.mp3)
 ```
 
 ---

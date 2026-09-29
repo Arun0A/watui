@@ -19,11 +19,16 @@
 #   - "120363311130744191@g.us"
 
 # 2. Muted chats / groups
-# Muted chats are completely excluded from the unread inbox list.
-# Useful for spammy or low-priority groups and numbers.
-# Matches contact names, group subjects (case-insensitive substring), phone numbers, or JIDs.
+# Muted chats are completely excluded from the unread inbox and contact picker.
+# Useful for spammy groups, broadcast channels, and status updates.
+# Supports:
+#   - Wildcard globs (e.g. "*@newsletter" to hide all channels, "*@broadcast", "status@*")
+#   - Regular expressions (e.g. ".*@newsletter", "^status@broadcast$")
+#   - Phone numbers, JIDs, or contact/group names (case-insensitive)
 #
 # mute:
+#   - "*@newsletter"         # Mute all WhatsApp Channels
+#   - "status@broadcast"     # Mute WhatsApp Status updates
 #   - "Announcements"
 #   - "Deals & Offers"
 #   - "+18005550199"

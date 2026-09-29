@@ -391,4 +391,54 @@ func TestResolveSoundPath(t *testing.T) {
 	}
 }
 
+func TestMatchTargetWildcardAndRegex(t *testing.T) {
+	// 1. Wildcard / Glob matches
+	if !MatchTarget("*@newsletter", "120363143242@newsletter") {
+		t.Errorf("Expected '*@newsletter' to match channel JID")
+	}
+	if MatchTarget("*@newsletter", "919876543210@s.whatsapp.net") {
+		t.Errorf("'*@newsletter' should NOT match normal user JID")
+	}
+	if !MatchTarget("*@broadcast", "status@broadcast") {
+		t.Errorf("Expected '*@broadcast' to match status@broadcast")
+	}
+	if !MatchTarget("status@*", "status@broadcast") {
+		t.Errorf("Expected 'status@*' to match status@broadcast")
+	}
+	if !MatchTarget("status@broadcast", "status@broadcast") {
+		t.Errorf("Expected exact 'status@broadcast' to match")
+	}
 
+	// 2. Direct @suffix match
+	if !MatchTarget("@newsletter", "120363143242@newsletter") {
+		t.Errorf("Expected '@newsletter' suffix to match")
+	}
+	if !MatchTarget("@broadcast", "status@broadcast") {
+		t.Errorf("Expected '@broadcast' suffix to match")
+	}
+
+	// 3. Regular Expression matches
+	if !MatchTarget(".*@newsletter", "120363143242@newsletter") {
+		t.Errorf("Expected '.*@newsletter' regex to match")
+	}
+	if !MatchTarget("^status@broadcast$", "status@broadcast") {
+		t.Errorf("Expected '^status@broadcast$' regex to match")
+	}
+	if !MatchTarget("/^120363.*@newsletter$/", "120363143242@newsletter") {
+		t.Errorf("Expected slashed regex to match")
+	}
+
+	// 4. Config IsMuted integration
+	cfg := &Config{
+		Mute: []string{"*@newsletter", "status@broadcast"},
+	}
+	if !cfg.IsMuted("120363143242@newsletter", "BBC News") {
+		t.Errorf("Expected channel to be muted by config")
+	}
+	if !cfg.IsMuted("status@broadcast", "Status") {
+		t.Errorf("Expected status@broadcast to be muted by config")
+	}
+	if cfg.IsMuted("919876543210@s.whatsapp.net", "Best Friend") {
+		t.Errorf("Expected friend to NOT be muted by config")
+	}
+}

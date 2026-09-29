@@ -1570,6 +1570,3 @@ func TestMultiLineMessageShiftEnter(t *testing.T) {
 		t.Errorf("Expected input height to reset to 1 after send, got %d", model.input.Height())
 	}
 }
-
-
-
