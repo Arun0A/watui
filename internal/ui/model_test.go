@@ -1225,8 +1225,8 @@ func TestPinnedGroupJIDResolution(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected pinned chat for %s", groupJID)
 	}
-	if strings.Contains(chat.Name, "@") {
-		t.Errorf("Pinned chat name must NOT contain '@', got %q", chat.Name)
+	if strings.Contains(chat.Name, "@g.us") {
+		t.Errorf("Pinned chat name must NOT contain '@g.us', got %q", chat.Name)
 	}
 	if chat.Name != "Group (919007088779-1525273602)" {
 		t.Errorf("Expected fallback 'Group (919007088779-1525273602)', got %q", chat.Name)
@@ -1249,6 +1249,44 @@ func TestPinnedGroupJIDResolution(t *testing.T) {
 	updatedChat := m.unreadChats[groupJID]
 	if updatedChat.Name != "Family Vacation 2024" {
 		t.Errorf("Expected updated chat name 'Family Vacation 2024', got %q", updatedChat.Name)
+	}
+
+	// 4. Also verify group names containing '@' (like "1️⃣ 2027-Kareer School @ CSE") are accepted
+	specialGroupJID := "120363336014495861@g.us"
+	m.Update(contactsLoadedMsg([]domain.Contact{
+		{
+			JID:     specialGroupJID,
+			Name:    "1️⃣ 2027-Kareer School @ CSE",
+			IsGroup: true,
+		},
+	}))
+	resolvedName, isGrp := m.resolveChatName(specialGroupJID, "", "")
+	if resolvedName != "1️⃣ 2027-Kareer School @ CSE" || !isGrp {
+		t.Errorf("Expected '1️⃣ 2027-Kareer School @ CSE', got %q (isGroup=%v)", resolvedName, isGrp)
+	}
+}
+
+func TestIsRealChatName(t *testing.T) {
+	tests := []struct {
+		name     string
+		chatID   string
+		expected bool
+	}{
+		{"", "123@s.whatsapp.net", false},
+		{"123@s.whatsapp.net", "123@s.whatsapp.net", false},
+		{"120363336014495861@g.us", "120363336014495861@g.us", false},
+		{"Group (120363336014495861)", "120363336014495861@g.us", false},
+		{"120363336014495861", "120363336014495861@g.us", false},
+		{"919007088779-1525273602", "919007088779-1525273602@g.us", false},
+		{"1️⃣ 2027-Kareer School @ CSE", "120363336014495861@g.us", true},
+		{"Tech Team @ HQ", "120363999999999999@g.us", true},
+		{"Alice Smith", "1234567890@s.whatsapp.net", true},
+	}
+	for _, tt := range tests {
+		got := isRealChatName(tt.name, tt.chatID)
+		if got != tt.expected {
+			t.Errorf("isRealChatName(%q, %q) = %v; want %v", tt.name, tt.chatID, got, tt.expected)
+		}
 	}
 }
 

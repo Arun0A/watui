@@ -567,18 +567,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func isRawJID(s string) bool {
+	if strings.Contains(s, " ") {
+		return false
+	}
+	servers := []string{
+		"@g.us",
+		"@s.whatsapp.net",
+		"@lid",
+		"@broadcast",
+		"@newsletter",
+		"@hosted",
+		"@call",
+		"@bot",
+	}
+	for _, srv := range servers {
+		if strings.Contains(s, srv) {
+			return true
+		}
+	}
+	return false
+}
+
 func isRealChatName(name string, chatID string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false
 	}
-	if strings.Contains(name, "@") {
+	if isRawJID(name) {
 		return false
 	}
 	if strings.HasPrefix(name, "Group (") {
-		return false
-	}
-	if strings.HasPrefix(name, "120363") {
 		return false
 	}
 	cleanID := chatID
@@ -598,7 +617,7 @@ func isRealChatName(name string, chatID string) bool {
 			break
 		}
 	}
-	if isDigitsAndHyphens && (strings.Contains(name, "-") || len(strings.ReplaceAll(name, " ", "")) >= 10) {
+	if isDigitsAndHyphens && (strings.Contains(name, "-") || len(strings.ReplaceAll(name, " ", "")) >= 10 || strings.HasPrefix(name, "120363")) {
 		return false
 	}
 	return true
@@ -995,12 +1014,22 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 				chat.IsPinned = true
 			}
 			chat.IsArchived = isArchived
-			if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
+			if !isRealChatName(chat.Name, chat.ChatID) {
 				name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
 				chat.Name = name
 				chat.IsGroup = isGroup
 			}
 		}
+	}
+
+	var unknownGroups []string
+	for _, chat := range m.unreadChats {
+		if (chat.IsGroup || strings.Contains(chat.ChatID, "@g.us") || strings.HasPrefix(chat.ChatID, "120363")) && !isRealChatName(chat.Name, chat.ChatID) {
+			unknownGroups = append(unknownGroups, chat.ChatID)
+		}
+	}
+	if len(unknownGroups) > 0 && m.adapter != nil {
+		m.adapter.EnsureGroupNames(m.ctx, unknownGroups)
 	}
 
 	m.sortChatOrderLocked()
@@ -1082,11 +1111,15 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 			chat.IsPinned = true
 		}
 		chat.IsArchived = isArchived
-		if chat.Name == "" || strings.HasPrefix(chat.Name, "Group (") || strings.HasPrefix(chat.Name, "120363") {
+		if !isRealChatName(chat.Name, chat.ChatID) {
 			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
 			chat.Name = name
 			chat.IsGroup = isGroup
 		}
+	}
+
+	if (chat.IsGroup || strings.Contains(chat.ChatID, "@g.us") || strings.HasPrefix(chat.ChatID, "120363")) && !isRealChatName(chat.Name, chat.ChatID) && m.adapter != nil {
+		m.adapter.EnsureGroupNames(m.ctx, []string{chat.ChatID})
 	}
 
 	m.sortChatOrderLocked()

@@ -772,12 +772,34 @@ func (a *Adapter) getLocalGroups() []domain.Contact {
 	return groups
 }
 
+func isRawJID(s string) bool {
+	if strings.Contains(s, " ") {
+		return false
+	}
+	servers := []string{
+		"@g.us",
+		"@s.whatsapp.net",
+		"@lid",
+		"@broadcast",
+		"@newsletter",
+		"@hosted",
+		"@call",
+		"@bot",
+	}
+	for _, srv := range servers {
+		if strings.Contains(s, srv) {
+			return true
+		}
+	}
+	return false
+}
+
 func isGenericName(name, jid string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return true
 	}
-	if strings.Contains(name, "@") {
+	if isRawJID(name) {
 		return true
 	}
 	if strings.HasPrefix(name, "Group (") {
@@ -797,7 +819,7 @@ func isGenericName(name, jid string) bool {
 			break
 		}
 	}
-	if isDigitsAndHyphens && (strings.Contains(name, "-") || len(strings.ReplaceAll(name, " ", "")) >= 10) {
+	if isDigitsAndHyphens && (strings.Contains(name, "-") || len(strings.ReplaceAll(name, " ", "")) >= 10 || strings.HasPrefix(name, "120363")) {
 		return true
 	}
 	return false
@@ -942,8 +964,8 @@ func (a *Adapter) EnsureGroupNames(ctx context.Context, jids []string) {
 		return
 	}
 
-	if len(needed) > 3 {
-		needed = needed[:3]
+	if len(needed) > 25 {
+		needed = needed[:25]
 	}
 
 	go func() {

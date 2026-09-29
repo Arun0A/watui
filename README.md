@@ -183,6 +183,7 @@ watui daemon restart      # Restart daemon (or: watui -d restart)
 2. `~/.config/watui/config.yaml` *(Linux / macOS)*
 3. `%APPDATA%\watui\config.yaml` *(Windows)*
 4. Or pass explicitly: `watui -config /path/to/custom.yaml`
+(5. Media cache directory is the standard cache location of your OS.)
 
 See [**`watui.example.yaml`**](watui.example.yaml) for a full documented template:
 
