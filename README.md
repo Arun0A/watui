@@ -27,6 +27,7 @@ I must repeat, WATUI is not a replacement to the official WhatsApp, it's just wh
 - Attach files without leaving the terminal emulator
 - Initiate a message to a WA number
 - Ghost your nemesis by adding them in your config
+- Desktop notification
 
 If you are concerned about security, the db is only accessible in your machine, encrypted with a key and your machine-id (guid).
 
@@ -147,7 +148,22 @@ nix develop github:Arun0A/watui
 | <kbd>Alt</kbd> + <kbd>f</kbd> | Open file picker to attach and send a file |
 | <kbd>Ctrl</kbd> + <kbd>u</kbd> | Clear current input line |
 
-> **Tip:** In every chat window, the contact or group's exact WhatsApp **JID** is displayed in the **top-right corner** in faint grey text, making it easy to copy for pinning/muting in your config!
+---
+
+## Background Notification Daemon
+
+
+```bash
+watui -d                  # Start daemon in background (or: watui daemon start)
+watui daemon status       # Check daemon status (or: watui -d status)
+watui daemon stop         # Stop the background daemon (or: watui -d stop)
+watui daemon restart      # Restart daemon (or: watui -d restart)
+```
+
+- When the daemon is running, launching `watui` attaches via local IPC for an instantaneous startup.
+- If the daemon is not running, `watui` automatically runs standalone as normal.
+- Consumes ~15-20 MB of RAM (50x less than WhatsApp Web or Desktop).
+- Notification are configurable in the config file.
 
 ### Contact Picker (New Chat)
 | Key | Action |
@@ -201,6 +217,14 @@ device_name: "WA-TUI"
 
 # 7. Include / Alternate Config File (Optional)
 # config_file: "~/.config/watui/config.yaml"
+
+# 8. Notifications (Banners & Sound Effects)
+# Disabled by default. Muted chats never trigger alerts.
+notifications:
+  enabled: false          # Master toggle: set to true to enable alerts
+  banner: true            # Desktop notification banner (notify-send on Linux, toast on Windows, macOS)
+  sound: true             # Audio chime on incoming message
+  sound_path: ""          # Custom audio file path (defaults to whatsapp_notification.mp3)
 ```
 
 ---

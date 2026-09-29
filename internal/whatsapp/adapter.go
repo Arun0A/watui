@@ -347,6 +347,9 @@ func (a *Adapter) Disconnect() {
 		if a.localDB != nil {
 			_ = a.localDB.Close()
 		}
+		if a.container != nil {
+			_ = a.container.Close()
+		}
 	}()
 
 	select {
@@ -354,6 +357,9 @@ func (a *Adapter) Disconnect() {
 	case <-time.After(1 * time.Second):
 		if a.localDB != nil {
 			_ = a.localDB.Close()
+		}
+		if a.container != nil {
+			_ = a.container.Close()
 		}
 	}
 

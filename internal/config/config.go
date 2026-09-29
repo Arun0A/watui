@@ -48,6 +48,22 @@ func (p *PreviewConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// NotificationConfig controls desktop notifications and sounds for incoming messages.
+type NotificationConfig struct {
+	Enabled   bool   `json:"enabled" yaml:"enabled"`
+	Banner    bool   `json:"banner" yaml:"banner"`
+	Sound     bool   `json:"sound" yaml:"sound"`
+	SoundPath string `json:"sound_path" yaml:"sound_path"`
+}
+
+// DaemonConfig controls background notification daemon options and logging.
+type DaemonConfig struct {
+	Log     *bool  `json:"log" yaml:"log"`
+	Logging *bool  `json:"logging" yaml:"logging"`
+	LogPath string `json:"log_path" yaml:"log_path"`
+	LogFile string `json:"log_file" yaml:"log_file"`
+}
+
 // Config represents declarative user configuration for watui.
 type Config struct {
 	// Preview defines commands to preview media attachments on demand.
@@ -81,8 +97,137 @@ type Config struct {
 	Mute []string `json:"mute" yaml:"mute"`
 	Pin  []string `json:"pin" yaml:"pin"`
 
+	// Notifications controls desktop notification banners and sounds for incoming messages.
+	Notifications NotificationConfig `json:"notifications" yaml:"notifications"`
+	Notification  NotificationConfig `json:"notification" yaml:"notification"`
+
+	// Daemon controls background notification daemon behavior and logging.
+	Daemon DaemonConfig `json:"daemon" yaml:"daemon"`
+
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
+}
+
+// IsDaemonLogEnabled reports whether daemon file logging is enabled in config.
+// Defaults to false (logging disabled unless enabled in config or via flag).
+func (c *Config) IsDaemonLogEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.Daemon.Log != nil {
+		return *c.Daemon.Log
+	}
+	if c.Daemon.Logging != nil {
+		return *c.Daemon.Logging
+	}
+	return false
+}
+
+// ResolveDaemonLogPath returns the resolved file path for daemon logs.
+func (c *Config) ResolveDaemonLogPath(dbPath string) string {
+	if c != nil {
+		path := c.Daemon.LogPath
+		if path == "" {
+			path = c.Daemon.LogFile
+		}
+		if path != "" {
+			return ResolveDBPath(path)
+		}
+	}
+	if dbPath == "" {
+		dbPath = DefaultDBPath()
+	}
+	dir := filepath.Dir(ResolveDBPath(dbPath))
+	return filepath.Join(dir, "watui-daemon.log")
+}
+
+// GetNotificationConfig returns the merged notification configuration.
+func (c *Config) GetNotificationConfig() NotificationConfig {
+	if c == nil {
+		return NotificationConfig{}
+	}
+	n := c.Notifications
+	if !n.Enabled && c.Notification.Enabled {
+		n.Enabled = true
+	}
+	if !n.Banner && c.Notification.Banner {
+		n.Banner = true
+	}
+	if !n.Sound && c.Notification.Sound {
+		n.Sound = true
+	}
+	if n.SoundPath == "" && c.Notification.SoundPath != "" {
+		n.SoundPath = c.Notification.SoundPath
+	}
+	return n
+}
+
+// ResolveSoundPath resolves the audio file path to play for notifications.
+// Returns an existing path, or empty string if not found.
+func (c *Config) ResolveSoundPath() string {
+	if c == nil {
+		return ""
+	}
+	cfg := c.GetNotificationConfig()
+	soundPath := strings.TrimSpace(cfg.SoundPath)
+	if soundPath != "" {
+		if filepath.IsAbs(soundPath) {
+			if _, err := os.Stat(soundPath); err == nil {
+				return soundPath
+			}
+		}
+		if c.SourcePath != "" {
+			cfgDir := filepath.Dir(c.SourcePath)
+			cand := filepath.Join(cfgDir, soundPath)
+			if _, err := os.Stat(cand); err == nil {
+				return cand
+			}
+		}
+		exeDir := GetExeDir()
+		if exeDir != "" {
+			cand := filepath.Join(exeDir, soundPath)
+			if _, err := os.Stat(cand); err == nil {
+				return cand
+			}
+		}
+		if _, err := os.Stat(soundPath); err == nil {
+			return soundPath
+		}
+	}
+
+	// Default fallback: look for default.mp3 in assets or next to config/exe
+	candidates := []string{
+		"assets/default.mp3",
+		"default.mp3",
+		"assets/whatsapp_notification.mp3",
+		"whatsapp_notification.mp3",
+	}
+	if c.SourcePath != "" {
+		cfgDir := filepath.Dir(c.SourcePath)
+		candidates = append(candidates,
+			filepath.Join(cfgDir, "assets", "default.mp3"),
+			filepath.Join(cfgDir, "default.mp3"),
+			filepath.Join(cfgDir, "assets", "whatsapp_notification.mp3"),
+			filepath.Join(cfgDir, "whatsapp_notification.mp3"),
+		)
+	}
+	exeDir := GetExeDir()
+	if exeDir != "" {
+		candidates = append(candidates,
+			filepath.Join(exeDir, "assets", "default.mp3"),
+			filepath.Join(exeDir, "default.mp3"),
+			filepath.Join(exeDir, "assets", "whatsapp_notification.mp3"),
+			filepath.Join(exeDir, "whatsapp_notification.mp3"),
+		)
+	}
+
+	for _, cand := range candidates {
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+
+	return ""
 }
 
 // DefaultDBPath returns the appropriate default path for the database file.
@@ -415,6 +560,18 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if len(overlay.Mute) > 0 {
 		base.Mute = overlay.Mute
+	}
+	if overlay.Daemon.Log != nil {
+		base.Daemon.Log = overlay.Daemon.Log
+	}
+	if overlay.Daemon.Logging != nil {
+		base.Daemon.Logging = overlay.Daemon.Logging
+	}
+	if overlay.Daemon.LogPath != "" {
+		base.Daemon.LogPath = overlay.Daemon.LogPath
+	}
+	if overlay.Daemon.LogFile != "" {
+		base.Daemon.LogFile = overlay.Daemon.LogFile
 	}
 }
 

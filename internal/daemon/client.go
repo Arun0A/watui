@@ -1,0 +1,387 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"watui/internal/domain"
+)
+
+// RemoteAdapter implements domain.WhatsAppAdapter by communicating over IPC with a running daemon.
+type RemoteAdapter struct {
+	conn    net.Conn
+	enc     *json.Encoder
+	dec     *json.Decoder
+	writeMu sync.Mutex
+
+	reqMu   sync.Mutex
+	reqID   uint64
+	pending map[uint64]chan RPCResponse
+
+	handlersMu       sync.RWMutex
+	messageHandlers  []domain.MessageHandler
+	statusHandlers   []domain.StatusHandler
+	contactsHandlers []func([]domain.Contact)
+	dismissHandlers  []func(string)
+
+	statusMu      sync.RWMutex
+	currentStatus domain.ConnectionStatus
+
+	archivedMu    sync.RWMutex
+	archivedChats map[string]bool
+
+	cachedUnread   []domain.Message
+	cachedContacts []domain.Contact
+	cachedMu       sync.RWMutex
+
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// ConnectRemote dials the background daemon IPC and returns a fully initialized RemoteAdapter.
+// Returns an error if the daemon is not running or unreachable.
+func ConnectRemote(dbPath string) (*RemoteAdapter, error) {
+	conn, err := DialIPC(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &RemoteAdapter{
+		conn:          conn,
+		enc:           json.NewEncoder(conn),
+		dec:           json.NewDecoder(conn),
+		pending:       make(map[uint64]chan RPCResponse),
+		archivedChats: make(map[string]bool),
+		currentStatus: domain.StatusConnected,
+		ctx:           ctx,
+		cancel:        cancel,
+	}
+
+	// 1. Wait for initial snapshot from daemon
+	var initResp RPCResponse
+	_ = conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	if err := r.dec.Decode(&initResp); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("failed to receive daemon handshake: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	if initResp.Event == "snapshot" {
+		var snap InitialSnapshot
+		if err := json.Unmarshal(initResp.Result, &snap); err == nil {
+			r.currentStatus = snap.Status
+			r.cachedUnread = snap.UnreadMessages
+			r.cachedContacts = snap.Contacts
+			r.archivedChats = snap.ArchivedChats
+		}
+	}
+
+	// 2. Start background reader for events and replies
+	go r.readLoop()
+
+	return r, nil
+}
+
+func (r *RemoteAdapter) readLoop() {
+	defer func() {
+		r.cancel()
+		_ = r.conn.Close()
+		r.statusMu.Lock()
+		r.currentStatus = domain.StatusDisconnected
+		r.statusMu.Unlock()
+		r.dispatchStatus(domain.StatusDisconnected)
+	}()
+
+	for {
+		var resp RPCResponse
+		if err := r.dec.Decode(&resp); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			return
+		}
+
+		if resp.Event != "" {
+			r.handleEvent(resp)
+			continue
+		}
+
+		if resp.ID > 0 {
+			r.reqMu.Lock()
+			ch, ok := r.pending[resp.ID]
+			delete(r.pending, resp.ID)
+			r.reqMu.Unlock()
+			if ok {
+				ch <- resp
+			}
+		}
+	}
+}
+
+func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
+	switch resp.Event {
+	case "message":
+		var msg domain.Message
+		if err := json.Unmarshal(resp.Result, &msg); err == nil {
+			r.handlersMu.RLock()
+			handlers := append([]domain.MessageHandler(nil), r.messageHandlers...)
+			r.handlersMu.RUnlock()
+			for _, h := range handlers {
+				h(msg)
+			}
+		}
+
+	case "status":
+		var status domain.ConnectionStatus
+		if err := json.Unmarshal(resp.Result, &status); err == nil {
+			r.statusMu.Lock()
+			r.currentStatus = status
+			r.statusMu.Unlock()
+			r.dispatchStatus(status)
+		}
+
+	case "contacts":
+		var contacts []domain.Contact
+		if err := json.Unmarshal(resp.Result, &contacts); err == nil {
+			r.cachedMu.Lock()
+			r.cachedContacts = contacts
+			r.cachedMu.Unlock()
+			r.handlersMu.RLock()
+			handlers := make([]func([]domain.Contact), len(r.contactsHandlers))
+			copy(handlers, r.contactsHandlers)
+			r.handlersMu.RUnlock()
+			for _, h := range handlers {
+				h(contacts)
+			}
+		}
+
+	case "dismiss":
+		var chatID string
+		if err := json.Unmarshal(resp.Result, &chatID); err == nil {
+			r.handlersMu.RLock()
+			handlers := make([]func(string), len(r.dismissHandlers))
+			copy(handlers, r.dismissHandlers)
+			r.handlersMu.RUnlock()
+			for _, h := range handlers {
+				h(chatID)
+			}
+		}
+
+	case "archived":
+		var arch map[string]bool
+		if err := json.Unmarshal(resp.Result, &arch); err == nil {
+			r.archivedMu.Lock()
+			r.archivedChats = arch
+			r.archivedMu.Unlock()
+		}
+	}
+}
+
+func (r *RemoteAdapter) dispatchStatus(status domain.ConnectionStatus) {
+	r.handlersMu.RLock()
+	handlers := append([]domain.StatusHandler(nil), r.statusHandlers...)
+	r.handlersMu.RUnlock()
+	for _, h := range handlers {
+		h(status)
+	}
+}
+
+func (r *RemoteAdapter) call(ctx context.Context, method string, params interface{}, result interface{}) error {
+	id := atomic.AddUint64(&r.reqID, 1)
+	ch := make(chan RPCResponse, 1)
+
+	r.reqMu.Lock()
+	r.pending[id] = ch
+	r.reqMu.Unlock()
+
+	defer func() {
+		r.reqMu.Lock()
+		delete(r.pending, id)
+		r.reqMu.Unlock()
+	}()
+
+	var pData []byte
+	if params != nil {
+		var err error
+		pData, err = json.Marshal(params)
+		if err != nil {
+			return err
+		}
+	}
+
+	req := RPCRequest{
+		ID:     id,
+		Method: method,
+		Params: pData,
+	}
+
+	r.writeMu.Lock()
+	err := r.enc.Encode(req)
+	r.writeMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("failed to send RPC request: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.ctx.Done():
+		return errors.New("daemon connection closed")
+	case resp := <-ch:
+		if resp.Error != "" {
+			return errors.New(resp.Error)
+		}
+		if result != nil && len(resp.Result) > 0 {
+			return json.Unmarshal(resp.Result, result)
+		}
+		return nil
+	}
+}
+
+// -------------------------------------------------------------
+// domain.WhatsAppAdapter Interface Implementation
+// -------------------------------------------------------------
+
+func (r *RemoteAdapter) Connect(ctx context.Context) error {
+	// Daemon is already connected! Notify listeners of current status immediately.
+	r.statusMu.RLock()
+	st := r.currentStatus
+	r.statusMu.RUnlock()
+	r.dispatchStatus(st)
+	return nil
+}
+
+func (r *RemoteAdapter) Disconnect() {
+	r.cancel()
+	_ = r.conn.Close()
+}
+
+func (r *RemoteAdapter) IsLoggedIn() bool {
+	return true
+}
+
+func (r *RemoteAdapter) OnMessage(handler domain.MessageHandler) {
+	r.handlersMu.Lock()
+	r.messageHandlers = append(r.messageHandlers, handler)
+	r.handlersMu.Unlock()
+}
+
+func (r *RemoteAdapter) OnStatus(handler domain.StatusHandler) {
+	r.handlersMu.Lock()
+	r.statusHandlers = append(r.statusHandlers, handler)
+	r.handlersMu.Unlock()
+}
+
+func (r *RemoteAdapter) OnContactsUpdated(handler func([]domain.Contact)) {
+	r.handlersMu.Lock()
+	r.contactsHandlers = append(r.contactsHandlers, handler)
+	r.handlersMu.Unlock()
+}
+
+func (r *RemoteAdapter) OnChatDismissed(handler func(chatID string)) {
+	r.handlersMu.Lock()
+	r.dismissHandlers = append(r.dismissHandlers, handler)
+	r.handlersMu.Unlock()
+}
+
+func (r *RemoteAdapter) SendTextMessage(ctx context.Context, chatID string, text string) (domain.Message, error) {
+	var msg domain.Message
+	err := r.call(ctx, "send_text", SendTextParams{ChatID: chatID, Text: text}, &msg)
+	return msg, err
+}
+
+func (r *RemoteAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
+	var msg domain.Message
+	err := r.call(ctx, "send_file", SendFileParams{ChatID: chatID, FilePath: filePath, Caption: caption}, &msg)
+	return msg, err
+}
+
+func (r *RemoteAdapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
+	r.cachedMu.RLock()
+	cached := r.cachedContacts
+	r.cachedMu.RUnlock()
+	if len(cached) > 0 {
+		return cached, nil
+	}
+
+	var contacts []domain.Contact
+	err := r.call(ctx, "get_contacts", nil, &contacts)
+	if err == nil {
+		r.cachedMu.Lock()
+		r.cachedContacts = contacts
+		r.cachedMu.Unlock()
+	}
+	return contacts, err
+}
+
+func (r *RemoteAdapter) MarkRead(ctx context.Context, chatID string, senderID string, messageIDs []string) error {
+	return r.call(ctx, "mark_read", MarkReadParams{
+		ChatID:     chatID,
+		SenderID:   senderID,
+		MessageIDs: messageIDs,
+	}, nil)
+}
+
+func (r *RemoteAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, error) {
+	r.cachedMu.RLock()
+	cached := r.cachedUnread
+	r.cachedMu.RUnlock()
+	if cached != nil {
+		// Return snapshot once, subsequent calls can query fresh
+		r.cachedMu.Lock()
+		r.cachedUnread = nil
+		r.cachedMu.Unlock()
+		return cached, nil
+	}
+
+	var msgs []domain.Message
+	err := r.call(ctx, "get_unread", nil, &msgs)
+	return msgs, err
+}
+
+func (r *RemoteAdapter) DismissUnread(ctx context.Context, chatID string) error {
+	return r.call(ctx, "dismiss_unread", DismissParams{ChatID: chatID}, nil)
+}
+
+func (r *RemoteAdapter) Sync(ctx context.Context) error {
+	return r.call(ctx, "sync", nil, nil)
+}
+
+func (r *RemoteAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
+	var path string
+	err := r.call(ctx, "download_media", DownloadMediaParams{Message: msg}, &path)
+	return path, err
+}
+
+func (r *RemoteAdapter) EnsureGroupNames(ctx context.Context, jids []string) {
+	_ = r.call(ctx, "ensure_group_names", EnsureGroupsParams{JIDs: jids}, nil)
+}
+
+func (r *RemoteAdapter) IsChatArchived(chatID string) bool {
+	r.archivedMu.RLock()
+	archived, found := r.archivedChats[chatID]
+	r.archivedMu.RUnlock()
+	if found {
+		return archived
+	}
+
+	var res bool
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := r.call(ctx, "is_chat_archived", DismissParams{ChatID: chatID}, &res)
+	if err == nil {
+		r.archivedMu.Lock()
+		r.archivedChats[chatID] = res
+		r.archivedMu.Unlock()
+		return res
+	}
+	return false
+}

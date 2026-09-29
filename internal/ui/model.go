@@ -1009,6 +1009,12 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Archived chats should never trigger notifications and are muted by default
+	isArchived := false
+	if m.adapter != nil {
+		isArchived = m.adapter.IsChatArchived(msg.ChatID)
+	}
+
 	// 1. Check if muted
 	if m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
 		if m.view == ViewChat && m.activeChatID == msg.ChatID {
@@ -1050,10 +1056,6 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 	}
 
 	isPinned := m.isPinned(msg.ChatID, msg.ChatName)
-	isArchived := false
-	if m.adapter != nil {
-		isArchived = m.adapter.IsChatArchived(msg.ChatID)
-	}
 	if !exists {
 		name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 		chat = &UnreadChat{

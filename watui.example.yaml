@@ -88,3 +88,24 @@
 # config_file: "~/.config/watui/config.yaml"
 # config_dir:  "~/.config/watui"
 
+# 8. Notifications (Banners & Sound Effects)
+# Complete control over desktop alerts and audio chimes for incoming messages.
+# All notifications are completely disabled by default.
+# Muted chats and self-sent messages never trigger notifications.
+#
+# notifications:
+#   enabled: false          # Master toggle: set to true to enable alerts (false by default)
+#   banner: true            # Desktop notification banner (notify-send on Linux, toast on Windows, macOS alert)
+#   sound: true             # Audio notification sound
+#   sound_path: ""          # Custom audio file path (defaults to assets/default.mp3 next to binary/config)
+
+# 9. Background Notification Daemon Settings
+# Options for running watui headlessly in the background (watui -d).
+# Daemon logging is completely optional and disabled by default.
+#
+# daemon:
+#   log: false              # Enable file logging for daemon background process (false by default)
+#   log_path: ""           # Optional custom log file path (defaults to watui-daemon.log next to watui.db)
+
+
+

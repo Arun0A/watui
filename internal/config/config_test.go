@@ -344,3 +344,51 @@ func TestResolveDBPath(t *testing.T) {
 		t.Errorf("Expected direct file path, got %s", p3)
 	}
 }
+
+func TestDaemonConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Default when empty: logging is false
+	emptyCfg, _ := Load("")
+	if emptyCfg.IsDaemonLogEnabled() {
+		t.Errorf("Expected daemon logging false by default")
+	}
+
+	yamlContent := `
+daemon:
+  log: true
+  log_path: "/var/log/watui/daemon.log"
+`
+	f := filepath.Join(tmpDir, "daemon_cfg.yaml")
+	_ = os.WriteFile(f, []byte(yamlContent), 0644)
+
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if !cfg.IsDaemonLogEnabled() {
+		t.Errorf("Expected daemon logging true")
+	}
+	if cfg.ResolveDaemonLogPath("") != "/var/log/watui/daemon.log" {
+		t.Errorf("Expected custom log path, got %s", cfg.ResolveDaemonLogPath(""))
+	}
+}
+
+func TestResolveSoundPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	assetsDir := filepath.Join(tmpDir, "assets")
+	_ = os.MkdirAll(assetsDir, 0755)
+
+	soundFile := filepath.Join(assetsDir, "default.mp3")
+	_ = os.WriteFile(soundFile, []byte("fake mp3"), 0644)
+
+	cfg := &Config{
+		SourcePath: filepath.Join(tmpDir, "watui.yaml"),
+	}
+	resolved := cfg.ResolveSoundPath()
+	if resolved != soundFile {
+		t.Errorf("Expected %s, got %s", soundFile, resolved)
+	}
+}
+
+

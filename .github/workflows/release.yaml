@@ -79,6 +79,7 @@ jobs:
         run: |
           PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$PKG_NAME"
+          cp -r assets "$PKG_NAME/"
           cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
 
@@ -90,6 +91,7 @@ jobs:
         run: |
           PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$PKG_NAME"
+          cp -r assets "$PKG_NAME/"
           cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
 
@@ -103,12 +105,14 @@ jobs:
           # Windows Standard Package
           PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$PKG_NAME"
+          cp -r assets "$PKG_NAME/"
           cp watui.exe watui.example.yaml README.md LICENSE "$PKG_NAME/"
           7z a "${PKG_NAME}.zip" "$PKG_NAME"
 
           # Windows Portable Package: contains binary + default watui.yaml (runs self-contained in folder)
           PORTABLE_DIR="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}-portable"
           mkdir -p "$PORTABLE_DIR"
+          cp -r assets "$PORTABLE_DIR/"
           cp watui.exe "$PORTABLE_DIR/"
           cp watui.example.yaml "$PORTABLE_DIR/watui.yaml"
           cp README.md LICENSE "$PORTABLE_DIR/"
