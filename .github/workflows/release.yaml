@@ -96,19 +96,12 @@ jobs:
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
 
       # -----------------------------------------------------------
-      # Windows Packaging (Portable .zip & Standard .zip)
+      # Windows Packaging (Portable .zip)
       # -----------------------------------------------------------
-      - name: Package Windows Archives
+      - name: Package Windows Archive
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          # Windows Standard Package
-          PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
-          mkdir -p "$PKG_NAME"
-          cp -r assets "$PKG_NAME/"
-          cp watui.exe watui.example.yaml README.md LICENSE "$PKG_NAME/"
-          7z a "${PKG_NAME}.zip" "$PKG_NAME"
-
           # Windows Portable Package: contains binary + default watui.yaml (runs self-contained in folder)
           PORTABLE_DIR="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}-portable"
           mkdir -p "$PORTABLE_DIR"
