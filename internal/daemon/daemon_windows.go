@@ -48,6 +48,7 @@ func killProcess(pid int) error {
 // DetachProcess configures the command to run as a detached process on Windows.
 func DetachProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: detachedProcess,
+		CreationFlags: detachedProcess | 0x08000000,
+		HideWindow:    true,
 	}
 }
