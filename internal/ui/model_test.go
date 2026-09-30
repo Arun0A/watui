@@ -17,10 +17,11 @@ import (
 )
 
 type mockAdapter struct {
-	msgHandler    domain.MessageHandler
-	statusHandler domain.StatusHandler
-	archivedChats map[string]bool
-	lastSentText  string
+	msgHandler     domain.MessageHandler
+	statusHandler  domain.StatusHandler
+	archivedChats  map[string]bool
+	lastSentText   string
+	dismissedChats []string
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -44,10 +45,13 @@ func (m *mockAdapter) OnContactsUpdated(h func([]domain.Contact))               
 func (m *mockAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, error) {
 	return nil, nil
 }
-func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error { return nil }
-func (m *mockAdapter) Sync(ctx context.Context) error                         { return nil }
-func (m *mockAdapter) OnChatDismissed(h func(chatID string))                  {}
-func (m *mockAdapter) EnsureGroupNames(ctx context.Context, jids []string)    {}
+func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error {
+	m.dismissedChats = append(m.dismissedChats, chatID)
+	return nil
+}
+func (m *mockAdapter) Sync(ctx context.Context) error                      { return nil }
+func (m *mockAdapter) OnChatDismissed(h func(chatID string))               {}
+func (m *mockAdapter) EnsureGroupNames(ctx context.Context, jids []string) {}
 func (m *mockAdapter) IsChatArchived(chatID string) bool {
 	if m.archivedChats != nil {
 		return m.archivedChats[chatID]
@@ -1714,5 +1718,102 @@ func TestMultiLineMessageShiftEnter(t *testing.T) {
 	}
 	if model.input.Height() != 1 {
 		t.Errorf("Expected input height to reset to 1 after send, got %d", model.input.Height())
+	}
+}
+
+func TestChatPersistenceAcrossCloseAndExitCleanup(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// 1. Incoming message from Alice
+	aliceID := "alice@s.whatsapp.net"
+	msg := domain.Message{
+		ID:         "ALICE1",
+		ChatID:     aliceID,
+		Sender:     aliceID,
+		SenderName: "Alice",
+		Timestamp:  time.Now(),
+		Body:       "Hey watui!",
+	}
+	model.handleIncomingMessage(msg)
+
+	if len(model.chatOrder) != 1 {
+		t.Fatalf("Expected 1 chat in list, got %d", len(model.chatOrder))
+	}
+	if model.unreadChats[aliceID].UnreadCount != 1 {
+		t.Fatalf("Expected 1 unread message, got %d", model.unreadChats[aliceID].UnreadCount)
+	}
+
+	// 2. Open chat (Enter)
+	m, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	curModel := m.(*Model)
+	if curModel.view != ViewChat {
+		t.Fatalf("Expected view to be ViewChat, got %v", curModel.view)
+	}
+	if curModel.unreadChats[aliceID].UnreadCount != 0 {
+		t.Errorf("Expected unread count to reset to 0 after opening, got %d", curModel.unreadChats[aliceID].UnreadCount)
+	}
+
+	// 3. Send a message to Alice
+	sentMsg := domain.Message{
+		ID:        "ME1",
+		ChatID:    aliceID,
+		Sender:    "me@s.whatsapp.net",
+		Timestamp: time.Now(),
+		IsFromMe:  true,
+		Body:      "Hello Alice!",
+	}
+	m, _ = curModel.Update(messageSentMsg(sentMsg))
+	curModel = m.(*Model)
+	if len(curModel.activeMsgs) != 2 {
+		t.Fatalf("Expected 2 active messages, got %d", len(curModel.activeMsgs))
+	}
+
+	// 4. Close chat window (Esc) -> return to ViewUnreadList
+	m, _ = curModel.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	curModel = m.(*Model)
+	if curModel.view != ViewUnreadList {
+		t.Fatalf("Expected view to be ViewUnreadList after Esc, got %v", curModel.view)
+	}
+
+	// Verify chat is STILL present in chatOrder and unreadChats (persisted!)
+	if len(curModel.chatOrder) != 1 {
+		t.Fatalf("Expected chat to persist in chatOrder after Esc, got %d chats", len(curModel.chatOrder))
+	}
+	persistedChat, exists := curModel.unreadChats[aliceID]
+	if !exists {
+		t.Fatalf("Expected chat %s to exist in unreadChats after Esc", aliceID)
+	}
+	if len(persistedChat.Messages) != 2 {
+		t.Errorf("Expected 2 persisted messages in chat, got %d", len(persistedChat.Messages))
+	}
+	if persistedChat.UnreadCount != 0 {
+		t.Errorf("Expected unread badge count to be 0 for read chat, got %d", persistedChat.UnreadCount)
+	}
+
+	// Verify DismissUnread has NOT been called yet while TUI is open
+	if len(adapter.dismissedChats) != 0 {
+		t.Errorf("DismissUnread should not be called until TUI exits, got %v", adapter.dismissedChats)
+	}
+
+	// 5. Open chat again -> verify messages are loaded
+	m, _ = curModel.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	curModel = m.(*Model)
+	if curModel.view != ViewChat {
+		t.Fatalf("Expected view to be ViewChat on second open, got %v", curModel.view)
+	}
+	if len(curModel.activeMsgs) != 2 {
+		t.Errorf("Expected 2 active messages when re-opening chat, got %d", len(curModel.activeMsgs))
+	}
+
+	// 6. Close chat window again (Esc)
+	m, _ = curModel.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	curModel = m.(*Model)
+
+	// 7. Exit TUI -> CleanupOnExit is called
+	curModel.CleanupOnExit()
+
+	if len(adapter.dismissedChats) != 1 || adapter.dismissedChats[0] != aliceID {
+		t.Errorf("Expected DismissUnread to be called for %s on exit, got %v", aliceID, adapter.dismissedChats)
 	}
 }

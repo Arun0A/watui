@@ -262,9 +262,9 @@ func main() {
 		return
 	}
 
-	// 6. Interactive TUI Mode
+	uiModel := ui.NewModel(ctx, adapter, appCfg)
 	p := tea.NewProgram(
-		ui.NewModel(ctx, adapter, appCfg),
+		uiModel,
 		tea.WithAltScreen(),
 	)
 
@@ -273,7 +273,15 @@ func main() {
 		p.Quit()
 	}()
 
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if uiModel != nil {
+		uiModel.CleanupOnExit()
+	}
+	if finalM, ok := finalModel.(*ui.Model); ok && finalM != nil {
+		finalM.CleanupOnExit()
+	}
+
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
 	}

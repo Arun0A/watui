@@ -39,6 +39,7 @@ type UnreadChat struct {
 	IsGroup      bool
 	IsPinned     bool
 	IsArchived   bool
+	UnreadCount  int
 	Sender       string
 	Messages     []domain.Message
 	LastReceived time.Time
@@ -55,10 +56,12 @@ type Model struct {
 	// Unread state
 	mu           sync.RWMutex
 	unreadChats  map[string]*UnreadChat // chatID -> UnreadChat
+	readChats    map[string]bool        // chatID -> true for chats read in active session
 	chatOrder    []string               // visible chats according to view mode
 	cursor       int
 	showArchived bool // true when viewing archived chats section
 	showHelp     bool // toggled with '?' to show static keybinds
+	cleanupDone  bool
 
 	// Active conversation view
 	activeChatID     string
@@ -191,6 +194,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		cfg:            cfg,
 		view:           ViewUnreadList,
 		unreadChats:    make(map[string]*UnreadChat),
+		readChats:      make(map[string]bool),
 		chatOrder:      make([]string, 0),
 		input:          ti,
 		contactSearch:  si,
@@ -362,10 +366,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewStatus = ""
 		}
 		m.mu.Lock()
-		if chat, exists := m.unreadChats[sent.ChatID]; exists && chat.IsPinned {
-			chat.Messages = []domain.Message{sent}
+		chat, exists := m.unreadChats[sent.ChatID]
+		if !exists {
+			name := m.activeName
+			if name == "" {
+				name, _ = m.resolveChatName(sent.ChatID, sent.ChatName, sent.SenderName)
+			}
+			chat = &UnreadChat{
+				ChatID:       sent.ChatID,
+				Name:         name,
+				IsGroup:      strings.Contains(sent.ChatID, "@g.us"),
+				IsPinned:     m.isPinned(sent.ChatID, name),
+				UnreadCount:  0,
+				Sender:       sent.Sender,
+				Messages:     []domain.Message{sent},
+				LastReceived: sent.Timestamp,
+			}
+			m.unreadChats[sent.ChatID] = chat
+		} else {
+			if len(chat.Messages) < 50 {
+				chat.Messages = append(chat.Messages, sent)
+			} else {
+				copy(chat.Messages, chat.Messages[1:])
+				chat.Messages[len(chat.Messages)-1] = sent
+			}
 			chat.LastReceived = sent.Timestamp
 		}
+		m.sortChatOrderLocked()
 		m.mu.Unlock()
 
 	case sendErrMsg:
@@ -959,11 +986,10 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Retain pinned chats, resetting their message slice
+	// Retain pinned chats and chats already read or active in this session
 	newUnreadChats := make(map[string]*UnreadChat)
 	for id, chat := range m.unreadChats {
-		if chat.IsPinned {
-			chat.Messages = nil
+		if chat.IsPinned || m.readChats[id] || id == m.activeChatID {
 			newUnreadChats[id] = chat
 		}
 	}
@@ -998,19 +1024,32 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 				IsGroup:      isGroup,
 				IsPinned:     isPinned,
 				IsArchived:   isArchived,
+				UnreadCount:  1,
 				Sender:       msg.Sender,
 				Messages:     []domain.Message{msg},
 				LastReceived: msg.Timestamp,
 			}
 			m.unreadChats[msg.ChatID] = chat
 		} else {
-			if len(chat.Messages) < 50 {
-				chat.Messages = append(chat.Messages, msg)
-			} else {
-				copy(chat.Messages, chat.Messages[1:])
-				chat.Messages[len(chat.Messages)-1] = msg
+			alreadyPresent := false
+			for _, existing := range chat.Messages {
+				if existing.ID == msg.ID {
+					alreadyPresent = true
+					break
+				}
 			}
-			chat.LastReceived = msg.Timestamp
+			if !alreadyPresent {
+				if !m.readChats[msg.ChatID] && msg.ChatID != m.activeChatID {
+					chat.UnreadCount++
+				}
+				if len(chat.Messages) < 50 {
+					chat.Messages = append(chat.Messages, msg)
+				} else {
+					copy(chat.Messages, chat.Messages[1:])
+					chat.Messages[len(chat.Messages)-1] = msg
+				}
+				chat.LastReceived = msg.Timestamp
+			}
 			if isPinned {
 				chat.IsPinned = true
 			}
@@ -1065,9 +1104,15 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		go func() {
 			_ = m.adapter.MarkRead(m.ctx, msg.ChatID, msg.Sender, []string{msg.ID})
 		}()
-		if chat, exists := m.unreadChats[msg.ChatID]; exists && chat.IsPinned {
-			chat.Messages = []domain.Message{msg}
+		if chat, exists := m.unreadChats[msg.ChatID]; exists {
+			if len(chat.Messages) < 50 {
+				chat.Messages = append(chat.Messages, msg)
+			} else {
+				copy(chat.Messages, chat.Messages[1:])
+				chat.Messages[len(chat.Messages)-1] = msg
+			}
 			chat.LastReceived = msg.Timestamp
+			chat.UnreadCount = 0
 		}
 		return
 	}
@@ -1095,12 +1140,14 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 			IsGroup:      isGroup,
 			IsPinned:     isPinned,
 			IsArchived:   isArchived,
+			UnreadCount:  1,
 			Sender:       msg.Sender,
 			Messages:     []domain.Message{msg},
 			LastReceived: msg.Timestamp,
 		}
 		m.unreadChats[msg.ChatID] = chat
 	} else {
+		chat.UnreadCount++
 		if len(chat.Messages) < 50 {
 			chat.Messages = append(chat.Messages, msg)
 		} else {
@@ -1130,6 +1177,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.stopActiveViewer()
+		m.CleanupOnExit()
 		return tea.Quit
 
 	case "j", "down":
@@ -1214,7 +1262,12 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 				_ = m.adapter.MarkRead(m.ctx, cID, sID, mIDs)
 			}(chat.ChatID, chat.Sender, ids)
 
-			m.dismissUnread(chatID)
+			chat.UnreadCount = 0
+			if m.readChats == nil {
+				m.readChats = make(map[string]bool)
+			}
+			m.readChats[chatID] = true
+
 			return tea.Batch(tea.ClearScreen, textinput.Blink)
 		}
 
@@ -1342,6 +1395,39 @@ func (m *Model) dismissUnread(chatID string) {
 	}
 }
 
+// CleanupOnExit dismisses all read chats from persistent storage when the TUI quits.
+func (m *Model) CleanupOnExit() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.cleanupDone || m.adapter == nil {
+		return
+	}
+	m.cleanupDone = true
+
+	m.stopActiveViewer()
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	dismissed := make(map[string]bool)
+
+	for id, chat := range m.unreadChats {
+		if chat != nil && chat.UnreadCount == 0 && !chat.IsPinned {
+			if !dismissed[id] {
+				_ = m.adapter.DismissUnread(cleanupCtx, id)
+				dismissed[id] = true
+			}
+		}
+	}
+	for id := range m.readChats {
+		if !dismissed[id] {
+			_ = m.adapter.DismissUnread(cleanupCtx, id)
+			dismissed[id] = true
+		}
+	}
+}
+
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
@@ -1351,6 +1437,13 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.confirmDocAction = false
 		m.promptOpenWith = false
 		m.pendingDocMsg = nil
+		m.mu.Lock()
+		if chat, exists := m.unreadChats[m.activeChatID]; exists {
+			chat.Messages = append([]domain.Message(nil), m.activeMsgs...)
+			chat.UnreadCount = 0
+		}
+		m.sortChatOrderLocked()
+		m.mu.Unlock()
 		m.view = ViewUnreadList
 		return tea.ClearScreen
 
@@ -1360,6 +1453,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 
 	case "ctrl+c":
 		m.stopActiveViewer()
+		m.CleanupOnExit()
 		return tea.Quit
 
 	case "alt+x":
@@ -1497,6 +1591,8 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case "ctrl+c":
+		m.stopActiveViewer()
+		m.CleanupOnExit()
 		return tea.Quit
 
 	case "down", "ctrl+n":
@@ -1524,6 +1620,16 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeChatID = contact.JID
 			m.activeName = contact.Name
 			m.activeMsgs = nil
+			m.mu.Lock()
+			if chat, exists := m.unreadChats[contact.JID]; exists {
+				m.activeMsgs = append([]domain.Message(nil), chat.Messages...)
+				chat.UnreadCount = 0
+			}
+			if m.readChats == nil {
+				m.readChats = make(map[string]bool)
+			}
+			m.readChats[contact.JID] = true
+			m.mu.Unlock()
 			m.chatScrollOffset = 0
 			m.input.Reset()
 			m.input.SetHeight(1)
@@ -1540,9 +1646,23 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 		if digitCount >= 5 || strings.Contains(rawInput, "@") {
-			m.activeChatID = rawInput
+			targetID := rawInput
+			if !strings.Contains(targetID, "@") {
+				targetID = targetID + "@s.whatsapp.net"
+			}
+			m.activeChatID = targetID
 			m.activeName = rawInput
 			m.activeMsgs = nil
+			m.mu.Lock()
+			if chat, exists := m.unreadChats[targetID]; exists {
+				m.activeMsgs = append([]domain.Message(nil), chat.Messages...)
+				chat.UnreadCount = 0
+			}
+			if m.readChats == nil {
+				m.readChats = make(map[string]bool)
+			}
+			m.readChats[targetID] = true
+			m.mu.Unlock()
 			m.chatScrollOffset = 0
 			m.input.Reset()
 			m.input.SetHeight(1)
@@ -1761,11 +1881,11 @@ func (m *Model) renderUnreadListView() []string {
 	for _, chat := range m.unreadChats {
 		if chat != nil {
 			if chat.IsArchived {
-				if len(chat.Messages) > 0 {
+				if chat.UnreadCount > 0 {
 					archivedCount++
 				}
 			} else {
-				if len(chat.Messages) > 0 {
+				if chat.UnreadCount > 0 {
 					unreadCount++
 				}
 			}
@@ -1830,8 +1950,8 @@ func (m *Model) renderUnreadListView() []string {
 			chat := m.unreadChats[chatID]
 
 			var badge string
-			if len(chat.Messages) > 0 {
-				badge = badgeStyle.Render(fmt.Sprintf("%d", len(chat.Messages)))
+			if chat.UnreadCount > 0 {
+				badge = badgeStyle.Render(fmt.Sprintf("%d", chat.UnreadCount))
 			} else if chat.IsPinned {
 				badge = pinBadgeStyle.Render("PIN")
 			}
