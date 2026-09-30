@@ -112,5 +112,15 @@
 #   log: false              # Enable file logging for daemon background process (false by default)
 #   log_path: ""           # Optional custom log file path (defaults to watui-daemon.log next to watui.db)
 
+# 10. Chat History Persistence (Cyclic Bounded Retention)
+# Control local message history caching and on-demand loading.
+# By default, watui remains completely ephemeral with 0 storage bloat.
+# When enabled, older messages beyond cycle-msg-count-per-chat are automatically pruned per chat.
+#
+# persist-chat-history: false           # Set to true to store message history locally in encrypted SQLite
+# cycle-msg-count-per-chat: 30         # Maximum number of messages to cyclically retain per chat (default: 30)
+# always-load-history: false           # If false, loads clean and lets you fetch 5 messages on-demand with Ctrl+U
+
+
 
 

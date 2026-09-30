@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"time"
 )
 
 // ConnectionStatus describes the state of the connection to WhatsApp.
@@ -81,4 +82,8 @@ type WhatsAppAdapter interface {
 
 	// SetChatArchived archives or unarchives the specified chat JID in WhatsApp.
 	SetChatArchived(ctx context.Context, chatID string, archived bool) error
+
+	// GetChatHistory fetches up to limit historical messages for the given chat from local storage,
+	// returning messages strictly older than beforeTimestamp (if non-zero) or the latest if beforeTimestamp is zero.
+	GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]Message, error)
 }

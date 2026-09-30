@@ -59,6 +59,18 @@ type NotificationConfig struct {
 	SoundPath string `json:"sound_path" yaml:"sound_path"`
 }
 
+// HistoryConfig controls local message history caching and cyclic retention.
+type HistoryConfig struct {
+	PersistChatHistory   *bool `json:"persist_chat_history" yaml:"persist_chat_history"`
+	CycleMsgCountPerChat int   `json:"cycle_msg_count_per_chat" yaml:"cycle_msg_count_per_chat"`
+	AlwaysLoadHistory    *bool `json:"always_load_history" yaml:"always_load_history"`
+
+	// Nested aliases
+	Persist    *bool `json:"persist" yaml:"persist"`
+	CycleCount int   `json:"cycle_count" yaml:"cycle_count"`
+	AlwaysLoad *bool `json:"always_load" yaml:"always_load"`
+}
+
 // DaemonConfig controls background notification daemon options and logging.
 type DaemonConfig struct {
 	Log     *bool  `json:"log" yaml:"log"`
@@ -99,6 +111,12 @@ type Config struct {
 	// Aliases for user convenience (mute / pin)
 	Mute []string `json:"mute" yaml:"mute"`
 	Pin  []string `json:"pin" yaml:"pin"`
+
+	// History controls local chat history persistence and cyclic retention.
+	PersistChatHistory   *bool         `json:"persist_chat_history" yaml:"persist_chat_history"`
+	CycleMsgCountPerChat int           `json:"cycle_msg_count_per_chat" yaml:"cycle_msg_count_per_chat"`
+	AlwaysLoadHistory    *bool         `json:"always_load_history" yaml:"always_load_history"`
+	History              HistoryConfig `json:"history" yaml:"history"`
 
 	// Notifications controls desktop notification banners and sounds for incoming messages.
 	Notifications NotificationConfig `json:"notifications" yaml:"notifications"`
@@ -231,6 +249,60 @@ func (c *Config) ResolveSoundPath() string {
 	}
 
 	return ""
+}
+
+// IsHistoryPersistEnabled reports whether local message history persistence is enabled.
+// Defaults to false.
+func (c *Config) IsHistoryPersistEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.PersistChatHistory != nil {
+		return *c.PersistChatHistory
+	}
+	if c.History.PersistChatHistory != nil {
+		return *c.History.PersistChatHistory
+	}
+	if c.History.Persist != nil {
+		return *c.History.Persist
+	}
+	return false
+}
+
+// GetCycleMsgCountPerChat returns the maximum number of messages to cyclically retain per chat.
+// Defaults to 30.
+func (c *Config) GetCycleMsgCountPerChat() int {
+	if c == nil {
+		return 30
+	}
+	if c.CycleMsgCountPerChat > 0 {
+		return c.CycleMsgCountPerChat
+	}
+	if c.History.CycleMsgCountPerChat > 0 {
+		return c.History.CycleMsgCountPerChat
+	}
+	if c.History.CycleCount > 0 {
+		return c.History.CycleCount
+	}
+	return 30
+}
+
+// IsAlwaysLoadHistoryEnabled reports whether history should be automatically pre-loaded when entering a chat.
+// Defaults to false.
+func (c *Config) IsAlwaysLoadHistoryEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.AlwaysLoadHistory != nil {
+		return *c.AlwaysLoadHistory
+	}
+	if c.History.AlwaysLoadHistory != nil {
+		return *c.History.AlwaysLoadHistory
+	}
+	if c.History.AlwaysLoad != nil {
+		return *c.History.AlwaysLoad
+	}
+	return false
 }
 
 // DefaultDBPath returns the appropriate default path for the database file.
@@ -495,6 +567,28 @@ func loadFileWithDepth(path string, depth int) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file %q: %w", path, err)
 	}
 
+	// Also parse direct raw map keys for kebab-case aliases
+	var rawMap map[string]interface{}
+	if err := yaml.Unmarshal(data, &rawMap); err == nil {
+		for k, v := range rawMap {
+			normalized := strings.ToLower(strings.ReplaceAll(k, "_", "-"))
+			switch normalized {
+			case "persist-chat-history":
+				if b, ok := v.(bool); ok {
+					cfg.PersistChatHistory = &b
+				}
+			case "cycle-msg-count-per-chat":
+				if n, ok := v.(int); ok {
+					cfg.CycleMsgCountPerChat = n
+				}
+			case "always-load-history":
+				if b, ok := v.(bool); ok {
+					cfg.AlwaysLoadHistory = &b
+				}
+			}
+		}
+	}
+
 	cfg.SourcePath = path
 
 	includedPath := cfg.GetConfigFile()
@@ -563,6 +657,33 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if len(overlay.Mute) > 0 {
 		base.Mute = overlay.Mute
+	}
+	if overlay.PersistChatHistory != nil {
+		base.PersistChatHistory = overlay.PersistChatHistory
+	}
+	if overlay.CycleMsgCountPerChat > 0 {
+		base.CycleMsgCountPerChat = overlay.CycleMsgCountPerChat
+	}
+	if overlay.AlwaysLoadHistory != nil {
+		base.AlwaysLoadHistory = overlay.AlwaysLoadHistory
+	}
+	if overlay.History.PersistChatHistory != nil {
+		base.History.PersistChatHistory = overlay.History.PersistChatHistory
+	}
+	if overlay.History.CycleMsgCountPerChat > 0 {
+		base.History.CycleMsgCountPerChat = overlay.History.CycleMsgCountPerChat
+	}
+	if overlay.History.AlwaysLoadHistory != nil {
+		base.History.AlwaysLoadHistory = overlay.History.AlwaysLoadHistory
+	}
+	if overlay.History.Persist != nil {
+		base.History.Persist = overlay.History.Persist
+	}
+	if overlay.History.CycleCount > 0 {
+		base.History.CycleCount = overlay.History.CycleCount
+	}
+	if overlay.History.AlwaysLoad != nil {
+		base.History.AlwaysLoad = overlay.History.AlwaysLoad
 	}
 	if overlay.Daemon.Log != nil {
 		base.Daemon.Log = overlay.Daemon.Log

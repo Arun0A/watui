@@ -17,11 +17,12 @@ import (
 )
 
 type mockAdapter struct {
-	msgHandler     domain.MessageHandler
-	statusHandler  domain.StatusHandler
-	archivedChats  map[string]bool
-	lastSentText   string
-	dismissedChats []string
+	msgHandler      domain.MessageHandler
+	statusHandler   domain.StatusHandler
+	archivedChats   map[string]bool
+	lastSentText    string
+	dismissedChats  []string
+	historyMessages map[string][]domain.Message
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -87,6 +88,22 @@ func (m *mockAdapter) SendFileMessage(ctx context.Context, c, filePath, caption 
 		Type:     domain.MessageTypeDocument,
 		Body:     fmt.Sprintf("[Document: %s] %s", filepath.Base(filePath), caption),
 	}, nil
+}
+func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
+	if m.historyMessages == nil {
+		return nil, nil
+	}
+	all := m.historyMessages[chatID]
+	var filtered []domain.Message
+	for _, msg := range all {
+		if beforeTimestamp.IsZero() || msg.Timestamp.Before(beforeTimestamp) {
+			filtered = append(filtered, msg)
+		}
+	}
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+	return filtered, nil
 }
 
 func TestUnreadModelLifecycle(t *testing.T) {
@@ -1815,5 +1832,137 @@ func TestChatPersistenceAcrossCloseAndExitCleanup(t *testing.T) {
 
 	if len(adapter.dismissedChats) != 1 || adapter.dismissedChats[0] != aliceID {
 		t.Errorf("Expected DismissUnread to be called for %s on exit, got %v", aliceID, adapter.dismissedChats)
+	}
+}
+
+func TestChatHistoryCtrlUPagination(t *testing.T) {
+	adapter := &mockAdapter{
+		historyMessages: make(map[string][]domain.Message),
+	}
+	chatID := "friend@s.whatsapp.net"
+	baseTime := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	// Seed 12 historical messages (H1 to H12, chronological order)
+	for i := 1; i <= 12; i++ {
+		adapter.historyMessages[chatID] = append(adapter.historyMessages[chatID], domain.Message{
+			ID:        fmt.Sprintf("H%d", i),
+			ChatID:    chatID,
+			Timestamp: baseTime.Add(time.Duration(i) * time.Minute),
+			Body:      fmt.Sprintf("Message %d", i),
+		})
+	}
+
+	persistTrue := true
+	cfg := &config.Config{
+		PersistChatHistory: &persistTrue,
+	}
+
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = chatID
+	model.activeMsgs = nil
+
+	// 1. First Ctrl+U: loads latest 5 messages (H8 to H12)
+	m, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if cmd == nil {
+		t.Fatalf("Expected fetchHistoryCmd on Ctrl+U")
+	}
+	msg := cmd()
+	m, _ = m.Update(msg)
+	curModel := m.(*Model)
+
+	if len(curModel.activeMsgs) != 5 {
+		t.Fatalf("Expected 5 messages loaded, got %d", len(curModel.activeMsgs))
+	}
+	if curModel.activeMsgs[0].ID != "H8" || curModel.activeMsgs[4].ID != "H12" {
+		t.Errorf("Expected H8 to H12, got %s to %s", curModel.activeMsgs[0].ID, curModel.activeMsgs[4].ID)
+	}
+
+	// 2. Second Ctrl+U: loads next 5 older messages (H3 to H7)
+	m, cmd = curModel.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if cmd == nil {
+		t.Fatalf("Expected fetchHistoryCmd on second Ctrl+U")
+	}
+	msg = cmd()
+	m, _ = m.Update(msg)
+	curModel = m.(*Model)
+
+	if len(curModel.activeMsgs) != 10 {
+		t.Fatalf("Expected 10 messages after second Ctrl+U, got %d", len(curModel.activeMsgs))
+	}
+	if curModel.activeMsgs[0].ID != "H3" || curModel.activeMsgs[9].ID != "H12" {
+		t.Errorf("Expected H3 to H12, got %s to %s", curModel.activeMsgs[0].ID, curModel.activeMsgs[9].ID)
+	}
+
+	// 3. Third Ctrl+U: loads remaining 2 older messages (H1, H2)
+	m, cmd = curModel.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	msg = cmd()
+	m, _ = m.Update(msg)
+	curModel = m.(*Model)
+
+	if len(curModel.activeMsgs) != 12 {
+		t.Fatalf("Expected 12 messages after third Ctrl+U, got %d", len(curModel.activeMsgs))
+	}
+	if curModel.activeMsgs[0].ID != "H1" {
+		t.Errorf("Expected oldest message to be H1, got %s", curModel.activeMsgs[0].ID)
+	}
+
+	// 4. Fourth Ctrl+U: no more messages
+	m, cmd = curModel.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	msg = cmd()
+	m, _ = m.Update(msg)
+	curModel = m.(*Model)
+
+	if curModel.previewStatus != "No more history" {
+		t.Errorf("Expected 'No more history', got %q", curModel.previewStatus)
+	}
+}
+
+func TestChatHistoryAlwaysLoad(t *testing.T) {
+	adapter := &mockAdapter{
+		historyMessages: make(map[string][]domain.Message),
+	}
+	chatID := "friend@s.whatsapp.net"
+	baseTime := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+
+	for i := 1; i <= 10; i++ {
+		adapter.historyMessages[chatID] = append(adapter.historyMessages[chatID], domain.Message{
+			ID:        fmt.Sprintf("MSG%d", i),
+			ChatID:    chatID,
+			Timestamp: baseTime.Add(time.Duration(i) * time.Minute),
+			Body:      fmt.Sprintf("History %d", i),
+		})
+	}
+
+	persistTrue := true
+	alwaysLoadTrue := true
+	cfg := &config.Config{
+		PersistChatHistory:   &persistTrue,
+		AlwaysLoadHistory:    &alwaysLoadTrue,
+		CycleMsgCountPerChat: 30,
+	}
+
+	model := NewModel(context.Background(), adapter, cfg)
+	model.unreadChats[chatID] = &UnreadChat{
+		ChatID: chatID,
+		Name:   "Friend",
+	}
+	model.chatOrder = []string{chatID}
+	model.cursor = 0
+
+	// Open chat via Enter -> should return Batch with history loader
+	m, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected batch command when always-load-history is enabled")
+	}
+
+	// Run fetch history cmd
+	fetchCmd := model.fetchHistoryCmd(chatID, 30, time.Time{}, true)
+	res := fetchCmd()
+	m, _ = m.Update(res)
+	curModel := m.(*Model)
+
+	if len(curModel.activeMsgs) != 10 {
+		t.Fatalf("Expected 10 auto-loaded messages, got %d", len(curModel.activeMsgs))
 	}
 }

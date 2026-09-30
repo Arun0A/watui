@@ -55,6 +55,9 @@ func (m *mockAdapter) GetArchivedChats() map[string]bool {
 func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
 	return nil
 }
+func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
+	return []domain.Message{{ID: "HIST1", ChatID: chatID, Body: "History message"}}, nil
+}
 
 func TestIPCEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -125,6 +128,12 @@ func TestIPCEndToEnd(t *testing.T) {
 	}
 	if !client.IsChatArchived("friend@s.whatsapp.net") {
 		t.Errorf("Expected friend to be archived after SetChatArchived")
+	}
+
+	// Verify GetChatHistory RPC
+	hist, err := client.GetChatHistory(context.Background(), "friend@s.whatsapp.net", 5, time.Time{})
+	if err != nil || len(hist) != 1 || hist[0].ID != "HIST1" {
+		t.Errorf("Unexpected GetChatHistory: %v, err: %v", hist, err)
 	}
 
 	// Verify live event broadcast

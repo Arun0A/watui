@@ -143,6 +143,12 @@ type docDownloadedToOpenMsg struct {
 	Path string
 	Cmd  string
 }
+type historyLoadedMsg struct {
+	ChatID   string
+	Messages []domain.Message
+	Err      error
+	AutoLoad bool
+}
 
 // NewModel initializes the TUI model.
 func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*config.Config) *Model {
@@ -259,6 +265,18 @@ func (m *Model) loadPersistedUnread() tea.Cmd {
 			return nil
 		}
 		return unreadsLoadedMsg(msgs)
+	}
+}
+
+func (m *Model) fetchHistoryCmd(chatID string, limit int, beforeTS time.Time, autoLoad bool) tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := m.adapter.GetChatHistory(m.ctx, chatID, limit, beforeTS)
+		return historyLoadedMsg{
+			ChatID:   chatID,
+			Messages: msgs,
+			Err:      err,
+			AutoLoad: autoLoad,
+		}
 	}
 }
 
@@ -426,6 +444,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case unreadsLoadedMsg:
 		m.rebuildUnreadChats(msg)
 		m.updateUnreadChatNames()
+
+	case historyLoadedMsg:
+		if msg.Err != nil {
+			m.previewStatus = fmt.Sprintf("Error loading history: %v", msg.Err)
+			return m, nil
+		}
+		if m.activeChatID != msg.ChatID {
+			return m, nil
+		}
+		if len(msg.Messages) == 0 {
+			if !msg.AutoLoad {
+				m.previewStatus = "No more history"
+			}
+			return m, nil
+		}
+
+		existingIDs := make(map[string]bool, len(m.activeMsgs))
+		for _, em := range m.activeMsgs {
+			existingIDs[em.ID] = true
+		}
+		var newOlder []domain.Message
+		for _, nm := range msg.Messages {
+			if !existingIDs[nm.ID] {
+				newOlder = append(newOlder, nm)
+			}
+		}
+
+		if len(newOlder) == 0 {
+			if !msg.AutoLoad {
+				m.previewStatus = "No more history"
+			}
+			return m, nil
+		}
+
+		m.activeMsgs = append(newOlder, m.activeMsgs...)
+		if !msg.AutoLoad {
+			m.previewStatus = fmt.Sprintf("Loaded %d older message(s)", len(newOlder))
+		}
+		m.mu.Lock()
+		if chat, exists := m.unreadChats[msg.ChatID]; exists {
+			chat.Messages = append([]domain.Message(nil), m.activeMsgs...)
+		}
+		m.mu.Unlock()
+		return m, nil
 
 	case mediaPreviewErrMsg:
 		m.confirmSave = false
@@ -1268,6 +1330,11 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			}
 			m.readChats[chatID] = true
 
+			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
+				limit := m.cfg.GetCycleMsgCountPerChat()
+				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(chatID, limit, time.Time{}, true))
+			}
+
 			return tea.Batch(tea.ClearScreen, textinput.Blink)
 		}
 
@@ -1519,7 +1586,19 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.previewStatus = "Opening file selector..."
 		return m.pickFileCmd()
 
-	case "pgup", "ctrl+u":
+	case "pgup":
+		m.chatScrollOffset += 5
+		return nil
+
+	case "ctrl+u":
+		if m.cfg.IsHistoryPersistEnabled() {
+			var beforeTS time.Time
+			if len(m.activeMsgs) > 0 {
+				beforeTS = m.activeMsgs[0].Timestamp
+			}
+			m.previewStatus = "Fetching history..."
+			return m.fetchHistoryCmd(m.activeChatID, 5, beforeTS, false)
+		}
 		m.chatScrollOffset += 5
 		return nil
 
@@ -1635,6 +1714,10 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
+			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
+				limit := m.cfg.GetCycleMsgCountPerChat()
+				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(contact.JID, limit, time.Time{}, true))
+			}
 			return tea.Batch(tea.ClearScreen, textinput.Blink)
 		}
 		// Direct input fallback
@@ -1668,6 +1751,10 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
+			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
+				limit := m.cfg.GetCycleMsgCountPerChat()
+				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(targetID, limit, time.Time{}, true))
+			}
 			return tea.Batch(tea.ClearScreen, textinput.Blink)
 		}
 		return nil
@@ -2263,6 +2350,9 @@ func (m *Model) renderChatView() []string {
 	}
 
 	helpText := "[Enter] Send · [Alt+F] Attach · [Esc] Back"
+	if m.cfg.IsHistoryPersistEnabled() {
+		helpText = "[Enter] Send · [Ctrl+U] Load 5 · [Alt+F] Attach · [Esc] Back"
+	}
 	if mediaHelp != "" {
 		helpText += " · " + mediaHelp
 	}

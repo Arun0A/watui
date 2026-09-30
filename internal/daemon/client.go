@@ -431,3 +431,13 @@ func (r *RemoteAdapter) SetChatArchived(ctx context.Context, chatID string, arch
 
 	return r.call(ctx, "set_chat_archived", SetChatArchivedParams{ChatID: chatID, Archived: archived}, nil)
 }
+
+func (r *RemoteAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
+	var msgs []domain.Message
+	err := r.call(ctx, "get_chat_history", GetChatHistoryParams{
+		ChatID:          chatID,
+		Limit:           limit,
+		BeforeTimestamp: beforeTimestamp,
+	}, &msgs)
+	return msgs, err
+}

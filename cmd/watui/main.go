@@ -168,6 +168,7 @@ func main() {
 			LogFile:    *logFile,
 			LogLevel:   *logLevel,
 			DeviceName: appCfg.GetDeviceName(),
+			AppConfig:  appCfg,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error initializing adapter: %v\n", err)
@@ -453,6 +454,7 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 		LogFile:    logFile,
 		LogLevel:   logLevel,
 		DeviceName: appCfg.GetDeviceName(),
+		AppConfig:  appCfg,
 	})
 	if err != nil {
 		if loggingEnabled {

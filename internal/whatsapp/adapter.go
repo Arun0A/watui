@@ -43,6 +43,7 @@ type Config struct {
 	LogFile    string
 	LogLevel   string
 	DeviceName string
+	AppConfig  *config.Config
 }
 
 // Adapter implements domain.WhatsAppAdapter using whatsmeow.
@@ -52,6 +53,7 @@ type Adapter struct {
 	container *sqlstore.Container
 	localDB   *sql.DB
 	config    Config
+	appConfig *config.Config
 
 	mu              sync.RWMutex
 	messageHandlers []domain.MessageHandler
@@ -197,7 +199,19 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			is_from_me BOOLEAN,
 			raw_message BLOB
 		);
-		CREATE INDEX IF NOT EXISTS idx_watui_unread_chat_id ON watui_unread_messages(chat_id);`)
+		CREATE INDEX IF NOT EXISTS idx_watui_unread_chat_id ON watui_unread_messages(chat_id);
+		CREATE TABLE IF NOT EXISTS watui_messages (
+			id TEXT PRIMARY KEY,
+			chat_id TEXT NOT NULL,
+			chat_name TEXT,
+			sender TEXT NOT NULL,
+			sender_name TEXT,
+			timestamp INTEGER NOT NULL,
+			body TEXT,
+			type TEXT,
+			is_from_me BOOLEAN
+		);
+		CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);`)
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN chat_name TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN raw_message BLOB;")
 
@@ -247,6 +261,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		container:     container,
 		localDB:       localDB,
 		config:        cfg,
+		appConfig:     cfg.AppConfig,
 		currentStatus: domain.StatusDisconnected,
 		mediaCache:    make(map[string]*waE2E.Message),
 		archivedChats: make(map[string]bool),
@@ -558,7 +573,7 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		senderID = a.client.Store.ID.ToNonAD().String()
 	}
 
-	return domain.Message{
+	domainMsg := domain.Message{
 		ID:         resp.ID,
 		ChatID:     recipientJID.String(),
 		Sender:     senderID,
@@ -568,7 +583,9 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		Type:       domain.MessageTypeText,
 		Body:       text,
 		Status:     domain.MessageStatusSent,
-	}, nil
+	}
+	a.saveHistoryMessage(domainMsg)
+	return domainMsg, nil
 }
 
 // SendFileMessage uploads and sends a file attachment to a WhatsApp chat JID or raw phone number.
@@ -712,7 +729,7 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		senderID = a.client.Store.ID.ToNonAD().String()
 	}
 
-	return domain.Message{
+	domainMsg := domain.Message{
 		ID:         sendResp.ID,
 		ChatID:     recipientJID.String(),
 		Sender:     senderID,
@@ -722,7 +739,9 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		Type:       msgType,
 		Body:       bodyText,
 		Status:     domain.MessageStatusSent,
-	}, nil
+	}
+	a.saveHistoryMessage(domainMsg)
+	return domainMsg, nil
 }
 
 // GetContacts retrieves contacts from in-memory cache if available, or falls back to fast local SQLite.
@@ -1165,6 +1184,114 @@ func (a *Adapter) saveUnreadMessage(msg domain.Message, rawMsg ...*waE2E.Message
 		)`, msg.ChatID, msg.ChatID)
 }
 
+// SetAppConfig updates the declarative application configuration.
+func (a *Adapter) SetAppConfig(cfg *config.Config) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.appConfig = cfg
+}
+
+func (a *Adapter) saveHistoryMessage(msg domain.Message) {
+	if a.localDB == nil || a.appConfig == nil || !a.appConfig.IsHistoryPersistEnabled() {
+		return
+	}
+	chatID := msg.ChatID
+	if parsed, err := NormalizeJID(chatID); err == nil {
+		chatID = parsed.ToNonAD().String()
+	}
+
+	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_messages
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe,
+	)
+
+	// Keep history table strictly bounded per chat according to cyclic limit (default: 30)
+	maxKeep := a.appConfig.GetCycleMsgCountPerChat()
+	if maxKeep <= 0 {
+		maxKeep = 30
+	}
+	_, _ = a.localDB.Exec(`DELETE FROM watui_messages 
+		WHERE chat_id = ? AND id NOT IN (
+			SELECT id FROM watui_messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?
+		)`, chatID, chatID, maxKeep)
+}
+
+// GetChatHistory returns up to limit historical messages for the given chat from local SQLite.
+func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
+	if a.localDB == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	nonAD := chatID
+	if parsed, err := NormalizeJID(chatID); err == nil {
+		nonAD = parsed.ToNonAD().String()
+	}
+
+	var altTarget string
+	if strings.HasSuffix(nonAD, "@s.whatsapp.net") {
+		user := strings.TrimSuffix(nonAD, "@s.whatsapp.net")
+		if lid := a.ResolvePhoneToLID(user); lid != "" {
+			altTarget = lid + "@lid"
+		}
+	} else if strings.HasSuffix(nonAD, "@lid") {
+		user := strings.TrimSuffix(nonAD, "@lid")
+		if pn := a.ResolveLIDToPhone(user); pn != "" {
+			altTarget = pn + "@s.whatsapp.net"
+		}
+	}
+
+	var query string
+	var args []interface{}
+	if beforeTimestamp.IsZero() {
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me 
+			FROM watui_messages 
+			WHERE chat_id = ? OR chat_id = ? OR chat_id = ? 
+			ORDER BY timestamp DESC LIMIT ?`
+		args = []interface{}{chatID, nonAD, altTarget, limit}
+	} else {
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me 
+			FROM watui_messages 
+			WHERE (chat_id = ? OR chat_id = ? OR chat_id = ?) AND timestamp < ? 
+			ORDER BY timestamp DESC LIMIT ?`
+		args = []interface{}{chatID, nonAD, altTarget, beforeTimestamp.Unix(), limit}
+	}
+
+	rows, err := a.localDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []domain.Message
+	for rows.Next() {
+		var m domain.Message
+		var ts int64
+		var chatName, senderName, body sql.NullString
+		var msgType string
+		var isFromMe bool
+		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe); err != nil {
+			continue
+		}
+		m.ChatName = chatName.String
+		m.SenderName = senderName.String
+		m.Body = body.String
+		m.Type = domain.MessageType(msgType)
+		m.Timestamp = time.Unix(ts, 0)
+		m.IsFromMe = isFromMe
+		result = append(result, m)
+	}
+
+	// Reverse so messages are returned in chronological order (oldest first)
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+
+	return result, nil
+}
+
 func (a *Adapter) isChatUnread(chatID string) bool {
 	if a.localDB == nil || chatID == "" {
 		return false
@@ -1343,6 +1470,15 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				_ = a.DismissUnread(context.Background(), rawJID)
 				a.notifyChatDismissed(chatID)
 				a.notifyChatDismissed(rawJID)
+				for _, hMsg := range conv.GetMessages() {
+					if hMsg == nil || hMsg.Message == nil {
+						continue
+					}
+					webMsg := hMsg.Message
+					if domainMsg, ok := a.extractWebMessage(chatID, webMsg); ok {
+						a.saveHistoryMessage(domainMsg)
+					}
+				}
 				continue
 			}
 
@@ -1361,6 +1497,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 						a.cacheMediaMessage(domainMsg.ID, webMsg.Message)
 					}
 					a.saveUnreadMessage(domainMsg, webMsg.Message)
+					a.saveHistoryMessage(domainMsg)
 					a.notifyMessage(domainMsg)
 				}
 			}
@@ -1380,6 +1517,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		if !domainMsg.IsFromMe {
 			a.saveUnreadMessage(domainMsg, evt.Message)
 		}
+		a.saveHistoryMessage(domainMsg)
 
 		a.notifyMessage(domainMsg)
 

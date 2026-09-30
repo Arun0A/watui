@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"time"
 
 	"watui/internal/domain"
 )
@@ -61,4 +62,10 @@ type EnsureGroupsParams struct {
 type SetChatArchivedParams struct {
 	ChatID   string `json:"chat_id"`
 	Archived bool   `json:"archived"`
+}
+
+type GetChatHistoryParams struct {
+	ChatID          string    `json:"chat_id"`
+	Limit           int       `json:"limit"`
+	BeforeTimestamp time.Time `json:"before_timestamp"`
 }

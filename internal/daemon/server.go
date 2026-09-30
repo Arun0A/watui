@@ -289,6 +289,19 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			resp.Error = err.Error()
 		}
 
+	case "get_chat_history":
+		var p GetChatHistoryParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			msgs, err := s.adapter.GetChatHistory(reqCtx, p.ChatID, p.Limit, p.BeforeTimestamp)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.Result, _ = json.Marshal(msgs)
+			}
+		}
+
 	default:
 		resp.Error = fmt.Sprintf("unknown method: %s", req.Method)
 	}

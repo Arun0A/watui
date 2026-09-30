@@ -147,7 +147,7 @@ nix develop github:Arun0A/watui
 | <kbd>Alt</kbd> + <kbd>x</kbd> | Stop media / audio playback immediately |
 | <kbd>Alt</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Cycle targeted media in the message thread |
 | <kbd>Alt</kbd> + <kbd>f</kbd> | Open file picker to attach and send a file |
-| <kbd>Ctrl</kbd> + <kbd>u</kbd> | Clear current input line |
+| <kbd>Ctrl</kbd> + <kbd>u</kbd> | Fetch 5 older messages on demand (when `persist-chat-history` is enabled) / Scroll up |
 
 ---
 

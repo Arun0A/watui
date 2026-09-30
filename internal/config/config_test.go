@@ -442,3 +442,94 @@ func TestMatchTargetWildcardAndRegex(t *testing.T) {
 		t.Errorf("Expected friend to NOT be muted by config")
 	}
 }
+
+func TestChatHistoryConfig(t *testing.T) {
+	// Test defaults
+	emptyCfg := &Config{}
+	if emptyCfg.IsHistoryPersistEnabled() {
+		t.Errorf("Expected history persist to be disabled by default")
+	}
+	if emptyCfg.GetCycleMsgCountPerChat() != 30 {
+		t.Errorf("Expected default cycle msg count to be 30, got %d", emptyCfg.GetCycleMsgCountPerChat())
+	}
+	if emptyCfg.IsAlwaysLoadHistoryEnabled() {
+		t.Errorf("Expected always load history to be false by default")
+	}
+
+	// Test kebab-case YAML
+	kebabYAML := `
+persist-chat-history: true
+cycle-msg-count-per-chat: 25
+always-load-history: true
+`
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "kebab.yaml")
+	if err := os.WriteFile(cfgFile, []byte(kebabYAML), 0644); err != nil {
+		t.Fatalf("Failed to write kebab config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Failed to load kebab config: %v", err)
+	}
+	if !cfg.IsHistoryPersistEnabled() {
+		t.Errorf("Expected history persist enabled for kebab config")
+	}
+	if cfg.GetCycleMsgCountPerChat() != 25 {
+		t.Errorf("Expected cycle count 25, got %d", cfg.GetCycleMsgCountPerChat())
+	}
+	if !cfg.IsAlwaysLoadHistoryEnabled() {
+		t.Errorf("Expected always load history enabled for kebab config")
+	}
+
+	// Test snake_case YAML
+	snakeYAML := `
+persist_chat_history: true
+cycle_msg_count_per_chat: 50
+always_load_history: false
+`
+	cfgFileSnake := filepath.Join(tmpDir, "snake.yaml")
+	if err := os.WriteFile(cfgFileSnake, []byte(snakeYAML), 0644); err != nil {
+		t.Fatalf("Failed to write snake config: %v", err)
+	}
+
+	cfgSnake, err := Load(cfgFileSnake)
+	if err != nil {
+		t.Fatalf("Failed to load snake config: %v", err)
+	}
+	if !cfgSnake.IsHistoryPersistEnabled() {
+		t.Errorf("Expected history persist enabled for snake config")
+	}
+	if cfgSnake.GetCycleMsgCountPerChat() != 50 {
+		t.Errorf("Expected cycle count 50, got %d", cfgSnake.GetCycleMsgCountPerChat())
+	}
+	if cfgSnake.IsAlwaysLoadHistoryEnabled() {
+		t.Errorf("Expected always load history disabled for snake config")
+	}
+
+	// Test nested history block
+	nestedYAML := `
+history:
+  persist: true
+  cycle_count: 15
+  always_load: true
+`
+	cfgFileNested := filepath.Join(tmpDir, "nested.yaml")
+	if err := os.WriteFile(cfgFileNested, []byte(nestedYAML), 0644); err != nil {
+		t.Fatalf("Failed to write nested config: %v", err)
+	}
+
+	cfgNested, err := Load(cfgFileNested)
+	if err != nil {
+		t.Fatalf("Failed to load nested config: %v", err)
+	}
+	if !cfgNested.IsHistoryPersistEnabled() {
+		t.Errorf("Expected history persist enabled for nested config")
+	}
+	if cfgNested.GetCycleMsgCountPerChat() != 15 {
+		t.Errorf("Expected cycle count 15, got %d", cfgNested.GetCycleMsgCountPerChat())
+	}
+	if !cfgNested.IsAlwaysLoadHistoryEnabled() {
+		t.Errorf("Expected always load history enabled for nested config")
+	}
+}
