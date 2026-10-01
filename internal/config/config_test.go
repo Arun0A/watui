@@ -584,3 +584,59 @@ func TestDisableReactionsConfig(t *testing.T) {
 		t.Errorf("Expected reactions disabled for show_reactions: false, got enabled")
 	}
 }
+
+func TestClipboardPasteConfig(t *testing.T) {
+	// 1. Default should be enabled (true)
+	var nilCfg *Config
+	if !nilCfg.IsClipboardPasteEnabled() {
+		t.Errorf("Expected nil config to have clipboard paste enabled by default")
+	}
+	emptyCfg := &Config{}
+	if !emptyCfg.IsClipboardPasteEnabled() {
+		t.Errorf("Expected empty config to have clipboard paste enabled by default")
+	}
+
+	tmpDir := t.TempDir()
+
+	// 2. Direct YAML clipboard_paste: false
+	falseYAML := `clipboard_paste: false`
+	cfgFileFalse := filepath.Join(tmpDir, "paste_false.yaml")
+	if err := os.WriteFile(cfgFileFalse, []byte(falseYAML), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfgFalse, err := Load(cfgFileFalse)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfgFalse.IsClipboardPasteEnabled() {
+		t.Errorf("Expected clipboard paste disabled, got enabled")
+	}
+
+	// 3. Kebab-case clipboard-paste: false
+	kebabYAML := `clipboard-paste: false`
+	cfgFileKebab := filepath.Join(tmpDir, "kebab_paste.yaml")
+	if err := os.WriteFile(cfgFileKebab, []byte(kebabYAML), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfgKebab, err := Load(cfgFileKebab)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfgKebab.IsClipboardPasteEnabled() {
+		t.Errorf("Expected clipboard paste disabled for kebab-case, got enabled")
+	}
+
+	// 4. disable_clipboard_paste: true
+	disableYAML := `disable_clipboard_paste: true`
+	cfgFileDisable := filepath.Join(tmpDir, "disable_paste.yaml")
+	if err := os.WriteFile(cfgFileDisable, []byte(disableYAML), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfgDisable, err := Load(cfgFileDisable)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfgDisable.IsClipboardPasteEnabled() {
+		t.Errorf("Expected clipboard paste disabled for disable_clipboard_paste: true, got enabled")
+	}
+}

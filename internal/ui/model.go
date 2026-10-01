@@ -614,6 +614,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 
 	case clipboardPasteMsg:
+		if !m.cfg.IsClipboardPasteEnabled() {
+			return m, nil
+		}
 		if msg.Err != nil || msg.Item == nil {
 			m.previewStatus = "Clipboard empty or unavailable"
 			return m, nil
@@ -1823,6 +1826,9 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			return textinput.Blink
 
 		case "ctrl+v", "alt+v":
+			if !m.cfg.IsClipboardPasteEnabled() {
+				return nil
+			}
 			m.selectedMsgIdx = -1
 			m.input.Focus()
 			m.previewStatus = "Pasting from clipboard..."
@@ -2130,8 +2136,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		return m.pickFileCmd()
 
 	case "ctrl+v", "alt+v":
-		m.previewStatus = "Pasting from clipboard..."
-		return m.pasteClipboardCmd()
+		if m.cfg.IsClipboardPasteEnabled() {
+			m.previewStatus = "Pasting from clipboard..."
+			return m.pasteClipboardCmd()
+		}
 
 	case "pgup", "ctrl+y":
 		m.chatScrollOffset += 5

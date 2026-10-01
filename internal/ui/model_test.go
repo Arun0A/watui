@@ -2856,4 +2856,21 @@ func TestClipboardPasteHandling(t *testing.T) {
 	if !strings.Contains(model.previewStatus, "empty or unavailable") {
 		t.Errorf("Expected previewStatus to indicate empty, got %q", model.previewStatus)
 	}
+
+	// 7. When clipboard_paste is disabled in config, ctrl+v/alt+v does not trigger clipboard reading
+	disablePaste := false
+	model.cfg.ClipboardPaste = &disablePaste
+	called := false
+	readClipboardFunc = func(ctx context.Context) (*ClipboardItem, error) {
+		called = true
+		return &ClipboardItem{IsMedia: true, FilePath: "/tmp/should_not_read.png"}, nil
+	}
+	model.previewStatus = "Normal"
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	if called {
+		t.Errorf("Expected readClipboardFunc not to be called when clipboard_paste: false")
+	}
+	if model.previewStatus != "Normal" {
+		t.Errorf("Expected previewStatus unchanged when clipboard_paste disabled, got %q", model.previewStatus)
+	}
 }

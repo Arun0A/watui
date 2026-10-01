@@ -130,6 +130,11 @@ type Config struct {
 	HideReactions    *bool `json:"hide_reactions" yaml:"hide_reactions"`
 	ShowReactions    *bool `json:"show_reactions" yaml:"show_reactions"`
 
+	// ClipboardPaste controls whether pasting images/files/text from clipboard is enabled (default: true).
+	ClipboardPaste        *bool `json:"clipboard_paste" yaml:"clipboard_paste"`
+	EnableClipboardPaste  *bool `json:"enable_clipboard_paste" yaml:"enable_clipboard_paste"`
+	DisableClipboardPaste *bool `json:"disable_clipboard_paste" yaml:"disable_clipboard_paste"`
+
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
 }
@@ -326,6 +331,23 @@ func (c *Config) IsReactionsDisabled() bool {
 		return !*c.ShowReactions
 	}
 	return false
+}
+
+// IsClipboardPasteEnabled reports whether clipboard paste support is enabled (default: true).
+func (c *Config) IsClipboardPasteEnabled() bool {
+	if c == nil {
+		return true
+	}
+	if c.DisableClipboardPaste != nil && *c.DisableClipboardPaste {
+		return false
+	}
+	if c.EnableClipboardPaste != nil {
+		return *c.EnableClipboardPaste
+	}
+	if c.ClipboardPaste != nil {
+		return *c.ClipboardPaste
+	}
+	return true
 }
 
 // DefaultDBPath returns the appropriate default path for the database file.
@@ -620,6 +642,18 @@ func loadFileWithDepth(path string, depth int) (*Config, error) {
 				if b, ok := v.(bool); ok {
 					cfg.ShowReactions = &b
 				}
+			case "clipboard-paste":
+				if b, ok := v.(bool); ok {
+					cfg.ClipboardPaste = &b
+				}
+			case "enable-clipboard-paste":
+				if b, ok := v.(bool); ok {
+					cfg.EnableClipboardPaste = &b
+				}
+			case "disable-clipboard-paste":
+				if b, ok := v.(bool); ok {
+					cfg.DisableClipboardPaste = &b
+				}
 			}
 		}
 	}
@@ -740,6 +774,15 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if overlay.ShowReactions != nil {
 		base.ShowReactions = overlay.ShowReactions
+	}
+	if overlay.ClipboardPaste != nil {
+		base.ClipboardPaste = overlay.ClipboardPaste
+	}
+	if overlay.EnableClipboardPaste != nil {
+		base.EnableClipboardPaste = overlay.EnableClipboardPaste
+	}
+	if overlay.DisableClipboardPaste != nil {
+		base.DisableClipboardPaste = overlay.DisableClipboardPaste
 	}
 }
 

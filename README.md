@@ -153,7 +153,7 @@ nix develop github:Arun0A/watui
 | <kbd>Alt</kbd> + <kbd>x</kbd> | Stop media / audio playback immediately |
 | <kbd>Ctrl</kbd> + <kbd>v</kbd> / <kbd>Alt</kbd> + <kbd>v</kbd> | Paste image, file, or text from clipboard into message box (`file:///...`) |
 | <kbd>Alt</kbd> + <kbd>f</kbd> | Open file picker to attach and send a file |
-| <kbd>Ctrl</kbd> + <kbd>u</kbd> | Fetch 5 older messages on demand (when `persist-chat-history` is enabled) / Scroll up |
+| <kbd>Ctrl</kbd> + <kbd>u</kbd> | Fetch 5 older messages on demand (when `persist_chat_history` is enabled) / Scroll up |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd> (or <kbd>Ctrl</kbd>+<kbd>y</kbd> / <kbd>e</kbd>) | Scroll conversation history up / down |
 | <kbd>Alt</kbd> + <kbd>Enter</kbd> / <kbd>Ctrl</kbd>+<kbd>j</kbd> | Insert newline (multi-line message) |
 
@@ -240,6 +240,10 @@ notifications:
 # 9. Chat Reactions Display (Optional)
 # Set to true to completely hide reactions in chat view (false by default)
 # disable_reactions: false
+
+# 10. Clipboard Paste Support (Optional)
+# Set to false to disable pasting images/files/text from clipboard (true by default)
+# clipboard_paste: true
 ```
 
 ---
