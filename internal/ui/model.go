@@ -480,7 +480,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForChatDismissed())
 
 	case unreadsLoadedMsg:
-		m.rebuildUnreadChats(msg)
+		var unreads []domain.Message
+		for _, mMsg := range msg {
+			if m.cfg.IsReactionsDisabled() && mMsg.Type == domain.MessageTypeReaction {
+				continue
+			}
+			unreads = append(unreads, mMsg)
+		}
+		m.rebuildUnreadChats(unreads)
 		m.updateUnreadChatNames()
 
 	case historyLoadedMsg:
@@ -504,6 +511,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var newOlder []domain.Message
 		for _, nm := range msg.Messages {
+			if m.cfg.IsReactionsDisabled() && nm.Type == domain.MessageTypeReaction {
+				continue
+			}
 			if !existingIDs[nm.ID] {
 				newOlder = append(newOlder, nm)
 			}
@@ -1200,6 +1210,9 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 	m.unreadChats = newUnreadChats
 
 	for _, msg := range msgs {
+		if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
+			continue
+		}
 		if m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
 			continue
 		}
@@ -1282,6 +1295,10 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 func (m *Model) handleIncomingMessage(msg domain.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
+		return
+	}
 
 	// Archived chats should never trigger notifications and are muted by default
 	isArchived := false
@@ -1449,7 +1466,13 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			chat := m.unreadChats[chatID]
 			m.activeChatID = chatID
 			m.activeName = chat.Name
-			m.activeMsgs = append([]domain.Message(nil), chat.Messages...)
+			m.activeMsgs = nil
+			for _, item := range chat.Messages {
+				if m.cfg.IsReactionsDisabled() && item.Type == domain.MessageTypeReaction {
+					continue
+				}
+				m.activeMsgs = append(m.activeMsgs, item)
+			}
 			m.chatScrollOffset = 0
 			m.input.Reset()
 			m.input.SetHeight(1)
@@ -2208,7 +2231,12 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeMsgs = nil
 			m.mu.Lock()
 			if chat, exists := m.unreadChats[contact.JID]; exists {
-				m.activeMsgs = append([]domain.Message(nil), chat.Messages...)
+				for _, item := range chat.Messages {
+					if m.cfg.IsReactionsDisabled() && item.Type == domain.MessageTypeReaction {
+						continue
+					}
+					m.activeMsgs = append(m.activeMsgs, item)
+				}
 				chat.UnreadCount = 0
 			}
 			if m.readChats == nil {
@@ -2263,7 +2291,12 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeMsgs = nil
 			m.mu.Lock()
 			if chat, exists := m.unreadChats[targetID]; exists {
-				m.activeMsgs = append([]domain.Message(nil), chat.Messages...)
+				for _, item := range chat.Messages {
+					if m.cfg.IsReactionsDisabled() && item.Type == domain.MessageTypeReaction {
+						continue
+					}
+					m.activeMsgs = append(m.activeMsgs, item)
+				}
 				chat.UnreadCount = 0
 			}
 			if m.readChats == nil {
@@ -2831,6 +2864,9 @@ func (m *Model) renderChatView() []string {
 
 		mediaIndices := m.getChatMediaIndices()
 		for i, msg := range m.activeMsgs {
+			if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
+				continue
+			}
 			timeStr := msg.Timestamp.Format("15:04")
 			var header string
 			mediaBadge := ""
@@ -2925,11 +2961,19 @@ func (m *Model) renderChatView() []string {
 				}
 				if quoteContent == "" {
 					if quoteSender != "" {
-						quoteContent = "Replying to " + quoteSender
+						if msg.Type == domain.MessageTypeReaction {
+							quoteContent = "Reacted to " + quoteSender
+						} else {
+							quoteContent = "Replying to " + quoteSender
+						}
 					} else {
-						quoteContent = "[Replying to message]"
+						if msg.Type == domain.MessageTypeReaction {
+							quoteContent = "[Reacted to message]"
+						} else {
+							quoteContent = "[Replying to message]"
+						}
 					}
-				} else if quoteSender != "" && !strings.HasPrefix(quoteContent, quoteSender+":") && !strings.HasPrefix(quoteContent, "Replying to ") {
+				} else if quoteSender != "" && !strings.HasPrefix(quoteContent, quoteSender+":") && !strings.HasPrefix(quoteContent, "Replying to ") && !strings.HasPrefix(quoteContent, "Reacted to ") {
 					quoteContent = quoteSender + ": " + quoteContent
 				}
 
@@ -3279,6 +3323,9 @@ func (m *Model) scrollToMessage(msgIdx int) {
 	spans := make([]msgSpan, len(m.activeMsgs))
 	currentLine := 0
 	for i, msg := range m.activeMsgs {
+		if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
+			continue
+		}
 		start := currentLine
 		currentLine += 1 // header
 		if msg.QuotedText != "" || msg.QuotedID != "" {

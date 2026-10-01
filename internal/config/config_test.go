@@ -533,3 +533,54 @@ history:
 		t.Errorf("Expected always load history enabled for nested config")
 	}
 }
+
+func TestDisableReactionsConfig(t *testing.T) {
+	// Default: false
+	cfgDefault := &Config{}
+	if cfgDefault.IsReactionsDisabled() {
+		t.Errorf("Expected reactions enabled by default, got disabled")
+	}
+
+	// Direct yaml
+	tmpDir := t.TempDir()
+	yamlContent := `disable_reactions: true`
+	cfgFile := filepath.Join(tmpDir, "disable.yaml")
+	if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if !cfg.IsReactionsDisabled() {
+		t.Errorf("Expected reactions disabled, got enabled")
+	}
+
+	// Kebab-case alias
+	kebabYAML := `disable-reactions: true`
+	cfgFileKebab := filepath.Join(tmpDir, "kebab.yaml")
+	if err := os.WriteFile(cfgFileKebab, []byte(kebabYAML), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfgKebab, err := Load(cfgFileKebab)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if !cfgKebab.IsReactionsDisabled() {
+		t.Errorf("Expected reactions disabled for kebab-case, got enabled")
+	}
+
+	// show_reactions: false alias
+	showYAML := `show_reactions: false`
+	cfgFileShow := filepath.Join(tmpDir, "show.yaml")
+	if err := os.WriteFile(cfgFileShow, []byte(showYAML), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfgShow, err := Load(cfgFileShow)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if !cfgShow.IsReactionsDisabled() {
+		t.Errorf("Expected reactions disabled for show_reactions: false, got enabled")
+	}
+}

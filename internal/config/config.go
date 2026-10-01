@@ -125,6 +125,11 @@ type Config struct {
 	// Daemon controls background notification daemon behavior and logging.
 	Daemon DaemonConfig `json:"daemon" yaml:"daemon"`
 
+	// DisableReactions controls whether reaction messages are displayed in chat (default: false).
+	DisableReactions *bool `json:"disable_reactions" yaml:"disable_reactions"`
+	HideReactions    *bool `json:"hide_reactions" yaml:"hide_reactions"`
+	ShowReactions    *bool `json:"show_reactions" yaml:"show_reactions"`
+
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
 }
@@ -301,6 +306,24 @@ func (c *Config) IsAlwaysLoadHistoryEnabled() bool {
 	}
 	if c.History.AlwaysLoad != nil {
 		return *c.History.AlwaysLoad
+	}
+	return false
+}
+
+// IsReactionsDisabled reports whether reactions should be completely disabled from chat display.
+// Defaults to false.
+func (c *Config) IsReactionsDisabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.DisableReactions != nil {
+		return *c.DisableReactions
+	}
+	if c.HideReactions != nil {
+		return *c.HideReactions
+	}
+	if c.ShowReactions != nil {
+		return !*c.ShowReactions
 	}
 	return false
 }
@@ -585,6 +608,18 @@ func loadFileWithDepth(path string, depth int) (*Config, error) {
 				if b, ok := v.(bool); ok {
 					cfg.AlwaysLoadHistory = &b
 				}
+			case "disable-reactions":
+				if b, ok := v.(bool); ok {
+					cfg.DisableReactions = &b
+				}
+			case "hide-reactions":
+				if b, ok := v.(bool); ok {
+					cfg.HideReactions = &b
+				}
+			case "show-reactions":
+				if b, ok := v.(bool); ok {
+					cfg.ShowReactions = &b
+				}
 			}
 		}
 	}
@@ -696,6 +731,15 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if overlay.Daemon.LogFile != "" {
 		base.Daemon.LogFile = overlay.Daemon.LogFile
+	}
+	if overlay.DisableReactions != nil {
+		base.DisableReactions = overlay.DisableReactions
+	}
+	if overlay.HideReactions != nil {
+		base.HideReactions = overlay.HideReactions
+	}
+	if overlay.ShowReactions != nil {
+		base.ShowReactions = overlay.ShowReactions
 	}
 }
 

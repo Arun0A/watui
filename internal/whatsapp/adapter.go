@@ -1705,6 +1705,7 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 		m.IsFromMe = isFromMe
 		m.QuotedID = qID.String
 		m.QuotedText = qText.String
+		m.QuotedSender = qSender.String
 		result = append(result, m)
 	}
 	_ = rows.Close()
@@ -2293,6 +2294,26 @@ func (a *Adapter) resolveMentionsInText(text string, mentionedJIDs ...string) st
 }
 
 func extractQuotedInfo(m *waE2E.Message) (string, string, string) {
+	m = unwrapMessage(m)
+	if m == nil {
+		return "", "", ""
+	}
+
+	if m.ReactionMessage != nil && m.ReactionMessage.Key != nil {
+		var qID, qSender string
+		if m.ReactionMessage.Key.ID != nil {
+			qID = *m.ReactionMessage.Key.ID
+		}
+		if m.ReactionMessage.Key.FromMe != nil && *m.ReactionMessage.Key.FromMe {
+			qSender = "You"
+		} else if m.ReactionMessage.Key.Participant != nil && *m.ReactionMessage.Key.Participant != "" {
+			qSender = *m.ReactionMessage.Key.Participant
+		} else if m.ReactionMessage.Key.RemoteJID != nil && *m.ReactionMessage.Key.RemoteJID != "" && !strings.Contains(*m.ReactionMessage.Key.RemoteJID, "@g.us") {
+			qSender = *m.ReactionMessage.Key.RemoteJID
+		}
+		return qID, "", qSender
+	}
+
 	ctxInfo := extractContextInfo(m)
 	if ctxInfo != nil {
 		var qID, qText, qSender string
@@ -2347,7 +2368,11 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 	qID, qText, qSender := extractQuotedInfo(evt.Message)
 	var qSenderName string
 	if qSender != "" {
-		qSenderName = a.resolveParticipantName(qSender)
+		if qSender == "You" {
+			qSenderName = "You"
+		} else {
+			qSenderName = a.resolveParticipantName(qSender)
+		}
 	}
 	if qID != "" {
 		if qText == "" && a.localDB != nil {
@@ -2449,7 +2474,11 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 	qID, qText, qSender := extractQuotedInfo(webMsg.Message)
 	var qSenderName string
 	if qSender != "" {
-		qSenderName = a.resolveParticipantName(qSender)
+		if qSender == "You" {
+			qSenderName = "You"
+		} else {
+			qSenderName = a.resolveParticipantName(qSender)
+		}
 	}
 	if qID != "" {
 		if qText == "" && a.localDB != nil {

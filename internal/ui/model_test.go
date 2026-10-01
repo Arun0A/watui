@@ -2570,3 +2570,159 @@ func TestGroupMentionHintsAndCompletion(t *testing.T) {
 		t.Errorf("Expected input to remain 'hey @Bo', got %q", model.input.Value())
 	}
 }
+
+func TestReactionAssociatedMessageRendering(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.activeChatID = "chat1@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.view = ViewChat
+	model.width = 100
+	model.height = 30
+
+	// 1. Initial message from Alice
+	origMsg := domain.Message{
+		ID:         "msg-101",
+		ChatID:     "chat1@s.whatsapp.net",
+		Sender:     "chat1@s.whatsapp.net",
+		SenderName: "Alice",
+		Timestamp:  time.Now().Add(-1 * time.Minute),
+		Body:       "Great work on the release!",
+		Type:       domain.MessageTypeText,
+	}
+
+	// 2. Reaction to msg-101 with explicit QuotedID and QuotedText
+	reactionMsg := domain.Message{
+		ID:           "react-1",
+		ChatID:       "chat1@s.whatsapp.net",
+		Sender:       "bob@s.whatsapp.net",
+		SenderName:   "Bob",
+		Timestamp:    time.Now(),
+		Body:         "[Reaction: 🚀]",
+		Type:         domain.MessageTypeReaction,
+		QuotedID:     "msg-101",
+		QuotedText:   "Great work on the release!",
+		QuotedSender: "Alice",
+	}
+
+	model.activeMsgs = []domain.Message{origMsg, reactionMsg}
+
+	lines := model.renderChatView()
+	rendered := strings.Join(lines, "\n")
+
+	if !strings.Contains(rendered, "[Reaction: 🚀]") {
+		t.Errorf("Expected [Reaction: 🚀] in chat view, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "┌─ Alice: Great work on the release!") {
+		t.Errorf("Expected associated message quote in chat view, got:\n%s", rendered)
+	}
+
+	// 3. Reaction where QuotedText is empty but message is found in activeMsgs by QuotedID
+	reactionMsg2 := domain.Message{
+		ID:           "react-2",
+		ChatID:       "chat1@s.whatsapp.net",
+		Sender:       "carol@s.whatsapp.net",
+		SenderName:   "Carol",
+		Timestamp:    time.Now(),
+		Body:         "[Reaction: ❤️]",
+		Type:         domain.MessageTypeReaction,
+		QuotedID:     "msg-101",
+		QuotedSender: "Alice",
+	}
+	model.activeMsgs = []domain.Message{origMsg, reactionMsg2}
+	lines2 := model.renderChatView()
+	rendered2 := strings.Join(lines2, "\n")
+	if !strings.Contains(rendered2, "┌─ Alice: Great work on the release!") {
+		t.Errorf("Expected resolved quote from activeMsgs, got:\n%s", rendered2)
+	}
+
+	// 4. Reaction where target message is not in history (only sender known)
+	reactionMsg3 := domain.Message{
+		ID:           "react-3",
+		ChatID:       "chat1@s.whatsapp.net",
+		Sender:       "carol@s.whatsapp.net",
+		SenderName:   "Carol",
+		Timestamp:    time.Now(),
+		Body:         "[Reaction: 👍]",
+		Type:         domain.MessageTypeReaction,
+		QuotedID:     "unknown-msg",
+		QuotedSender: "Alice",
+	}
+	model.activeMsgs = []domain.Message{reactionMsg3}
+	lines3 := model.renderChatView()
+	rendered3 := strings.Join(lines3, "\n")
+	if !strings.Contains(rendered3, "┌─ Reacted to Alice") {
+		t.Errorf("Expected 'Reacted to Alice' fallback, got:\n%s", rendered3)
+	}
+}
+
+func TestDisableReactionsInChat(t *testing.T) {
+	adapter := &mockAdapter{}
+	disableReactions := true
+	cfg := &config.Config{
+		DisableReactions: &disableReactions,
+	}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.activeChatID = "chat1@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.view = ViewChat
+	model.width = 100
+	model.height = 30
+
+	normalMsg := domain.Message{
+		ID:         "msg-1",
+		ChatID:     "chat1@s.whatsapp.net",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Timestamp:  time.Now(),
+		Body:       "Hello world",
+		Type:       domain.MessageTypeText,
+	}
+
+	reactionMsg := domain.Message{
+		ID:         "react-1",
+		ChatID:     "chat1@s.whatsapp.net",
+		Sender:     "bob@s.whatsapp.net",
+		SenderName: "Bob",
+		Timestamp:  time.Now(),
+		Body:       "[Reaction: 👍]",
+		Type:       domain.MessageTypeReaction,
+	}
+
+	// 1. Initial snapshot with reactions should filter out reaction messages
+	model.Update(unreadsLoadedMsg([]domain.Message{normalMsg, reactionMsg}))
+	chat := model.unreadChats["chat1@s.whatsapp.net"]
+	if chat == nil {
+		t.Fatalf("Expected chat1 in unreadChats")
+	}
+	for _, m := range chat.Messages {
+		if m.Type == domain.MessageTypeReaction {
+			t.Errorf("Expected reaction message to be filtered out from unreadChats")
+		}
+	}
+
+	// 2. Incoming reaction message while viewing chat should be dropped
+	model.handleIncomingMessage(reactionMsg)
+	for _, m := range model.activeMsgs {
+		if m.Type == domain.MessageTypeReaction {
+			t.Errorf("Expected incoming reaction message to be dropped from activeMsgs")
+		}
+	}
+
+	// 3. Opening chat should not include reaction messages
+	model.activeMsgs = []domain.Message{normalMsg, reactionMsg}
+	lines := model.renderChatView()
+	rendered := strings.Join(lines, "\n")
+	if strings.Contains(rendered, "[Reaction: 👍]") {
+		t.Errorf("Expected reactions to be hidden in renderChatView when disable_reactions=true, got:\n%s", rendered)
+	}
+
+	// 4. When disable_reactions=false, reaction is displayed
+	enableReactions := false
+	model.cfg.DisableReactions = &enableReactions
+	linesEnabled := model.renderChatView()
+	renderedEnabled := strings.Join(linesEnabled, "\n")
+	if !strings.Contains(renderedEnabled, "[Reaction: 👍]") {
+		t.Errorf("Expected reactions to be displayed when disable_reactions=false, got:\n%s", renderedEnabled)
+	}
+}

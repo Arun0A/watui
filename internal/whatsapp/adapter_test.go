@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -516,5 +517,50 @@ func TestGetGroupParticipants(t *testing.T) {
 	}
 	if participants[0].Name != "Alice" || participants[1].Name != "Bob" {
 		t.Errorf("Unexpected participants: %v", participants)
+	}
+}
+
+func TestReactionQuotedAssociation(t *testing.T) {
+	adapter := &Adapter{}
+	chatJID := types.NewJID("120363430194759319", "g.us")
+	senderJID := types.NewJID("919876543210", "s.whatsapp.net")
+	targetSender := "919876543211@s.whatsapp.net"
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:   chatJID,
+				Sender: senderJID,
+			},
+			ID:        "REACT_MSG_1",
+			Timestamp: time.Now(),
+		},
+		Message: &waE2E.Message{
+			ReactionMessage: &waE2E.ReactionMessage{
+				Key: &waCommon.MessageKey{
+					RemoteJID:   proto.String(chatJID.String()),
+					ID:          proto.String("ORIG_MSG_42"),
+					Participant: proto.String(targetSender),
+				},
+				Text: proto.String("❤️"),
+			},
+		},
+	}
+
+	msg, ok := adapter.extractDomainMessage(evt)
+	if !ok {
+		t.Fatalf("Expected extractDomainMessage ok=true, got false")
+	}
+	if msg.Type != domain.MessageTypeReaction {
+		t.Errorf("Expected MessageTypeReaction, got %s", msg.Type)
+	}
+	if msg.Body != "[Reaction: ❤️]" {
+		t.Errorf("Expected [Reaction: ❤️], got %s", msg.Body)
+	}
+	if msg.QuotedID != "ORIG_MSG_42" {
+		t.Errorf("Expected QuotedID ORIG_MSG_42, got %q", msg.QuotedID)
+	}
+	if msg.QuotedSender != "919876543211" {
+		t.Errorf("Expected QuotedSender 919876543211, got %q", msg.QuotedSender)
 	}
 }

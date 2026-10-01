@@ -235,6 +235,10 @@ notifications:
   banner: true            # Desktop notification banner (notify-send on Linux, toast on Windows, macOS)
   sound: true             # Audio chime on incoming message
   # sound_path: ""          # Custom audio file path (defaults to whatsapp_notification.mp3)
+
+# 9. Chat Reactions Display (Optional)
+# Set to true to completely hide reactions in chat view (false by default)
+# disable_reactions: false
 ```
 
 ---
