@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -1089,6 +1090,27 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 	list = append(list, a.getLocalGroups()...)
 
 	// 2. Read contacts from whatsmeow SQLite store
+	if a.client != nil && a.client.Store != nil {
+		if a.client.Store.ID != nil {
+			myJID := a.client.Store.ID.ToNonAD()
+			list = append(list, domain.Contact{
+				JID:  myJID.String(),
+				Name: "You",
+			})
+			if myLID := a.ResolvePhoneToLID(myJID.User); myLID != "" {
+				list = append(list, domain.Contact{
+					JID:  types.NewJID(myLID, "lid").String(),
+					Name: "You",
+				})
+			}
+		}
+		if a.client.Store.LID.User != "" {
+			list = append(list, domain.Contact{
+				JID:  a.client.Store.LID.ToNonAD().String(),
+				Name: "You",
+			})
+		}
+	}
 	if a.client != nil && a.client.Store != nil && a.client.Store.Contacts != nil {
 		rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
 		if err == nil {
@@ -1503,12 +1525,12 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 				m.SenderName = resolved
 			}
 		}
-		m.Body = body.String
+		m.Body = a.resolveMentionsInText(body.String)
 		m.Type = domain.MessageType(msgType)
 		m.Timestamp = time.Unix(ts, 0)
 		m.IsFromMe = isFromMe
 		m.QuotedID = qID.String
-		m.QuotedText = qText.String
+		m.QuotedText = a.resolveMentionsInText(qText.String)
 		result = append(result, m)
 	}
 	_ = rows.Close()
@@ -1647,6 +1669,8 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 					m.SenderName = resolved
 				}
 			}
+			m.Body = a.resolveMentionsInText(m.Body)
+			m.QuotedText = a.resolveMentionsInText(m.QuotedText)
 			msgs = append(msgs, m)
 		}
 	}
@@ -1953,19 +1977,53 @@ func (a *Adapter) resolveChatName(chat types.JID) string {
 	return ""
 }
 
+var mentionRegex = regexp.MustCompile(`(?:^|[^\w@])@(\d{5,20})\b`)
+
 func (a *Adapter) resolveParticipantName(participant string, pushName ...string) string {
 	if participant == "" {
 		return ""
 	}
-	if a.client != nil && a.client.Store != nil && a.client.Store.ID != nil {
-		myJID := a.client.Store.ID.ToNonAD()
-		if strings.HasPrefix(participant, myJID.User) {
-			return "You"
+	if a.client != nil && a.client.Store != nil {
+		if a.client.Store.ID != nil {
+			myJID := a.client.Store.ID.ToNonAD()
+			myUser := myJID.User
+			if participant == myUser || strings.HasPrefix(participant, myUser+":") || strings.HasPrefix(participant, myUser+"@") {
+				return "You"
+			}
+			if myLID := a.ResolvePhoneToLID(myUser); myLID != "" {
+				if participant == myLID || strings.HasPrefix(participant, myLID+":") || strings.HasPrefix(participant, myLID+"@") {
+					return "You"
+				}
+			}
+		}
+		if a.client.Store.LID.User != "" {
+			myLIDUser := a.client.Store.LID.ToNonAD().User
+			if participant == myLIDUser || strings.HasPrefix(participant, myLIDUser+":") || strings.HasPrefix(participant, myLIDUser+"@") {
+				return "You"
+			}
 		}
 	}
 	pJID, err := types.ParseJID(participant)
 	if err != nil {
-		return participant
+		if pn := a.ResolveLIDToPhone(participant); pn != "" {
+			pJID = types.NewJID(pn, types.DefaultUserServer)
+		} else {
+			testJID := types.NewJID(participant, types.DefaultUserServer)
+			if name := a.resolveChatName(testJID); name != "" {
+				return name
+			}
+			testLID := types.NewJID(participant, "lid")
+			if name := a.resolveChatName(testLID); name != "" {
+				return name
+			}
+			for _, p := range pushName {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					return p
+				}
+			}
+			return participant
+		}
 	}
 	pJID = pJID.ToNonAD()
 	if pJID.Server == "lid" {
@@ -1986,25 +2044,73 @@ func (a *Adapter) resolveParticipantName(participant string, pushName ...string)
 	return pJID.User
 }
 
-func extractQuotedInfo(m *waE2E.Message) (string, string, string) {
+func extractContextInfo(m *waE2E.Message) *waE2E.ContextInfo {
 	m = unwrapMessage(m)
 	if m == nil {
-		return "", "", ""
+		return nil
 	}
-	var ctxInfo *waE2E.ContextInfo
 	if m.ExtendedTextMessage != nil {
-		ctxInfo = m.ExtendedTextMessage.ContextInfo
+		return m.ExtendedTextMessage.ContextInfo
 	} else if m.ImageMessage != nil {
-		ctxInfo = m.ImageMessage.ContextInfo
+		return m.ImageMessage.ContextInfo
 	} else if m.VideoMessage != nil {
-		ctxInfo = m.VideoMessage.ContextInfo
+		return m.VideoMessage.ContextInfo
 	} else if m.AudioMessage != nil {
-		ctxInfo = m.AudioMessage.ContextInfo
+		return m.AudioMessage.ContextInfo
 	} else if m.DocumentMessage != nil {
-		ctxInfo = m.DocumentMessage.ContextInfo
+		return m.DocumentMessage.ContextInfo
 	} else if m.StickerMessage != nil {
-		ctxInfo = m.StickerMessage.ContextInfo
+		return m.StickerMessage.ContextInfo
 	}
+	return nil
+}
+
+func (a *Adapter) resolveMentionsInText(text string, mentionedJIDs ...string) string {
+	if text == "" {
+		return text
+	}
+	for _, jidStr := range mentionedJIDs {
+		if jidStr == "" {
+			continue
+		}
+		name := a.resolveParticipantName(jidStr)
+		if name == "" {
+			continue
+		}
+		pJID, err := types.ParseJID(jidStr)
+		if err == nil {
+			user := pJID.User
+			if idx := strings.Index(user, ":"); idx != -1 {
+				user = user[:idx]
+			}
+			text = strings.ReplaceAll(text, "@"+user, "@"+name)
+			if pn := a.ResolveLIDToPhone(user); pn != "" {
+				text = strings.ReplaceAll(text, "@"+pn, "@"+name)
+			}
+			if lid := a.ResolvePhoneToLID(user); lid != "" {
+				text = strings.ReplaceAll(text, "@"+lid, "@"+name)
+			}
+		}
+	}
+
+	matches := mentionRegex.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+	for i := len(matches) - 1; i >= 0; i-- {
+		sub := matches[i]
+		startDigit, endDigit := sub[2], sub[3]
+		digitStr := text[startDigit:endDigit]
+		resolved := a.resolveParticipantName(digitStr)
+		if resolved != "" && resolved != digitStr && !strings.Contains(resolved, "@") {
+			text = text[:startDigit] + resolved + text[endDigit:]
+		}
+	}
+	return text
+}
+
+func extractQuotedInfo(m *waE2E.Message) (string, string, string) {
+	ctxInfo := extractContextInfo(m)
 	if ctxInfo != nil {
 		var qID, qText, qSender string
 		if ctxInfo.StanzaID != nil {
@@ -2076,6 +2182,13 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 			}
 		}
 	}
+
+	var mentionedJIDs []string
+	if ctxInfo := extractContextInfo(evt.Message); ctxInfo != nil {
+		mentionedJIDs = ctxInfo.GetMentionedJID()
+	}
+	body = a.resolveMentionsInText(body, mentionedJIDs...)
+	qText = a.resolveMentionsInText(qText)
 
 	return domain.Message{
 		ID:           evt.Info.ID,
@@ -2171,6 +2284,13 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 			}
 		}
 	}
+
+	var mentionedJIDs []string
+	if ctxInfo := extractContextInfo(webMsg.Message); ctxInfo != nil {
+		mentionedJIDs = ctxInfo.GetMentionedJID()
+	}
+	body = a.resolveMentionsInText(body, mentionedJIDs...)
+	qText = a.resolveMentionsInText(qText)
 
 	return domain.Message{
 		ID:           msgID,

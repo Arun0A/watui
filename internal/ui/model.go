@@ -763,7 +763,14 @@ func (m *Model) resolveSenderNameByID(rawID string) string {
 	if rawID == "" || rawID == "You" {
 		return rawID
 	}
-	if isRealChatName(rawID, "") {
+	isAllDigits := true
+	for _, r := range rawID {
+		if r < '0' || r > '9' {
+			isAllDigits = false
+			break
+		}
+	}
+	if !isAllDigits && isRealChatName(rawID, "") {
 		return rawID
 	}
 	if len(m.contacts) > 0 && len(m.contactsByJID) < len(m.contacts) {
@@ -777,16 +784,31 @@ func (m *Model) resolveSenderNameByID(rawID string) string {
 	}
 	baseUser := strings.Split(cleanID, "@")[0]
 	if m.contactsByJID != nil {
-		if c := m.contactsByJID[cleanID]; c != nil && isRealChatName(c.Name, c.JID) {
-			return c.Name
+		if c := m.contactsByJID[cleanID]; c != nil {
+			if isRealChatName(c.Name, c.JID) {
+				return c.Name
+			}
+			if isRealChatName(c.PushName, c.JID) {
+				return c.PushName
+			}
 		}
-		if c := m.contactsByJID[rawID]; c != nil && isRealChatName(c.Name, c.JID) {
-			return c.Name
+		if c := m.contactsByJID[rawID]; c != nil {
+			if isRealChatName(c.Name, c.JID) {
+				return c.Name
+			}
+			if isRealChatName(c.PushName, c.JID) {
+				return c.PushName
+			}
 		}
 	}
 	if m.contactsByUser != nil {
-		if c := m.contactsByUser[baseUser]; c != nil && isRealChatName(c.Name, c.JID) {
-			return c.Name
+		if c := m.contactsByUser[baseUser]; c != nil {
+			if isRealChatName(c.Name, c.JID) {
+				return c.Name
+			}
+			if isRealChatName(c.PushName, c.JID) {
+				return c.PushName
+			}
 		}
 	}
 	return ""
@@ -1643,10 +1665,13 @@ var openInBrowser = func(url string) error {
 	return nil
 }
 
-func copyToClipboard(text string) error {
+var clipboardWriteAll = func(text string) error {
 	_, _ = fmt.Fprint(os.Stderr, osc52.New(text))
-	_ = clipboard.WriteAll(text)
-	return nil
+	return clipboard.WriteAll(text)
+}
+
+func copyToClipboard(text string) error {
+	return clipboardWriteAll(text)
 }
 
 func (m *Model) syncSelectedMediaIdx() {
@@ -1698,7 +1723,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		case "y":
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
-				textToCopy := target.Body
+				textToCopy := m.formatMentions(target.Body)
 				if textToCopy == "" {
 					m.previewStatus = "Message body is empty"
 				} else {
@@ -2197,6 +2222,9 @@ func (m *Model) filterContacts(query string) {
 			if strings.HasSuffix(c.JID, "@lid") {
 				continue
 			}
+			if c.Name == "You" {
+				continue
+			}
 			if !m.isMuted(c.JID, c.Name, c.PushName) {
 				list = append(list, c)
 			}
@@ -2225,6 +2253,9 @@ func (m *Model) filterContacts(query string) {
 
 	for _, c := range m.contacts {
 		if strings.HasSuffix(c.JID, "@lid") {
+			continue
+		}
+		if c.Name == "You" {
 			continue
 		}
 		if m.isMuted(c.JID, c.Name, c.PushName) {
@@ -2299,7 +2330,75 @@ var (
 	jidStyle = lipgloss.NewStyle().
 			Faint(true).
 			Foreground(lipgloss.Color("#585B70"))
+
+	mentionYouStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#A6E3A1"))
+
+	mentionOtherStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#89B4FA"))
 )
+
+var (
+	mentionRegex    = regexp.MustCompile(`(?:^|[^\w@])@(\d{5,20})\b`)
+	mentionYouRegex = regexp.MustCompile(`(?:^|[^\w@])(@You)\b`)
+)
+
+func (m *Model) formatMentions(text string) string {
+	if text == "" {
+		return text
+	}
+	matches := mentionRegex.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+	for i := len(matches) - 1; i >= 0; i-- {
+		sub := matches[i]
+		digitStart, digitEnd := sub[2], sub[3]
+		digits := text[digitStart:digitEnd]
+		resolved := m.resolveSenderNameByID(digits)
+		if resolved != "" && resolved != digits && !strings.Contains(resolved, "@") {
+			text = text[:digitStart] + resolved + text[digitEnd:]
+		}
+	}
+	return text
+}
+
+func (m *Model) styleMentionsForDisplay(text string) string {
+	if text == "" {
+		return text
+	}
+	// First resolve raw numbers in mentions
+	matches := mentionRegex.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) > 0 {
+		for i := len(matches) - 1; i >= 0; i-- {
+			sub := matches[i]
+			digitStart, digitEnd := sub[2], sub[3]
+			digits := text[digitStart:digitEnd]
+			resolved := m.resolveSenderNameByID(digits)
+			if resolved != "" && resolved != digits && !strings.Contains(resolved, "@") {
+				var styled string
+				if resolved == "You" {
+					styled = mentionYouStyle.Render("@You")
+				} else {
+					styled = mentionOtherStyle.Render("@" + resolved)
+				}
+				atIdx := digitStart - 1
+				text = text[:atIdx] + styled + text[digitEnd:]
+			}
+		}
+	}
+	// Also check if text already had "@You" (e.g. from adapter or database)
+	youMatches := mentionYouRegex.FindAllStringSubmatchIndex(text, -1)
+	for i := len(youMatches) - 1; i >= 0; i-- {
+		sub := youMatches[i]
+		start, end := sub[2], sub[3]
+		styled := mentionYouStyle.Render("@You")
+		text = text[:start] + styled + text[end:]
+	}
+	return text
+}
 
 func (m *Model) contentWidth() int {
 	if m.width <= 0 {
@@ -2487,6 +2586,7 @@ func (m *Model) renderUnreadListView() []string {
 				clean := strings.ReplaceAll(last.Body, "\r", "")
 				clean = strings.ReplaceAll(clean, "\n", " ")
 				clean = strings.TrimSpace(clean)
+				clean = m.formatMentions(clean)
 
 				// For groups, prefix snippet with sender name so context is clear: "Sender: message"
 				if (chat.IsGroup || strings.Contains(chat.ChatID, "@g.us")) && !last.IsFromMe {
@@ -2739,7 +2839,7 @@ func (m *Model) renderChatView() []string {
 					quoteContent = quoteSender + ": " + quoteContent
 				}
 
-				quotePreview := strings.ReplaceAll(quoteContent, "\n", " ")
+				quotePreview := strings.ReplaceAll(m.formatMentions(quoteContent), "\n", " ")
 				maxQuoteW := max(15, cw-12)
 				if len(quotePreview) > maxQuoteW {
 					quotePreview = quotePreview[:maxQuoteW-3] + "..."
@@ -2748,7 +2848,7 @@ func (m *Model) renderChatView() []string {
 				msgLines = append(msgLines, bodyPrefix+quoteLine)
 			}
 
-			wrapped := wrapStyle.Render(msg.Body)
+			wrapped := wrapStyle.Render(m.styleMentionsForDisplay(msg.Body))
 			for _, wl := range strings.Split(wrapped, "\n") {
 				msgLines = append(msgLines, bodyPrefix+wl)
 			}
@@ -2769,7 +2869,7 @@ func (m *Model) renderChatView() []string {
 				replySender = "Them"
 			}
 		}
-		replySnippet := strings.ReplaceAll(m.replyToMsg.Body, "\n", " ")
+		replySnippet := strings.ReplaceAll(m.formatMentions(m.replyToMsg.Body), "\n", " ")
 		maxSnippetW := max(15, cw-len(replySender)-25)
 		if len(replySnippet) > maxSnippetW {
 			replySnippet = replySnippet[:maxSnippetW-3] + "..."
@@ -3022,7 +3122,7 @@ func (m *Model) scrollToMessage(msgIdx int) {
 		if msg.QuotedText != "" || msg.QuotedID != "" {
 			currentLine += 1 // quote preview
 		}
-		wrapped := wrapStyle.Render(msg.Body)
+		wrapped := wrapStyle.Render(m.formatMentions(msg.Body))
 		currentLine += len(strings.Split(wrapped, "\n"))
 		end := currentLine
 		if i < len(m.activeMsgs)-1 {

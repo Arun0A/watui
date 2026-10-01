@@ -480,3 +480,19 @@ func TestUnreadReplyRetention(t *testing.T) {
 		t.Errorf("Expected QuotedSender resolved to 'Alice', got %q", unreads[1].QuotedSender)
 	}
 }
+
+func TestResolveMentionsInText(t *testing.T) {
+	adapter := &Adapter{}
+
+	// Test 1: no mentions
+	text := "Hello world"
+	if res := adapter.resolveMentionsInText(text); res != text {
+		t.Errorf("Expected %q, got %q", text, res)
+	}
+
+	// Test 2: email addresses should not be mangled
+	emailText := "hello user@example.com or user@12345.com"
+	if res := adapter.resolveMentionsInText(emailText); res != emailText {
+		t.Errorf("Expected %q, got %q", emailText, res)
+	}
+}

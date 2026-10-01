@@ -2347,3 +2347,122 @@ func TestExtractLinksAndOpenInBrowser(t *testing.T) {
 		t.Errorf("Expected previewStatus to indicate 3 opened links, got %q", model.previewStatus)
 	}
 }
+
+func TestMentionResolutionInChatAndViews(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// Set up contacts including "You" (both phone and LID) and another contact "Alice"
+	contacts := []domain.Contact{
+		{JID: "919000000000@s.whatsapp.net", Name: "You"},
+		{JID: "218227607093431@lid", Name: "You"},
+		{JID: "919876543210@s.whatsapp.net", Name: "Alice", PushName: "Alice P"},
+	}
+	model.setContacts(contacts)
+
+	// 1. Test formatMentions directly
+	rawMsg1 := "@218227607093431 hi"
+	got1 := model.formatMentions(rawMsg1)
+	if got1 != "@You hi" {
+		t.Errorf("formatMentions(%q) = %q; want %q", rawMsg1, got1, "@You hi")
+	}
+
+	rawMsg2 := "Hello @919876543210, are you here?"
+	got2 := model.formatMentions(rawMsg2)
+	if got2 != "Hello @Alice, are you here?" {
+		t.Errorf("formatMentions(%q) = %q; want %q", rawMsg2, got2, "Hello @Alice, are you here?")
+	}
+
+	// Email addresses should not be falsely matched as mentions
+	emailMsg := "Contact me at user@example.com or user@123456789.com"
+	gotEmail := model.formatMentions(emailMsg)
+	if gotEmail != emailMsg {
+		t.Errorf("formatMentions(%q) = %q; want %q", emailMsg, gotEmail, emailMsg)
+	}
+
+	// 2. Test styleMentionsForDisplay
+	styled1 := model.styleMentionsForDisplay(rawMsg1)
+	if !strings.Contains(styled1, "You") || !strings.Contains(styled1, "hi") {
+		t.Errorf("styleMentionsForDisplay(%q) = %q; expected to contain 'You' and 'hi'", rawMsg1, styled1)
+	}
+
+	// 3. Test filterContacts does not expose "You"
+	model.filterContacts("")
+	for _, c := range model.filteredList {
+		if c.Name == "You" {
+			t.Errorf("filterContacts(\"\") exposed 'You' as a contact")
+		}
+	}
+	model.filterContacts("you")
+	for _, c := range model.filteredList {
+		if c.Name == "You" {
+			t.Errorf("filterContacts(\"you\") exposed 'You' as a contact")
+		}
+	}
+
+	// 4. Test renderChatView resolves mention in message body and quote preview
+	chatMsg := domain.Message{
+		ID:         "msg_mention_1",
+		ChatID:     "120363430194759319@g.us",
+		Sender:     "919111111111@s.whatsapp.net",
+		SenderName: "AAA-Self",
+		Body:       "@218227607093431 hi",
+		QuotedText: "@919876543210 please check",
+		Type:       domain.MessageTypeText,
+		Timestamp:  time.Now(),
+	}
+	model.activeChatID = chatMsg.ChatID
+	model.activeMsgs = []domain.Message{chatMsg}
+	model.width = 80
+	model.height = 24
+	model.view = ViewChat
+
+	lines := model.renderChatView()
+	fullView := strings.Join(lines, "\n")
+	if !strings.Contains(fullView, "You") {
+		t.Errorf("renderChatView output does not contain resolved mention 'You':\n%s", fullView)
+	}
+	if !strings.Contains(fullView, "Alice") {
+		t.Errorf("renderChatView output does not contain resolved quote mention 'Alice':\n%s", fullView)
+	}
+	if strings.Contains(fullView, "@218227607093431") {
+		t.Errorf("renderChatView still contains raw LID '@218227607093431':\n%s", fullView)
+	}
+
+	// 5. Test renderUnreadListView snippet resolves mentions
+	model.unreadChats = map[string]*UnreadChat{
+		chatMsg.ChatID: {
+			ChatID:      chatMsg.ChatID,
+			Name:        "Group test",
+			IsGroup:     true,
+			UnreadCount: 1,
+			Messages:    []domain.Message{chatMsg},
+		},
+	}
+	model.chatOrder = []string{chatMsg.ChatID}
+	model.view = ViewUnreadList
+
+	unreadLines := model.renderUnreadListView()
+	fullUnread := strings.Join(unreadLines, "\n")
+	if !strings.Contains(fullUnread, "AAA-Self: @You hi") {
+		t.Errorf("renderUnreadListView output does not contain 'AAA-Self: @You hi':\n%s", fullUnread)
+	}
+
+	// 6. Test hover copy 'y' copies formatted mentions
+	model.view = ViewChat
+	model.selectedMsgIdx = 0
+
+	// Capture clipboard write
+	origWriteAll := clipboardWriteAll
+	var copiedText string
+	clipboardWriteAll = func(text string) error {
+		copiedText = text
+		return nil
+	}
+	defer func() { clipboardWriteAll = origWriteAll }()
+
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if copiedText != "@You hi" {
+		t.Errorf("Hover copy 'y' copied %q; want %q", copiedText, "@You hi")
+	}
+}
