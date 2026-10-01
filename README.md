@@ -133,7 +133,7 @@ nix develop github:Arun0A/watui
 | <kbd>Shift</kbd>+<kbd>a</kbd> / <kbd>A</kbd> | Archive / Unarchive selected conversation |
 | <kbd>n</kbd> | Start a new chat (search all contacts & groups) |
 | <kbd>d</kbd> / <kbd>r</kbd> | Dismiss selected unread conversation |
-| <kbd>?</kbd> | Toggle keybind hints |
+| <kbd>Ctrl</kbd>+<kbd>/</kbd> | Open all keybinds menu |
 | <kbd>q</kbd> / <kbd>Ctrl</kbd>+<kbd>c</kbd> | Quit watui |
 
 ### Chat View
@@ -141,10 +141,11 @@ nix develop github:Arun0A/watui
 | :--- | :--- |
 | `Type text` + <kbd>Enter</kbd> | Send message (quotes selected message if replying) |
 | <kbd>Esc</kbd> | Cancel reply / Back to inbox |
+| <kbd>Ctrl</kbd> + <kbd>/</kbd> | Open all keybinds menu |
 | <kbd>Alt</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Navigate through every message in the chat (message hover mode) |
 | <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Jump through media / document messages only |
 | <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |
-| <kbd>c</kbd> *(while hovering)* | Copy message text to clipboard |
+| <kbd>y</kbd> *(while hovering)* | Copy message text to clipboard |
 | <kbd>l</kbd> *(while hovering)* | Copy URL/link in the message to clipboard (if any) |
 | <kbd>p</kbd> *(while hovering)* | Preview selected media or open document prompt |
 | <kbd>Esc</kbd> *(while hovering)* | Defocus message hover mode and return to message box |

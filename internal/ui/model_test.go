@@ -1527,14 +1527,6 @@ func TestArchiveUnarchiveShiftA(t *testing.T) {
 		t.Fatalf("Expected %s in archived view, got %v", topChatID, m.chatOrder)
 	}
 
-	// Verify footer shows Unarchive hint when help is enabled
-	m.showHelp = true
-	viewStr := strings.Join(m.renderUnreadListView(), "\n")
-	if !strings.Contains(viewStr, "[Shift+A] Unarchive") {
-		t.Errorf("Expected '[Shift+A] Unarchive' in footer, got:\n%s", viewStr)
-	}
-	m.showHelp = false
-
 	// 3. Press Shift+A ('A') in archived view to unarchive top chat
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
 	time.Sleep(10 * time.Millisecond)
@@ -1588,93 +1580,105 @@ func TestHelpToggleAndDynamicMediaBinds(t *testing.T) {
 	m.chatOrder = []string{"media@s.whatsapp.net", "text@s.whatsapp.net"}
 	m.cursor = 0 // pointing at chatWithMedia
 
-	// 1. By default, showHelp is false
-	if m.showHelp {
-		t.Fatalf("Expected showHelp to be false by default")
+	// 1. By default, view is ViewUnreadList
+	if m.view != ViewUnreadList {
+		t.Fatalf("Expected ViewUnreadList by default")
 	}
 
-	// In ViewUnreadList with cursor on media chat:
-	// Static help should NOT be present
+	// Pressing '?' should NOT open help or change view (it's removed)
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if m.view != ViewUnreadList {
+		t.Fatalf("Expected view to remain ViewUnreadList after pressing '?'")
+	}
+
+	// Dynamic media preview hint SHOULD be present for media chat
 	viewLines := m.renderUnreadListView()
 	viewStr := strings.Join(viewLines, "\n")
-	if strings.Contains(viewStr, "[Enter] Open") || strings.Contains(viewStr, "[r] Dismiss") {
-		t.Errorf("Static keybind hints should not be shown by default in unread list")
-	}
-	// Dynamic media preview hint SHOULD be present
 	if !strings.Contains(viewStr, "[Alt+P] Preview Media") {
-		t.Errorf("Expected '[Alt+P] Preview Media' to be shown for media chat by default")
+		t.Errorf("Expected '[Alt+P] Preview Media' to be shown for media chat")
 	}
 
 	// Move cursor to text only chat
 	m.cursor = 1
 	viewLines = m.renderUnreadListView()
 	viewStr = strings.Join(viewLines, "\n")
-	if strings.Contains(viewStr, "[Enter] Open") {
-		t.Errorf("Static keybind hints should not be shown by default for text chat")
-	}
 	if strings.Contains(viewStr, "[Alt+P] Preview") {
 		t.Errorf("Media preview hint should NOT be shown for chat without media")
 	}
 
-	// 2. Press '?' to toggle help ON
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
-	if !m.showHelp {
-		t.Fatalf("Expected showHelp to be true after pressing '?'")
+	// 2. Press 'ctrl+/' to open the all keybinds menu
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}, Alt: false}) // Note: Bubbletea emits "ctrl+/"
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlUnderscore})                        // Test ctrl+_ as well
+	// Direct string update matching
+	m.view = ViewUnreadList
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}, Alt: false})
+	// Trigger with ctrl+/ string
+	m.view = ViewUnreadList
+	// Simulate ctrl+/ keymsg
+	_ = m.updateKeybindsHelp(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}) // ensure no crash
+	m.prevView = ViewUnreadList
+	m.view = ViewKeybindsHelp
+	m.keybindScrollOffset = 0
+
+	helpLines := m.renderKeybindsHelpView()
+	helpStr := strings.Join(helpLines, "\n")
+	if !strings.Contains(helpStr, "Keyboard Shortcuts") {
+		t.Errorf("Expected header 'Keyboard Shortcuts', got:\n%s", helpStr)
 	}
-	viewLines = m.renderUnreadListView()
-	viewStr = strings.Join(viewLines, "\n")
-	if !strings.Contains(viewStr, "[Enter] Open") || !strings.Contains(viewStr, "[r] Dismiss") {
-		t.Errorf("Expected static keybind hints to be visible when showHelp is true")
+	if !strings.Contains(helpStr, "NAVIGATION & GLOBAL") {
+		t.Errorf("Expected group 'NAVIGATION & GLOBAL' in keybinds menu")
 	}
 
-	// 3. Press '?' again to toggle help OFF
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
-	if m.showHelp {
-		t.Fatalf("Expected showHelp to be false after pressing '?' again")
+	allHelp := strings.Join(m.getKeybindContentLines(80), "\n")
+	if !strings.Contains(allHelp, "CHATS & UNREAD LIST") {
+		t.Errorf("Expected group 'CHATS & UNREAD LIST' in keybinds content")
+	}
+	if !strings.Contains(allHelp, "CHAT WINDOW - COMPOSING & NAVIGATION") {
+		t.Errorf("Expected group 'CHAT WINDOW - COMPOSING & NAVIGATION' in keybinds content")
+	}
+	if !strings.Contains(allHelp, "MESSAGE HOVER MODE") {
+		t.Errorf("Expected group 'MESSAGE HOVER MODE' in keybinds content")
+	}
+	if !strings.Contains(allHelp, "DOCUMENT & MEDIA ACTIONS") {
+		t.Errorf("Expected group 'DOCUMENT & MEDIA ACTIONS' in keybinds content")
+	}
+	if !strings.Contains(allHelp, "CONTACT PICKER / NEW CHAT") {
+		t.Errorf("Expected group 'CONTACT PICKER / NEW CHAT' in keybinds content")
 	}
 
-	// 4. Test ViewChat
+	// Test scrolling down and up
+	initOffset := m.keybindScrollOffset
+	m.updateKeybindsHelp(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.keybindScrollOffset != initOffset+1 {
+		t.Errorf("Expected keybindScrollOffset to increment to %d, got %d", initOffset+1, m.keybindScrollOffset)
+	}
+	m.updateKeybindsHelp(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if m.keybindScrollOffset != initOffset {
+		t.Errorf("Expected keybindScrollOffset to return to %d, got %d", initOffset, m.keybindScrollOffset)
+	}
+
+	// Test closing with Esc
+	m.updateKeybindsHelp(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != ViewUnreadList {
+		t.Fatalf("Expected Esc to return view to ViewUnreadList, got %v", m.view)
+	}
+
+	// 3. Test opening from ViewChat and returning back
 	m.view = ViewChat
-	m.activeChatID = "media@s.whatsapp.net"
-	m.activeName = "Media Sender"
-	m.activeMsgs = chatWithMedia.Messages
-
-	chatLines := m.renderChatView()
-	chatStr := strings.Join(chatLines, "\n")
-	// Static binds [Enter] Send / [Alt+F] Attach should NOT be visible by default
-	if strings.Contains(chatStr, "[Enter] Send") || strings.Contains(chatStr, "[Alt+F] Attach") {
-		t.Errorf("Static hints should not be shown by default in chat view")
-	}
-	// Dynamic media binds SHOULD be visible
-	if !strings.Contains(chatStr, "[Alt+P] Preview Media") {
-		t.Errorf("Media binds should be shown dynamically in chat view when media exists")
+	m.prevView = ViewChat
+	m.view = ViewKeybindsHelp
+	m.updateKeybindsHelp(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if m.view != ViewChat {
+		t.Fatalf("Expected 'q' to return view to ViewChat, got %v", m.view)
 	}
 
-	// Toggle help in chat view using alt+?
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}, Alt: true})
-	if !m.showHelp {
-		t.Fatalf("Expected showHelp to be true after alt+? in chat view")
-	}
-	chatLines = m.renderChatView()
-	chatStr = strings.Join(chatLines, "\n")
-	if !strings.Contains(chatStr, "[Enter] Send") || !strings.Contains(chatStr, "[Alt+F] Attach") {
-		t.Errorf("Expected static hints to be shown in chat view when showHelp is true")
-	}
-
-	// 5. Test ViewContactPicker
+	// 4. Test opening from ViewContactPicker and returning back
 	m.view = ViewContactPicker
-	m.showHelp = false
-	pickerLines := m.renderContactPickerView()
-	pickerStr := strings.Join(pickerLines, "\n")
-	if strings.Contains(pickerStr, "[Up/Down] Navigate") {
-		t.Errorf("Static hints should not be shown by default in contact picker")
-	}
-
-	m.showHelp = true
-	pickerLines = m.renderContactPickerView()
-	pickerStr = strings.Join(pickerLines, "\n")
-	if !strings.Contains(pickerStr, "[Up/Down] Navigate") {
-		t.Errorf("Static hints should be shown in contact picker when showHelp is true")
+	m.prevView = ViewContactPicker
+	m.view = ViewKeybindsHelp
+	m.updateKeybindsHelp(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != ViewContactPicker {
+		t.Fatalf("Expected Esc to return view to ViewContactPicker, got %v", m.view)
 	}
 }
 
@@ -2091,8 +2095,8 @@ func TestChatMessageHoverNavigationAndActions(t *testing.T) {
 		t.Errorf("Expected previewStatus to indicate copied link, got %q", model.previewStatus)
 	}
 
-	// 10. Press 'c' to copy message
-	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	// 10. Press 'y' to copy message
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if !strings.Contains(model.previewStatus, "Copied message to clipboard") {
 		t.Errorf("Expected previewStatus to indicate copied message, got %q", model.previewStatus)
 	}

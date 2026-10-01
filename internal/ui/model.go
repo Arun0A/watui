@@ -33,6 +33,7 @@ const (
 	ViewUnreadList ViewState = iota
 	ViewChat
 	ViewContactPicker
+	ViewKeybindsHelp
 )
 
 // UnreadChat represents a conversation with pending unread messages or a pinned chat.
@@ -57,14 +58,15 @@ type Model struct {
 	view ViewState
 
 	// Unread state
-	mu           sync.RWMutex
-	unreadChats  map[string]*UnreadChat // chatID -> UnreadChat
-	readChats    map[string]bool        // chatID -> true for chats read in active session
-	chatOrder    []string               // visible chats according to view mode
-	cursor       int
-	showArchived bool // true when viewing archived chats section
-	showHelp     bool // toggled with '?' to show static keybinds
-	cleanupDone  bool
+	mu                  sync.RWMutex
+	unreadChats         map[string]*UnreadChat // chatID -> UnreadChat
+	readChats           map[string]bool        // chatID -> true for chats read in active session
+	chatOrder           []string               // visible chats according to view mode
+	cursor              int
+	showArchived        bool // true when viewing archived chats section
+	prevView            ViewState
+	keybindScrollOffset int
+	cleanupDone         bool
 
 	// Active conversation view
 	activeChatID     string
@@ -652,6 +654,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if msg.String() == "ctrl+/" || msg.String() == "ctrl+_" {
+			if m.view == ViewKeybindsHelp {
+				m.view = m.prevView
+			} else {
+				m.prevView = m.view
+				m.view = ViewKeybindsHelp
+				m.keybindScrollOffset = 0
+			}
+			return m, tea.ClearScreen
+		}
+
 		switch m.view {
 		case ViewUnreadList:
 			cmds = append(cmds, m.updateUnreadList(msg))
@@ -659,6 +672,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateChat(msg))
 		case ViewContactPicker:
 			cmds = append(cmds, m.updateContactPicker(msg))
+		case ViewKeybindsHelp:
+			cmds = append(cmds, m.updateKeybindsHelp(msg))
 		}
 	}
 
@@ -1398,10 +1413,6 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			return tea.ClearScreen
 		}
 
-	case "?", "alt+?", "f1":
-		m.showHelp = !m.showHelp
-		return nil
-
 	case "n", "c": // new message / contact picker
 		m.view = ViewContactPicker
 		m.contactSearch.Reset()
@@ -1550,10 +1561,6 @@ func (m *Model) syncSelectedMediaIdx() {
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	// Global hotkeys in chat view
 	switch msg.String() {
-	case "alt+?", "f1":
-		m.showHelp = !m.showHelp
-		return nil
-
 	case "ctrl+c":
 		m.stopActiveViewer()
 		m.CleanupOnExit()
@@ -1584,7 +1591,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.previewStatus = ""
 			return textinput.Blink
 
-		case "c":
+		case "y":
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
 				textToCopy := target.Body
@@ -1956,10 +1963,6 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 		m.view = ViewUnreadList
 		return tea.ClearScreen
 
-	case "alt+?", "f1":
-		m.showHelp = !m.showHelp
-		return nil
-
 	case "ctrl+c":
 		m.stopActiveViewer()
 		m.CleanupOnExit()
@@ -2223,6 +2226,8 @@ func (m *Model) View() string {
 		lines = m.renderChatView()
 	case ViewContactPicker:
 		lines = m.renderContactPickerView()
+	case ViewKeybindsHelp:
+		lines = m.renderKeybindsHelpView()
 	default:
 		return ""
 	}
@@ -2448,52 +2453,19 @@ func (m *Model) renderUnreadListView() []string {
 		}
 	}
 
-	helpText := "[Enter] Open · [Shift+A] Archive · [r] Dismiss · [n] New · [q] Quit"
-	if m.showArchived {
-		if selectedHasMedia {
-			helpText = "[Enter] Open · [Shift+A] Unarchive · [a/Esc] Back to Unreads · [Alt+P] Preview · [r] Dismiss · [q] Quit"
+	if selectedHasMedia && statusNotice != "" {
+		mediaHint := "[Alt+P] Preview Media"
+		if lipgloss.Width(mediaHint)+3+lipgloss.Width(statusNotice) <= cw {
+			lines = append(lines, helpStyle.Render(mediaHint)+" · "+statusNotice)
 		} else {
-			helpText = "[Enter] Open · [Shift+A] Unarchive · [a/Esc] Back to Unreads · [r] Dismiss · [q] Quit"
-		}
-	} else if archivedCount > 0 {
-		if selectedHasMedia {
-			helpText = fmt.Sprintf("[Enter] Open · [Shift+A] Archive · [a] Archived (%d) · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit", archivedCount)
-		} else {
-			helpText = fmt.Sprintf("[Enter] Open · [Shift+A] Archive · [a] Archived (%d) · [r] Dismiss · [n] New · [q] Quit", archivedCount)
+			lines = append(lines, statusNotice)
 		}
 	} else if selectedHasMedia {
-		helpText = "[Enter] Open · [Shift+A] Archive · [Alt+P] Preview · [r] Dismiss · [n] New · [q] Quit"
-	}
-
-	if m.showHelp {
-		if statusNotice != "" {
-			if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
-				if cw >= lipgloss.Width(statusNotice)+12 {
-					lines = append(lines, helpStyle.Render("[q] Quit")+" · "+statusNotice)
-				} else {
-					lines = append(lines, statusNotice)
-				}
-			} else {
-				lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
-			}
-		} else {
-			lines = append(lines, helpStyle.Render(helpText))
-		}
+		lines = append(lines, helpStyle.Render("[Alt+P] Preview Media"))
+	} else if statusNotice != "" {
+		lines = append(lines, statusNotice)
 	} else {
-		if selectedHasMedia && statusNotice != "" {
-			mediaHint := "[Alt+P] Preview Media"
-			if lipgloss.Width(mediaHint)+3+lipgloss.Width(statusNotice) <= cw {
-				lines = append(lines, helpStyle.Render(mediaHint)+" · "+statusNotice)
-			} else {
-				lines = append(lines, statusNotice)
-			}
-		} else if selectedHasMedia {
-			lines = append(lines, helpStyle.Render("[Alt+P] Preview Media"))
-		} else if statusNotice != "" {
-			lines = append(lines, statusNotice)
-		} else {
-			lines = append(lines, "")
-		}
+		lines = append(lines, "")
 	}
 	return lines
 }
@@ -2728,12 +2700,10 @@ func (m *Model) renderChatView() []string {
 	lines = append(lines, inputLines...)
 
 	mediaIndices := m.getChatMediaIndices()
-	var helpText string
 	var dynamicHelp string
 
 	if m.selectedMsgIdx >= 0 {
-		helpText = "[r] Reply · [c] Copy · [l] Copy Link · [p] Preview · [Alt+↑/↓] Move · [Esc] Input"
-		dynamicHelp = "[r] Reply · [c] Copy · [l] Link · [p] Preview · [Esc] Input"
+		dynamicHelp = "[r] Reply · [y] Copy · [l] Link · [p] Preview · [Esc] Input"
 	} else {
 		mediaHelp := ""
 		if len(mediaIndices) > 1 {
@@ -2741,16 +2711,6 @@ func (m *Model) renderChatView() []string {
 		} else if len(mediaIndices) == 1 {
 			mediaHelp = "[Alt+P] Preview Media"
 		}
-
-		if m.cfg.IsHistoryPersistEnabled() {
-			helpText = "[Enter] Send · [Ctrl+U] Load 5 · [Alt+↑/↓] Select · [Alt+Shift+↑/↓] Media · [Esc] Back"
-		} else {
-			helpText = "[Enter] Send · [Alt+↑/↓] Select · [Alt+Shift+↑/↓] Media · [Alt+F] Attach · [Esc] Back"
-		}
-		if mediaHelp != "" {
-			helpText += " · " + mediaHelp
-		}
-		helpText += scrollInfo
 
 		dynamicHelp = mediaHelp
 		if dynamicHelp != "" && scrollInfo != "" {
@@ -2771,34 +2731,18 @@ func (m *Model) renderChatView() []string {
 		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
 	}
 
-	if m.showHelp {
-		if statusNotice != "" {
-			if lipgloss.Width(helpText)+3+lipgloss.Width(statusNotice) > cw {
-				if cw >= lipgloss.Width(statusNotice)+14 {
-					lines = append(lines, helpStyle.Render("[Esc] Back")+" · "+statusNotice)
-				} else {
-					lines = append(lines, statusNotice)
-				}
-			} else {
-				lines = append(lines, helpStyle.Render(helpText)+" · "+statusNotice)
-			}
+	if dynamicHelp != "" && statusNotice != "" {
+		if lipgloss.Width(dynamicHelp)+3+lipgloss.Width(statusNotice) <= cw {
+			lines = append(lines, helpStyle.Render(dynamicHelp)+" · "+statusNotice)
 		} else {
-			lines = append(lines, helpStyle.Render(helpText))
-		}
-	} else {
-		if dynamicHelp != "" && statusNotice != "" {
-			if lipgloss.Width(dynamicHelp)+3+lipgloss.Width(statusNotice) <= cw {
-				lines = append(lines, helpStyle.Render(dynamicHelp)+" · "+statusNotice)
-			} else {
-				lines = append(lines, statusNotice)
-			}
-		} else if dynamicHelp != "" {
-			lines = append(lines, helpStyle.Render(dynamicHelp))
-		} else if statusNotice != "" {
 			lines = append(lines, statusNotice)
-		} else {
-			lines = append(lines, "")
 		}
+	} else if dynamicHelp != "" {
+		lines = append(lines, helpStyle.Render(dynamicHelp))
+	} else if statusNotice != "" {
+		lines = append(lines, statusNotice)
+	} else {
+		lines = append(lines, "")
 	}
 
 	return lines
@@ -2893,11 +2837,7 @@ func (m *Model) renderContactPickerView() []string {
 	}
 
 	lines = append(lines, "")
-	if m.showHelp {
-		lines = append(lines, helpStyle.Render("[Up/Down] Navigate · [Enter] Select & Compose · [Esc] Cancel"))
-	} else {
-		lines = append(lines, "")
-	}
+	lines = append(lines, "")
 
 	return lines
 }
