@@ -146,7 +146,7 @@ nix develop github:Arun0A/watui
 | <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Jump through media / document messages only |
 | <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |
 | <kbd>y</kbd> *(while hovering)* | Copy message text to clipboard |
-| <kbd>l</kbd> *(while hovering)* | Copy URL/link in the message to clipboard (if any) |
+| <kbd>l</kbd> *(while hovering)* | Open link(s) in default browser |
 | <kbd>p</kbd> *(while hovering)* | Preview selected media or open document prompt |
 | <kbd>Esc</kbd> *(while hovering)* | Defocus message hover mode and return to message box |
 | <kbd>Alt</kbd> + <kbd>p</kbd> | Preview most recent media attachment (or preview highlighted chat in inbox) |

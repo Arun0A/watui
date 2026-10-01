@@ -67,7 +67,7 @@ var allKeybindGroups = []keybindGroup{
 			{key: "Alt+Shift+J / K", desc: "Jump to next / previous media message"},
 			{key: "r", desc: "Reply to hovered message (focuses input box)"},
 			{key: "y", desc: "Copy hovered message text to system clipboard"},
-			{key: "l", desc: "Copy URL link from message to system clipboard"},
+			{key: "l", desc: "Open link(s) from hovered message in OS default browser"},
 			{key: "p", desc: "Preview hovered media or document in viewer"},
 			{key: "PgUp / Ctrl+Y", desc: "Scroll chat history up 5 lines"},
 			{key: "PgDn / Ctrl+D / Ctrl+E", desc: "Scroll chat history down 5 lines"},

@@ -1599,7 +1599,49 @@ func (m *Model) CleanupOnExit() {
 	}
 }
 
-var linkRegex = regexp.MustCompile(`https?://[^\s<>"']+[^\s<>"'.,!?;:)]`)
+var linkRegex = regexp.MustCompile(`(?:https?://|www\.)[^\s<>"']+[^\s<>"'.,!?;:)]`)
+
+func extractLinks(body string) []string {
+	matches := linkRegex.FindAllString(body, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(matches))
+	var links []string
+	for _, m := range matches {
+		u := m
+		if strings.HasPrefix(strings.ToLower(u), "www.") {
+			u = "https://" + u
+		}
+		if !seen[u] {
+			seen[u] = true
+			links = append(links, u)
+		}
+	}
+	return links
+}
+
+var openInBrowser = func(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		_ = cmd.Wait()
+	}()
+	return nil
+}
 
 func copyToClipboard(text string) error {
 	_, _ = fmt.Fprint(os.Stderr, osc52.New(text))
@@ -1669,16 +1711,27 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		case "l":
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
-				match := linkRegex.FindString(target.Body)
-				if match == "" {
+				links := extractLinks(target.Body)
+				if len(links) == 0 {
 					m.previewStatus = "No link in message"
-				} else {
-					_ = copyToClipboard(match)
-					disp := match
+					return nil
+				}
+				opened := 0
+				for _, link := range links {
+					if err := openInBrowser(link); err == nil {
+						opened++
+					}
+				}
+				if opened == 0 {
+					m.previewStatus = "Failed to open link(s) in browser"
+				} else if opened == 1 {
+					disp := links[0]
 					if len(disp) > 35 {
 						disp = disp[:32] + "..."
 					}
-					m.previewStatus = "Copied link: " + disp
+					m.previewStatus = "Opened: " + disp
+				} else {
+					m.previewStatus = fmt.Sprintf("Opened %d links in browser", opened)
 				}
 			}
 			return nil

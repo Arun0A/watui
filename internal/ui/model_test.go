@@ -2089,10 +2089,21 @@ func TestChatMessageHoverNavigationAndActions(t *testing.T) {
 		t.Errorf("Expected previewStatus to indicate no media, got %q", model.previewStatus)
 	}
 
-	// 9. Press 'l' to copy link
+	// 9. Press 'l' to open link in default browser
+	origOpen := openInBrowser
+	var openedURLs []string
+	openInBrowser = func(u string) error {
+		openedURLs = append(openedURLs, u)
+		return nil
+	}
+	defer func() { openInBrowser = origOpen }()
+
 	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
-	if !strings.Contains(model.previewStatus, "Copied link: https://github.com/Arun0A/watui") {
-		t.Errorf("Expected previewStatus to indicate copied link, got %q", model.previewStatus)
+	if !strings.Contains(model.previewStatus, "Opened: https://github.com/Arun0A/watui") {
+		t.Errorf("Expected previewStatus to indicate opened link, got %q", model.previewStatus)
+	}
+	if len(openedURLs) != 1 || openedURLs[0] != "https://github.com/Arun0A/watui" {
+		t.Errorf("Expected openedURLs to have [https://github.com/Arun0A/watui], got %v", openedURLs)
 	}
 
 	// 10. Press 'y' to copy message
@@ -2279,5 +2290,60 @@ func TestGroupChatSenderContactNameResolution(t *testing.T) {
 	inboxRendered := strings.Join(model.renderUnreadListView(), "\n")
 	if !strings.Contains(inboxRendered, "Dastageer Siddiqui Dastageer: foooood") {
 		t.Errorf("Expected inbox snippet to show 'Dastageer Siddiqui Dastageer: foooood', got:\n%s", inboxRendered)
+	}
+}
+
+func TestExtractLinksAndOpenInBrowser(t *testing.T) {
+	// 1. Test extractLinks function directly
+	text := "Check out https://golang.org and https://github.com/Arun0A/watui, also www.example.com/test! And repeat https://golang.org."
+	links := extractLinks(text)
+	expected := []string{
+		"https://golang.org",
+		"https://github.com/Arun0A/watui",
+		"https://www.example.com/test",
+	}
+	if len(links) != len(expected) {
+		t.Fatalf("Expected %d links, got %d: %v", len(expected), len(links), links)
+	}
+	for i, exp := range expected {
+		if links[i] != exp {
+			t.Errorf("Link[%d]: expected %q, got %q", i, exp, links[i])
+		}
+	}
+
+	// 2. Test opening multiple links when pressing 'l' in hover mode
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 80
+	model.height = 24
+
+	multiLinkMsg := domain.Message{
+		ID:        "msg_multi_link",
+		ChatID:    "test@s.whatsapp.net",
+		Sender:    "test@s.whatsapp.net",
+		Body:      text,
+		Type:      domain.MessageTypeText,
+		Timestamp: time.Now(),
+	}
+
+	model.activeChatID = "test@s.whatsapp.net"
+	model.activeMsgs = []domain.Message{multiLinkMsg}
+	model.selectedMsgIdx = 0
+	model.view = ViewChat
+
+	origOpen := openInBrowser
+	var opened []string
+	openInBrowser = func(u string) error {
+		opened = append(opened, u)
+		return nil
+	}
+	defer func() { openInBrowser = origOpen }()
+
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if len(opened) != 3 {
+		t.Fatalf("Expected 3 opened links, got %d: %v", len(opened), opened)
+	}
+	if !strings.Contains(model.previewStatus, "Opened 3 links in browser") {
+		t.Errorf("Expected previewStatus to indicate 3 opened links, got %q", model.previewStatus)
 	}
 }
