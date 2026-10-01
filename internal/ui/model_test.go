@@ -1688,6 +1688,30 @@ func TestHelpToggleAndDynamicMediaBinds(t *testing.T) {
 	if m.view != ViewContactPicker {
 		t.Fatalf("Expected Esc to return view to ViewContactPicker, got %v", m.view)
 	}
+
+	// 5. Test toggling with Ctrl+H
+	m.view = ViewUnreadList
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
+	m = updated.(*Model)
+	if m.view != ViewKeybindsHelp {
+		t.Fatalf("Expected Ctrl+H to open ViewKeybindsHelp, got %v", m.view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
+	m = updated.(*Model)
+	if m.view != ViewUnreadList {
+		t.Fatalf("Expected second Ctrl+H to toggle back to ViewUnreadList, got %v", m.view)
+	}
+
+	// 6. Test toggling with F1
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyF1})
+	m = updated.(*Model)
+	if m.view != ViewKeybindsHelp {
+		t.Fatalf("Expected F1 to open ViewKeybindsHelp, got %v", m.view)
+	}
+	m.updateKeybindsHelp(tea.KeyMsg{Type: tea.KeyF1})
+	if m.view != ViewUnreadList {
+		t.Fatalf("Expected F1 to close ViewKeybindsHelp, got %v", m.view)
+	}
 }
 
 func TestMultiLineMessageShiftEnter(t *testing.T) {
@@ -2872,5 +2896,29 @@ func TestClipboardPasteHandling(t *testing.T) {
 	}
 	if model.previewStatus != "Normal" {
 		t.Errorf("Expected previewStatus unchanged when clipboard_paste disabled, got %q", model.previewStatus)
+	}
+}
+
+func TestCleanupOnExitClearsClipboardCache(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// Create a dummy clipboard cache file
+	pngData := []byte("\x89PNG\r\n\x1a\nexit-test-bytes")
+	targetPath, err := saveClipboardImage(pngData)
+	if err != nil {
+		t.Fatalf("saveClipboardImage failed: %v", err)
+	}
+
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("Expected file to exist before exit: %v", err)
+	}
+
+	// Exit TUI
+	model.CleanupOnExit()
+
+	// Verify file is cleared
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		t.Errorf("Expected file to be removed after CleanupOnExit, got err=%v", err)
 	}
 }

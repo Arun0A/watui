@@ -169,6 +169,7 @@ type groupParticipantsMsg struct {
 
 // NewModel initializes the TUI model.
 func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*config.Config) *Model {
+	_ = ClearClipboardCache()
 	ti := textarea.New()
 	ti.Placeholder = "Type a message..."
 	ti.CharLimit = 4096
@@ -739,7 +740,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if msg.String() == "ctrl+/" || msg.String() == "ctrl+_" {
+		if msg.String() == "ctrl+/" || msg.String() == "ctrl+_" || msg.String() == "ctrl+h" || msg.Type == tea.KeyCtrlH || msg.Type == tea.KeyF1 {
 			if m.view == ViewKeybindsHelp {
 				m.view = m.prevView
 			} else {
@@ -1724,6 +1725,7 @@ func (m *Model) CleanupOnExit() {
 		case <-cleanupCtx.Done():
 		}
 	}
+	_ = ClearClipboardCache()
 }
 
 var linkRegex = regexp.MustCompile(`(?:https?://|www\.)[^\s<>"']+[^\s<>"'.,!?;:)]`)

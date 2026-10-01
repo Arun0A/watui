@@ -22,7 +22,7 @@ var allKeybindGroups = []keybindGroup{
 	{
 		title: "NAVIGATION & GLOBAL",
 		items: []keybindEntry{
-			{key: "Ctrl+/ (Ctrl+_)", desc: "Toggle this all-keybinds menu from anywhere"},
+			{key: "Ctrl+H / Ctrl+/ (F1)", desc: "Toggle this all-keybinds menu from anywhere"},
 			{key: "Esc / q", desc: "Close this menu and return to previous view"},
 			{key: "Ctrl+C", desc: "Quit watui cleanly"},
 			{key: "Alt+X", desc: "Stop active external media / document viewer"},
@@ -147,7 +147,7 @@ func (m *Model) renderKeybindsHelpView() []string {
 		selectedTitleStyle.Render("Keyboard Shortcuts"),
 		statusStyle.Render("· [Esc/q] Back"),
 	)
-	rightPart := jidStyle.Render("[Ctrl+/] Close")
+	rightPart := jidStyle.Render("[Ctrl+H / Ctrl+/] Close")
 	leftW := lipgloss.Width(leftPart)
 	rightW := lipgloss.Width(rightPart)
 
@@ -195,7 +195,7 @@ func (m *Model) renderKeybindsHelpView() []string {
 		}
 		scrollInfo = fmt.Sprintf(" [%d%% - %d/%d]", scrollPct, start+1, totalContent)
 	}
-	footerText := helpStyle.Render("[Esc/q/Ctrl+/] Back · [j/k/PgUp/PgDn] Scroll") + statusStyle.Render(scrollInfo)
+	footerText := helpStyle.Render("[Esc/q/Ctrl+H] Back · [j/k/PgUp/PgDn] Scroll") + statusStyle.Render(scrollInfo)
 	lines = append(lines, footerText)
 
 	return lines
@@ -203,7 +203,7 @@ func (m *Model) renderKeybindsHelpView() []string {
 
 func (m *Model) updateKeybindsHelp(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
-	case "esc", "q", "ctrl+/", "ctrl+_":
+	case "esc", "q", "ctrl+/", "ctrl+_", "ctrl+h", "f1":
 		m.view = m.prevView
 		return tea.ClearScreen
 

@@ -37,6 +37,7 @@ func main() {
 	daemonMode := flag.Bool("daemon", false, "Run in background notification daemon mode (start, stop, status, restart)")
 	flag.BoolVar(daemonMode, "d", false, "Run in background notification daemon mode (shorthand)")
 	daemonWorker := flag.Bool("daemon-worker", false, "Internal background worker process")
+	clearClipboard := flag.Bool("clear-clipboard", false, "Clear all cached clipboard files and exit")
 
 	configHelp := "Path to optional YAML or JSON config file (default: ./watui.yaml"
 	if runtime.GOOS != "windows" {
@@ -49,6 +50,7 @@ func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+		fmt.Fprintf(out, "  --clear-clipboard\n    \tClear all cached clipboard files and exit\n")
 		fmt.Fprintf(out, "  --no-tui <jid> <msg>\n    \tSend a message directly via CLI without launching TUI\n")
 		fmt.Fprintf(out, "  -cli\n    \tRun in headless CLI stream mode instead of interactive TUI\n")
 		fmt.Fprintf(out, "  -config string\n    \t%s\n", configHelp)
@@ -77,12 +79,28 @@ func main() {
 	}
 	finalDBPath = config.ResolveDBPath(finalDBPath)
 
+	if *clearClipboard {
+		if err := ui.ClearClipboardCache(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error clearing clipboard cache: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Clipboard cache cleared successfully.")
+		return
+	}
+
 	// Determine daemon subcommand if specified
 	subcommand := ""
 	args := flag.Args()
 	var sendArgs []string
 	if len(args) > 0 {
 		switch args[0] {
+		case "clear-clipboard", "clean-clipboard":
+			if err := ui.ClearClipboardCache(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error clearing clipboard cache: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Clipboard cache cleared successfully.")
+			return
 		case "daemon":
 			*daemonMode = true
 			if len(args) > 1 {

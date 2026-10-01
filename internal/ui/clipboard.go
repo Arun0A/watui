@@ -53,6 +53,176 @@ func getClipboardCacheDir() (string, error) {
 	return cacheDir, nil
 }
 
+func getClipboardCacheDirs() []string {
+	seen := make(map[string]bool)
+	dirs := []string{}
+
+	addDir := func(d string) {
+		if d == "" {
+			return
+		}
+		clean := filepath.Clean(d)
+		if !seen[clean] {
+			seen[clean] = true
+			dirs = append(dirs, clean)
+		}
+	}
+
+	// 1. Standard user cache dir (Linux: ~/.cache, macOS: ~/Library/Caches, Windows: %LocalAppData%)
+	if uCache, err := os.UserCacheDir(); err == nil && uCache != "" {
+		addDir(filepath.Join(uCache, "watui", "clipboard"))
+	}
+
+	// 2. User home dir based fallbacks
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		addDir(filepath.Join(home, ".cache", "watui", "clipboard"))
+		addDir(filepath.Join(home, "Library", "Caches", "watui", "clipboard"))
+		addDir(filepath.Join(home, "AppData", "Local", "watui", "clipboard"))
+	}
+
+	// 3. Environment variables
+	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
+		addDir(filepath.Join(xdg, "watui", "clipboard"))
+	}
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		addDir(filepath.Join(localAppData, "watui", "clipboard"))
+	}
+	if appData := os.Getenv("APPDATA"); appData != "" {
+		addDir(filepath.Join(appData, "watui", "clipboard"))
+	}
+
+	// 4. Temporary directories across platforms
+	addDir(filepath.Join(os.TempDir(), "watui-clipboard"))
+	addDir(filepath.Join("/tmp", "watui-clipboard"))
+	if winTemp := os.Getenv("TEMP"); winTemp != "" {
+		addDir(filepath.Join(winTemp, "watui-clipboard"))
+	}
+	if winTmp := os.Getenv("TMP"); winTmp != "" {
+		addDir(filepath.Join(winTmp, "watui-clipboard"))
+	}
+
+	// 5. Portable executable directory (if running standalone or portable)
+	if exePath, err := os.Executable(); err == nil && exePath != "" {
+		exeDir := filepath.Dir(exePath)
+		addDir(filepath.Join(exeDir, "cache", "clipboard"))
+		addDir(filepath.Join(exeDir, "clipboard"))
+	}
+
+	return dirs
+}
+
+func removeFileCrossPlatform(path string) error {
+	// On Windows, read-only permissions cause os.Remove to return Access is Denied.
+	// Setting writable permissions ensures clean removal.
+	_ = os.Chmod(path, 0666)
+
+	err := os.Remove(path)
+	if err != nil && runtime.GOOS == "windows" {
+		// On Windows, if a file handle is briefly held by an indexer or antivirus, retry once.
+		time.Sleep(20 * time.Millisecond)
+		err = os.Remove(path)
+	}
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// ClearClipboardCache removes all temporary files stored in watui clipboard cache directories across Linux, macOS, and Windows.
+func ClearClipboardCache() error {
+	dirs := getClipboardCacheDirs()
+
+	for _, d := range dirs {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				_ = removeFileCrossPlatform(filepath.Join(d, entry.Name()))
+			}
+		}
+	}
+
+	// Also clean up any lingering CLI clipboard scratch files in temporary directories
+	tempDirs := []string{os.TempDir()}
+	if runtime.GOOS != "windows" {
+		tempDirs = append(tempDirs, "/tmp")
+	}
+	if t := os.Getenv("TEMP"); t != "" {
+		tempDirs = append(tempDirs, t)
+	}
+	if t := os.Getenv("TMP"); t != "" {
+		tempDirs = append(tempDirs, t)
+	}
+
+	seenTemp := make(map[string]bool)
+	for _, td := range tempDirs {
+		cleanTD := filepath.Clean(td)
+		if seenTemp[cleanTD] {
+			continue
+		}
+		seenTemp[cleanTD] = true
+
+		entries, err := os.ReadDir(cleanTD)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasPrefix(name, "mac_clip_") || strings.HasPrefix(name, "win_clip_") || strings.HasPrefix(name, "watui_clip_") {
+				_ = removeFileCrossPlatform(filepath.Join(cleanTD, name))
+			}
+		}
+	}
+
+	return nil
+}
+
+// ClearSystemClipboard clears the system clipboard across Linux (X11 & Wayland), macOS, and Windows.
+func ClearSystemClipboard() error {
+	// 1. golang.design/x/clipboard
+	if err := initClipboard(); err == nil {
+		_, _ = clipboard.Write(context.Background(), clipboard.FmtText, []byte{})
+	}
+
+	// 2. atotto clipboard
+	_ = atotto_clipboard.WriteAll("")
+
+	// 3. Platform-specific CLI tools
+	switch runtime.GOOS {
+	case "darwin":
+		if p, err := exec.LookPath("pbcopy"); err == nil {
+			cmd := exec.Command(p)
+			cmd.Stdin = strings.NewReader("")
+			_ = cmd.Run()
+		}
+	case "windows":
+		if p, err := exec.LookPath("clip"); err == nil {
+			cmd := exec.Command(p)
+			cmd.Stdin = strings.NewReader("")
+			_ = cmd.Run()
+		}
+	default:
+		if os.Getenv("WAYLAND_DISPLAY") != "" {
+			if p, err := exec.LookPath("wl-copy"); err == nil {
+				_ = exec.Command(p, "--clear").Run()
+			}
+		}
+		if os.Getenv("DISPLAY") != "" {
+			if p, err := exec.LookPath("xclip"); err == nil {
+				cmd := exec.Command(p, "-selection", "clipboard")
+				cmd.Stdin = strings.NewReader("")
+				_ = cmd.Run()
+			}
+		}
+	}
+	return nil
+}
+
 func detectImageExtension(data []byte) string {
 	if len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n" {
 		return ".png"
@@ -145,7 +315,11 @@ func readImageFromCLI(ctx context.Context) ([]byte, error) {
 	// macOS osascript
 	if runtime.GOOS == "darwin" {
 		if path, err := exec.LookPath("osascript"); err == nil {
-			tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("mac_clip_%d.png", time.Now().UnixNano()))
+			targetDir, err := getClipboardCacheDir()
+			if err != nil {
+				targetDir = os.TempDir()
+			}
+			tmpPath := filepath.Join(targetDir, fmt.Sprintf("mac_clip_%d.png", time.Now().UnixNano()))
 			script := fmt.Sprintf(`
 				try
 					set png_data to the clipboard as «class PNGf»
@@ -161,7 +335,7 @@ func readImageFromCLI(ctx context.Context) ([]byte, error) {
 				end try`, tmpPath, tmpPath)
 			cmd := exec.CommandContext(ctx, path, "-e", script)
 			if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) == "ok" {
-				defer os.Remove(tmpPath)
+				defer removeFileCrossPlatform(tmpPath)
 				if bytes, err := os.ReadFile(tmpPath); err == nil && len(bytes) > 0 {
 					return bytes, nil
 				}
@@ -172,11 +346,16 @@ func readImageFromCLI(ctx context.Context) ([]byte, error) {
 	// Windows PowerShell
 	if runtime.GOOS == "windows" {
 		if path, err := exec.LookPath("powershell"); err == nil {
-			tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("win_clip_%d.png", time.Now().UnixNano()))
-			psScript := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $img.Save('%s', [System.Drawing.Imaging.ImageFormat]::Png); Write-Output "ok" }`, tmpPath)
+			targetDir, err := getClipboardCacheDir()
+			if err != nil {
+				targetDir = os.TempDir()
+			}
+			tmpPath := filepath.Join(targetDir, fmt.Sprintf("win_clip_%d.png", time.Now().UnixNano()))
+			escapedPath := filepath.ToSlash(tmpPath)
+			psScript := fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $img.Save('%s', [System.Drawing.Imaging.ImageFormat]::Png); Write-Output "ok" }`, escapedPath)
 			cmd := exec.CommandContext(ctx, path, "-NoProfile", "-Command", psScript)
 			if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) == "ok" {
-				defer os.Remove(tmpPath)
+				defer removeFileCrossPlatform(tmpPath)
 				if bytes, err := os.ReadFile(tmpPath); err == nil && len(bytes) > 0 {
 					return bytes, nil
 				}

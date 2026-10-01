@@ -132,8 +132,7 @@ nix develop github:Arun0A/watui
 | <kbd>a</kbd> | Toggle Archived chats section (press again or <kbd>Esc</kbd> to return) |
 | <kbd>Shift</kbd>+<kbd>a</kbd> / <kbd>A</kbd> | Archive / Unarchive selected conversation |
 | <kbd>n</kbd> | Start a new chat (search all contacts & groups) |
-| <kbd>d</kbd> / <kbd>r</kbd> | Dismiss selected unread conversation |
-| <kbd>Ctrl</kbd>+<kbd>/</kbd> | Open all keybinds menu |
+| <kbd>Ctrl</kbd>+<kbd>h</kbd> / <kbd>Ctrl</kbd>+<kbd>/</kbd> | Open all keybinds menu (also <kbd>F1</kbd>) |
 | <kbd>q</kbd> / <kbd>Ctrl</kbd>+<kbd>c</kbd> | Quit watui |
 
 ### Chat View
@@ -141,7 +140,7 @@ nix develop github:Arun0A/watui
 | :--- | :--- |
 | `Type text` + <kbd>Enter</kbd> | Send message (quotes selected message if replying) |
 | <kbd>Esc</kbd> | Cancel reply / Back to inbox |
-| <kbd>Ctrl</kbd> + <kbd>/</kbd> | Open all keybinds menu |
+| <kbd>Ctrl</kbd> + <kbd>h</kbd> / <kbd>Ctrl</kbd> + <kbd>/</kbd> | Open all keybinds menu (also <kbd>F1</kbd>) |
 | <kbd>Alt</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Navigate through every message in the chat (message hover mode) |
 | <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Jump through media / document messages only |
 | <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |

@@ -118,3 +118,64 @@ func TestReadClipboardFallbackTextAndURI(t *testing.T) {
 		t.Errorf("Expected media item with path %q, got %+v", docFile, item)
 	}
 }
+
+func TestClearClipboardCache(t *testing.T) {
+	pngData := []byte("\x89PNG\r\n\x1a\ntest-cleanup-bytes")
+	targetPath, err := saveClipboardImage(pngData)
+	if err != nil {
+		t.Fatalf("saveClipboardImage failed: %v", err)
+	}
+
+	// Verify file exists
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("Expected clipboard file to exist before clear: %v", err)
+	}
+
+	// Also create a read-only file in cache directory to verify cross-platform removal
+	cacheDir := filepath.Dir(targetPath)
+	readOnlyFile := filepath.Join(cacheDir, "clip_readonly_test.png")
+	if err := os.WriteFile(readOnlyFile, pngData, 0444); err != nil {
+		t.Fatalf("Failed to create read-only test file: %v", err)
+	}
+	_ = os.Chmod(readOnlyFile, 0444)
+
+	// Clear cache
+	if err := ClearClipboardCache(); err != nil {
+		t.Fatalf("ClearClipboardCache failed: %v", err)
+	}
+
+	// Verify files have been deleted
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		t.Errorf("Expected clipboard file to be removed after ClearClipboardCache, got err=%v", err)
+	}
+	if _, err := os.Stat(readOnlyFile); !os.IsNotExist(err) {
+		t.Errorf("Expected read-only clipboard file to be removed after ClearClipboardCache, got err=%v", err)
+	}
+}
+
+func TestCrossPlatformScratchCleanup(t *testing.T) {
+	// Simulate temporary scratch files created by macOS and Windows CLI fallbacks
+	macScratch := filepath.Join(os.TempDir(), "mac_clip_test_123.png")
+	winScratch := filepath.Join(os.TempDir(), "win_clip_test_456.png")
+	_ = os.WriteFile(macScratch, []byte("mac dummy"), 0644)
+	_ = os.WriteFile(winScratch, []byte("win dummy"), 0644)
+
+	if err := ClearClipboardCache(); err != nil {
+		t.Fatalf("ClearClipboardCache failed: %v", err)
+	}
+
+	if _, err := os.Stat(macScratch); !os.IsNotExist(err) {
+		t.Errorf("Expected mac scratch file %q to be cleared", macScratch)
+	}
+	if _, err := os.Stat(winScratch); !os.IsNotExist(err) {
+		t.Errorf("Expected win scratch file %q to be cleared", winScratch)
+	}
+}
+
+func TestClearSystemClipboard(t *testing.T) {
+	// Ensures ClearSystemClipboard runs without runtime error or panic on any OS
+	err := ClearSystemClipboard()
+	if err != nil {
+		t.Errorf("ClearSystemClipboard failed: %v", err)
+	}
+}
