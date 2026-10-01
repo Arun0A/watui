@@ -2726,3 +2726,134 @@ func TestDisableReactionsInChat(t *testing.T) {
 		t.Errorf("Expected reactions to be displayed when disable_reactions=false, got:\n%s", renderedEnabled)
 	}
 }
+
+func TestClipboardPasteHandling(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.activeChatID = "123456@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.view = ViewChat
+	model.width = 80
+	model.height = 24
+	model.activeMsgs = []domain.Message{
+		{ID: "m1", Body: "First message", Type: domain.MessageTypeText},
+		{ID: "m2", Body: "Second message", Type: domain.MessageTypeText},
+	}
+
+	origFunc := readClipboardFunc
+	defer func() { readClipboardFunc = origFunc }()
+
+	// 1. Paste image via ctrl+v
+	readClipboardFunc = func(ctx context.Context) (*ClipboardItem, error) {
+		return &ClipboardItem{
+			IsMedia:  true,
+			FilePath: "/tmp/sample_screenshot.png",
+			FileName: "sample_screenshot.png",
+		}, nil
+	}
+
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd for ctrl+v")
+	}
+	msg := cmd()
+	model.Update(msg)
+
+	expectedPrefix := "file:///tmp/sample_screenshot.png "
+	if model.input.Value() != expectedPrefix {
+		t.Errorf("Expected input %q, got %q", expectedPrefix, model.input.Value())
+	}
+	if !strings.Contains(model.previewStatus, "Attached sample_screenshot.png") {
+		t.Errorf("Expected previewStatus to indicate attachment, got %q", model.previewStatus)
+	}
+
+	// 2. Paste file when user already typed a caption
+	model.input.SetValue("Please check this urgently!")
+	readClipboardFunc = func(ctx context.Context) (*ClipboardItem, error) {
+		return &ClipboardItem{
+			IsMedia:  true,
+			FilePath: "/home/user/invoice.pdf",
+			FileName: "invoice.pdf",
+		}, nil
+	}
+
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}, Alt: true})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd for alt+v")
+	}
+	msg = cmd()
+	model.Update(msg)
+
+	expectedWithCaption := "file:///home/user/invoice.pdf Please check this urgently!"
+	if model.input.Value() != expectedWithCaption {
+		t.Errorf("Expected input with preserved caption %q, got %q", expectedWithCaption, model.input.Value())
+	}
+
+	// 3. Paste file path containing spaces (should be quoted for parseFileURI)
+	model.input.Reset()
+	readClipboardFunc = func(ctx context.Context) (*ClipboardItem, error) {
+		return &ClipboardItem{
+			IsMedia:  true,
+			FilePath: "/home/user/My Photos/vacation 2026.jpg",
+			FileName: "vacation 2026.jpg",
+		}, nil
+	}
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	msg = cmd()
+	model.Update(msg)
+
+	expectedQuoted := "file://\"/home/user/My Photos/vacation 2026.jpg\" "
+	if model.input.Value() != expectedQuoted {
+		t.Errorf("Expected quoted file URI %q, got %q", expectedQuoted, model.input.Value())
+	}
+
+	// 4. Paste plain text
+	model.input.Reset()
+	readClipboardFunc = func(ctx context.Context) (*ClipboardItem, error) {
+		return &ClipboardItem{
+			IsMedia: false,
+			Text:    "Hello world from clipboard!",
+		}, nil
+	}
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	msg = cmd()
+	model.Update(msg)
+
+	if model.input.Value() != "Hello world from clipboard!" {
+		t.Errorf("Expected plain text in input, got %q", model.input.Value())
+	}
+
+	// 5. Paste while in message hover mode
+	model.selectedMsgIdx = 1
+	model.input.Blur()
+	readClipboardFunc = func(ctx context.Context) (*ClipboardItem, error) {
+		return &ClipboardItem{
+			IsMedia:  true,
+			FilePath: "/tmp/hover_paste.png",
+			FileName: "hover_paste.png",
+		}, nil
+	}
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd for ctrl+v in hover mode")
+	}
+	if model.selectedMsgIdx != -1 {
+		t.Errorf("Expected hover mode to exit (selectedMsgIdx == -1), got %d", model.selectedMsgIdx)
+	}
+	msg = cmd()
+	model.Update(msg)
+	if !strings.HasPrefix(model.input.Value(), "file:///tmp/hover_paste.png") {
+		t.Errorf("Expected attached file in input after hover paste, got %q", model.input.Value())
+	}
+
+	// 6. Paste with empty / error clipboard
+	readClipboardFunc = func(ctx context.Context) (*ClipboardItem, error) {
+		return nil, errors.New("clipboard empty")
+	}
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	msg = cmd()
+	model.Update(msg)
+	if !strings.Contains(model.previewStatus, "empty or unavailable") {
+		t.Errorf("Expected previewStatus to indicate empty, got %q", model.previewStatus)
+	}
+}

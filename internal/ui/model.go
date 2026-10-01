@@ -613,6 +613,43 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 
+	case clipboardPasteMsg:
+		if msg.Err != nil || msg.Item == nil {
+			m.previewStatus = "Clipboard empty or unavailable"
+			return m, nil
+		}
+		if msg.Item.IsMedia && msg.Item.FilePath != "" {
+			cleanPath := strings.TrimSpace(msg.Item.FilePath)
+			formatted := "file://" + cleanPath + " "
+			if strings.Contains(cleanPath, " ") {
+				formatted = fmt.Sprintf("file://\"%s\" ", cleanPath)
+			}
+			existing := strings.TrimSpace(m.input.Value())
+			if existing != "" {
+				if strings.HasPrefix(existing, "file://") {
+					_, prevCaption := parseFileURI(existing)
+					if prevCaption != "" {
+						formatted = formatted + prevCaption
+					}
+				} else {
+					formatted = formatted + existing
+				}
+			}
+			m.input.SetValue(formatted)
+			m.input.CursorEnd()
+			m.previewStatus = fmt.Sprintf("Attached %s (press Enter to send)", filepath.Base(cleanPath))
+			return m, nil
+		}
+		if msg.Item.Text != "" {
+			m.input.InsertString(msg.Item.Text)
+			m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+			m.updateMentionHints()
+			m.previewStatus = ""
+			return m, nil
+		}
+		m.previewStatus = "Clipboard empty"
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.promptOpenWith {
 			switch msg.String() {
@@ -1785,6 +1822,12 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.previewStatus = ""
 			return textinput.Blink
 
+		case "ctrl+v", "alt+v":
+			m.selectedMsgIdx = -1
+			m.input.Focus()
+			m.previewStatus = "Pasting from clipboard..."
+			return m.pasteClipboardCmd()
+
 		case "y":
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
@@ -2085,6 +2128,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	case "alt+f":
 		m.previewStatus = "Opening file selector..."
 		return m.pickFileCmd()
+
+	case "ctrl+v", "alt+v":
+		m.previewStatus = "Pasting from clipboard..."
+		return m.pasteClipboardCmd()
 
 	case "pgup", "ctrl+y":
 		m.chatScrollOffset += 5
@@ -3714,6 +3761,20 @@ func (m *Model) pickFileCmd() tea.Cmd {
 			return filePickErrMsg{Err: err}
 		}
 		return filePickedMsg{Path: path}
+	}
+}
+
+type clipboardPasteMsg struct {
+	Item *ClipboardItem
+	Err  error
+}
+
+func (m *Model) pasteClipboardCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		item, err := readClipboardFunc(ctx)
+		return clipboardPasteMsg{Item: item, Err: err}
 	}
 }
 
