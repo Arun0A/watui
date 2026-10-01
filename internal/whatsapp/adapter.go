@@ -1093,6 +1093,10 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 		rawMap, err := a.client.Store.Contacts.GetAllContacts(ctx)
 		if err == nil {
 			lidMap := a.getLIDMap()
+			phoneToLID := make(map[string]string, len(lidMap))
+			for lid, pn := range lidMap {
+				phoneToLID[pn] = lid
+			}
 			for jid, info := range rawMap {
 				if jid.Server != types.DefaultUserServer && jid.Server != "lid" {
 					continue
@@ -1127,6 +1131,26 @@ func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
 					BusinessName: info.BusinessName,
 					IsGroup:      false,
 				})
+				if actualJID != jid {
+					list = append(list, domain.Contact{
+						JID:          jid.String(),
+						Name:         name,
+						PushName:     info.PushName,
+						BusinessName: info.BusinessName,
+						IsGroup:      false,
+					})
+				}
+				if jid.Server == types.DefaultUserServer && len(phoneToLID) > 0 {
+					if lid, ok := phoneToLID[jid.User]; ok && lid != "" {
+						list = append(list, domain.Contact{
+							JID:          types.NewJID(lid, "lid").String(),
+							Name:         name,
+							PushName:     info.PushName,
+							BusinessName: info.BusinessName,
+							IsGroup:      false,
+						})
+					}
+				}
 			}
 		}
 	}
@@ -1474,6 +1498,11 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 		}
 		m.ChatName = chatName.String
 		m.SenderName = senderName.String
+		if !m.IsFromMe && isGenericName(m.SenderName, m.Sender) {
+			if resolved := a.resolveParticipantName(m.Sender); resolved != "" && !isGenericName(resolved, m.Sender) {
+				m.SenderName = resolved
+			}
+		}
 		m.Body = body.String
 		m.Type = domain.MessageType(msgType)
 		m.Timestamp = time.Unix(ts, 0)
@@ -1611,6 +1640,11 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 				}
 				if pn, ok := lidMap[lidUser]; ok && pn != "" {
 					m.Sender = pn + "@s.whatsapp.net"
+				}
+			}
+			if !m.IsFromMe && isGenericName(m.SenderName, m.Sender) {
+				if resolved := a.resolveParticipantName(m.Sender); resolved != "" && !isGenericName(resolved, m.Sender) {
+					m.SenderName = resolved
 				}
 			}
 			msgs = append(msgs, m)
@@ -1919,7 +1953,7 @@ func (a *Adapter) resolveChatName(chat types.JID) string {
 	return ""
 }
 
-func (a *Adapter) resolveParticipantName(participant string) string {
+func (a *Adapter) resolveParticipantName(participant string, pushName ...string) string {
 	if participant == "" {
 		return ""
 	}
@@ -1942,6 +1976,12 @@ func (a *Adapter) resolveParticipantName(participant string) string {
 	name := a.resolveChatName(pJID)
 	if name != "" {
 		return name
+	}
+	for _, p := range pushName {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			return p
+		}
 	}
 	return pJID.User
 }
@@ -1987,11 +2027,6 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 		return domain.Message{}, false
 	}
 
-	senderName := evt.Info.PushName
-	if senderName == "" {
-		senderName = evt.Info.Sender.User
-	}
-
 	chatJID := evt.Info.Chat.ToNonAD()
 	if chatJID.Server == "lid" {
 		if pn := a.ResolveLIDToPhone(chatJID.User); pn != "" {
@@ -2003,6 +2038,15 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 	if senderJID.Server == "lid" {
 		if pn := a.ResolveLIDToPhone(senderJID.User); pn != "" {
 			senderJID = types.NewJID(pn, types.DefaultUserServer)
+		}
+	}
+
+	senderName := a.resolveParticipantName(evt.Info.Sender.String(), evt.Info.PushName)
+	if senderName == "" {
+		if evt.Info.PushName != "" {
+			senderName = evt.Info.PushName
+		} else {
+			senderName = senderJID.User
 		}
 	}
 
@@ -2066,11 +2110,6 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 		sender = *webMsg.Key.Participant
 	}
 
-	senderName := webMsg.GetPushName()
-	if senderName == "" {
-		senderName = sender
-	}
-
 	chatJID, _ := types.ParseJID(chatID)
 	chatJID = chatJID.ToNonAD()
 	if chatJID.Server == "lid" {
@@ -2086,7 +2125,17 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 		if senderJID.Server == "lid" {
 			if pn := a.ResolveLIDToPhone(senderJID.User); pn != "" {
 				sender = types.NewJID(pn, types.DefaultUserServer).String()
+				senderJID = types.NewJID(pn, types.DefaultUserServer)
 			}
+		}
+	}
+
+	senderName := a.resolveParticipantName(sender, webMsg.GetPushName())
+	if senderName == "" {
+		if webMsg.GetPushName() != "" {
+			senderName = webMsg.GetPushName()
+		} else {
+			senderName = sender
 		}
 	}
 

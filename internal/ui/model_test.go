@@ -2215,3 +2215,69 @@ func TestReplyRenderingWhenQuotedMessageNotVisible(t *testing.T) {
 		t.Errorf("Expected render to contain quote '┌─ [Replying to message]', rendered:\n%s", rendered)
 	}
 }
+
+func TestGroupChatSenderContactNameResolution(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 80
+	model.height = 24
+
+	// Load contact with both phone number and LID
+	model.setContacts([]domain.Contact{
+		{
+			JID:  "919007088779@s.whatsapp.net",
+			Name: "Dastageer Siddiqui Dastageer",
+		},
+		{
+			JID:  "247403034730498@lid",
+			Name: "Dastageer Siddiqui Dastageer",
+		},
+	})
+
+	// Message with raw LID number as Sender and SenderName
+	msg := domain.Message{
+		ID:         "msg_group_1",
+		ChatID:     "120363394253683284@g.us",
+		Sender:     "247403034730498@lid",
+		SenderName: "247403034730498",
+		Timestamp:  time.Now(),
+		Body:       "foooood",
+	}
+
+	model.activeChatID = "120363394253683284@g.us"
+	model.activeName = "ajeeb bacha with read receipt"
+	model.activeMsgs = []domain.Message{msg}
+	model.view = ViewChat
+
+	rendered := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(rendered, "Dastageer Siddiqui Dastageer") {
+		t.Errorf("Expected chat view to render resolved contact name 'Dastageer Siddiqui Dastageer', got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "247403034730498 21:") || strings.Contains(rendered, "247403034730498  ") {
+		t.Errorf("Expected chat view NOT to render raw LID number as sender header, got:\n%s", rendered)
+	}
+
+	// Test reply bar resolution
+	model.replyToMsg = &msg
+	replyRendered := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(replyRendered, "Replying to Dastageer Siddiqui Dastageer") {
+		t.Errorf("Expected reply bar to show 'Replying to Dastageer Siddiqui Dastageer', got:\n%s", replyRendered)
+	}
+
+	// Test unread list snippet prefix
+	model.unreadChats = map[string]*UnreadChat{
+		"120363394253683284@g.us": {
+			ChatID:       "120363394253683284@g.us",
+			Name:         "ajeeb bacha with read receipt",
+			IsGroup:      true,
+			Messages:     []domain.Message{msg},
+			LastReceived: time.Now(),
+		},
+	}
+	model.chatOrder = []string{"120363394253683284@g.us"}
+	model.view = ViewUnreadList
+	inboxRendered := strings.Join(model.renderUnreadListView(), "\n")
+	if !strings.Contains(inboxRendered, "Dastageer Siddiqui Dastageer: foooood") {
+		t.Errorf("Expected inbox snippet to show 'Dastageer Siddiqui Dastageer: foooood', got:\n%s", inboxRendered)
+	}
+}

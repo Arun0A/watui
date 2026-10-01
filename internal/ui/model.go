@@ -739,7 +739,7 @@ func isRealChatName(name string, chatID string) bool {
 func (m *Model) setContacts(contacts []domain.Contact) {
 	m.contacts = contacts
 	byJID := make(map[string]*domain.Contact, len(contacts)*2)
-	byUser := make(map[string]*domain.Contact, len(contacts))
+	byUser := make(map[string]*domain.Contact, len(contacts)*2)
 	for i := range m.contacts {
 		c := &m.contacts[i]
 		clean := c.JID
@@ -751,12 +751,74 @@ func (m *Model) setContacts(contacts []domain.Contact) {
 		byJID[clean] = c
 		byJID[c.JID] = c
 		user := strings.Split(clean, "@")[0]
-		if _, ok := byUser[user]; !ok {
+		if existing, ok := byUser[user]; !ok || (!strings.HasSuffix(c.JID, "@lid") && strings.HasSuffix(existing.JID, "@lid")) {
 			byUser[user] = c
 		}
 	}
 	m.contactsByJID = byJID
 	m.contactsByUser = byUser
+}
+
+func (m *Model) resolveSenderNameByID(rawID string) string {
+	if rawID == "" || rawID == "You" {
+		return rawID
+	}
+	if isRealChatName(rawID, "") {
+		return rawID
+	}
+	if len(m.contacts) > 0 && len(m.contactsByJID) < len(m.contacts) {
+		m.setContacts(m.contacts)
+	}
+	cleanID := rawID
+	if idx := strings.Index(cleanID, ":"); idx != -1 {
+		if atIdx := strings.Index(cleanID, "@"); atIdx != -1 {
+			cleanID = cleanID[:idx] + cleanID[atIdx:]
+		}
+	}
+	baseUser := strings.Split(cleanID, "@")[0]
+	if m.contactsByJID != nil {
+		if c := m.contactsByJID[cleanID]; c != nil && isRealChatName(c.Name, c.JID) {
+			return c.Name
+		}
+		if c := m.contactsByJID[rawID]; c != nil && isRealChatName(c.Name, c.JID) {
+			return c.Name
+		}
+	}
+	if m.contactsByUser != nil {
+		if c := m.contactsByUser[baseUser]; c != nil && isRealChatName(c.Name, c.JID) {
+			return c.Name
+		}
+	}
+	return ""
+}
+
+func (m *Model) resolveMsgSenderName(msg domain.Message) string {
+	if msg.IsFromMe {
+		return "You"
+	}
+	if isRealChatName(msg.SenderName, msg.Sender) {
+		return msg.SenderName
+	}
+	if resolved := m.resolveSenderNameByID(msg.Sender); resolved != "" && isRealChatName(resolved, msg.Sender) {
+		return resolved
+	}
+	if isRealChatName(msg.SenderName, "") {
+		return msg.SenderName
+	}
+	cleanSender := msg.Sender
+	if idx := strings.Index(cleanSender, ":"); idx != -1 {
+		if atIdx := strings.Index(cleanSender, "@"); atIdx != -1 {
+			cleanSender = cleanSender[:idx] + cleanSender[atIdx:]
+		}
+	}
+	baseUser := strings.Split(cleanSender, "@")[0]
+	if baseUser != "" {
+		return baseUser
+	}
+	if msg.SenderName != "" {
+		return msg.SenderName
+	}
+	return "Them"
 }
 
 func (m *Model) resolveChatName(chatID string, msgChatName string, fallback string) (string, bool) {
@@ -2079,6 +2141,9 @@ func (m *Model) filterContacts(query string) {
 	if q == "" {
 		var list []domain.Contact
 		for _, c := range m.contacts {
+			if strings.HasSuffix(c.JID, "@lid") {
+				continue
+			}
 			if !m.isMuted(c.JID, c.Name, c.PushName) {
 				list = append(list, c)
 			}
@@ -2106,6 +2171,9 @@ func (m *Model) filterContacts(query string) {
 	}
 
 	for _, c := range m.contacts {
+		if strings.HasSuffix(c.JID, "@lid") {
+			continue
+		}
 		if m.isMuted(c.JID, c.Name, c.PushName) {
 			continue
 		}
@@ -2369,13 +2437,7 @@ func (m *Model) renderUnreadListView() []string {
 
 				// For groups, prefix snippet with sender name so context is clear: "Sender: message"
 				if (chat.IsGroup || strings.Contains(chat.ChatID, "@g.us")) && !last.IsFromMe {
-					sender := last.SenderName
-					if sender == "" {
-						sender = last.Sender
-						if idx := strings.Index(sender, "@"); idx != -1 {
-							sender = sender[:idx]
-						}
-					}
+					sender := m.resolveMsgSenderName(last)
 					if sender != "" {
 						clean = sender + ": " + clean
 					}
@@ -2563,7 +2625,7 @@ func (m *Model) renderChatView() []string {
 					mediaBadge,
 				)
 			} else {
-				sender := msg.SenderName
+				sender := m.resolveMsgSenderName(msg)
 				if sender == "" {
 					sender = "Them"
 				}
@@ -2590,7 +2652,7 @@ func (m *Model) renderChatView() []string {
 						if prev.ID == msg.QuotedID && prev.Body != "" {
 							quoteContent = prev.Body
 							if quoteSender == "" {
-								quoteSender = prev.SenderName
+								quoteSender = m.resolveMsgSenderName(prev)
 							}
 							break
 						}
@@ -2601,12 +2663,17 @@ func (m *Model) renderChatView() []string {
 								if prev.ID == msg.QuotedID && prev.Body != "" {
 									quoteContent = prev.Body
 									if quoteSender == "" {
-										quoteSender = prev.SenderName
+										quoteSender = m.resolveMsgSenderName(prev)
 									}
 									break
 								}
 							}
 						}
+					}
+				}
+				if quoteSender != "" && !isRealChatName(quoteSender, "") {
+					if resolved := m.resolveSenderNameByID(quoteSender); resolved != "" && isRealChatName(resolved, "") {
+						quoteSender = resolved
 					}
 				}
 				if quoteContent == "" {
@@ -2641,7 +2708,7 @@ func (m *Model) renderChatView() []string {
 	replyBarLines := 0
 	var replyBarStr string
 	if m.replyToMsg != nil {
-		replySender := m.replyToMsg.SenderName
+		replySender := m.resolveMsgSenderName(*m.replyToMsg)
 		if replySender == "" {
 			if m.replyToMsg.IsFromMe {
 				replySender = "You"
