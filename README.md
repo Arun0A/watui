@@ -174,6 +174,26 @@ watui daemon restart      # Restart daemon (or: watui -d restart)
 - Consumes ~15-20 MB of RAM (50x less than WhatsApp Web or Desktop).
 - Notification are configurable in the config file.
 
+---
+
+## Headless CLI Message Sending (`--no-tui`)
+
+Send WhatsApp messages directly from the terminal, shell scripts, or CI/CD pipelines without opening the TUI:
+
+```bash
+# 1. Send plain text message to contact/group/phone JID
+watui --no-tui 123456789@s.whatsapp.net "Hello from terminal script!"
+
+# 2. Pipe message from stdin
+echo "Disk usage warning: 92%" | watui --no-tui 123456789@s.whatsapp.net -
+
+# 3. Send file attachment or media with optional caption
+watui --no-tui 123456789@s.whatsapp.net "file:///path/to/report.pdf Weekly status report"
+
+# 4. JSON output format (for scripts & API integrations)
+watui --no-tui -json 123456789@s.whatsapp.net "Status check"
+```
+
 ### Contact Picker (New Chat)
 | Key | Action |
 | :--- | :--- |

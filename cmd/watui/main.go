@@ -30,8 +30,10 @@ func main() {
 	dbPath := flag.String("db", "", "Path to SQLite session and cache database (default: "+defaultDB+")")
 	logFile := flag.String("log-file", "", "File to write protocol and network logs to (disabled by default)")
 	logLevel := flag.String("log", "WARN", "Protocol log level (DEBUG, INFO, WARN, ERROR)")
-	cliMode := flag.Bool("cli", false, "Run in headless CLI mode instead of interactive TUI")
-	jsonOutput := flag.Bool("json", false, "Print extracted messages as raw JSON (used with -cli)")
+	noTui := flag.Bool("no-tui", false, "Send message via CLI without opening TUI: watui --no-tui <jid> <message>")
+	flag.BoolVar(noTui, "send", false, "Send message via CLI (alias for --no-tui)")
+	cliMode := flag.Bool("cli", false, "Run in headless CLI stream mode instead of interactive TUI")
+	jsonOutput := flag.Bool("json", false, "Print output as raw JSON (used with -cli and --no-tui)")
 	daemonMode := flag.Bool("daemon", false, "Run in background notification daemon mode (start, stop, status, restart)")
 	flag.BoolVar(daemonMode, "d", false, "Run in background notification daemon mode (shorthand)")
 	daemonWorker := flag.Bool("daemon-worker", false, "Internal background worker process")
@@ -47,11 +49,12 @@ func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
-		fmt.Fprintf(out, "  -cli\n    \tRun in headless CLI mode instead of interactive TUI\n")
+		fmt.Fprintf(out, "  --no-tui <jid> <msg>\n    \tSend a message directly via CLI without launching TUI\n")
+		fmt.Fprintf(out, "  -cli\n    \tRun in headless CLI stream mode instead of interactive TUI\n")
 		fmt.Fprintf(out, "  -config string\n    \t%s\n", configHelp)
 		fmt.Fprintf(out, "  -d -daemon\n    \tRun in background notification daemon mode (start, stop, status, restart)\n")
 		fmt.Fprintf(out, "  -db string\n    \tPath to SQLite session and cache database (default: %s)\n", defaultDB)
-		fmt.Fprintf(out, "  -json\n    \tPrint extracted messages as raw JSON (used with -cli)\n")
+		fmt.Fprintf(out, "  -json\n    \tPrint output as raw JSON (used with -cli and --no-tui)\n")
 		fmt.Fprintf(out, "  -log string\n    \tProtocol log level (DEBUG, INFO, WARN, ERROR) (default \"WARN\")\n")
 		fmt.Fprintf(out, "  -log-file string\n    \tFile to write protocol and network logs to (disabled by default)\n")
 	}
@@ -77,6 +80,7 @@ func main() {
 	// Determine daemon subcommand if specified
 	subcommand := ""
 	args := flag.Args()
+	var sendArgs []string
 	if len(args) > 0 {
 		switch args[0] {
 		case "daemon":
@@ -89,7 +93,13 @@ func main() {
 		case "start", "stop", "status", "restart":
 			*daemonMode = true
 			subcommand = args[0]
+		case "send":
+			*noTui = true
+			sendArgs = args[1:]
 		}
+	}
+	if *noTui && len(sendArgs) == 0 {
+		sendArgs = args
 	}
 	if *daemonMode && subcommand == "" {
 		if len(args) > 0 && (args[0] == "start" || args[0] == "stop" || args[0] == "status" || args[0] == "restart") {
@@ -136,6 +146,61 @@ func main() {
 			fmt.Printf("Unknown daemon action: '%s'. Valid actions: start, stop, status, restart\n", subcommand)
 			os.Exit(1)
 		}
+	}
+
+	// 3. Headless CLI message sending: --no-tui <jid> <message>
+	if *noTui {
+		if len(sendArgs) == 0 {
+			outputError(os.Stderr, "missing target JID and message\nUsage: watui --no-tui <jid|phone> <message>\nExample: watui --no-tui 123456789@s.whatsapp.net \"Hello from terminal\"", *jsonOutput)
+			os.Exit(1)
+		}
+
+		targetJID := sendArgs[0]
+		messageText, err := readMessageBody(sendArgs, os.Stdin)
+		if err != nil {
+			outputError(os.Stderr, err.Error(), *jsonOutput)
+			os.Exit(1)
+		}
+		if messageText == "" {
+			outputError(os.Stderr, "message body cannot be empty\nUsage: watui --no-tui <jid|phone> <message>", *jsonOutput)
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var adapter domain.WhatsAppAdapter
+		isRemote := false
+
+		pidFile := daemon.PIDFilePath(finalDBPath)
+		if running, _ := daemon.IsRunning(pidFile); running {
+			remote, err := daemon.ConnectRemote(finalDBPath)
+			if err == nil {
+				adapter = remote
+				isRemote = true
+			}
+		}
+
+		if !isRemote {
+			var err error
+			adapter, err = whatsapp.NewAdapter(ctx, whatsapp.Config{
+				DBPath:     finalDBPath,
+				LogFile:    *logFile,
+				LogLevel:   *logLevel,
+				DeviceName: appCfg.GetDeviceName(),
+				AppConfig:  appCfg,
+			})
+			if err != nil {
+				outputError(os.Stderr, fmt.Sprintf("failed to initialize adapter: %v", err), *jsonOutput)
+				os.Exit(1)
+			}
+		}
+
+		err = executeNoTuiSend(ctx, adapter, isRemote, targetJID, messageText, *jsonOutput, os.Stdout, os.Stderr)
+		if err != nil {
+			os.Exit(1)
+		}
+		return
 	}
 
 	// 3. Set up context and termination signals for foreground execution

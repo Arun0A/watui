@@ -3864,6 +3864,11 @@ func openFilePicker(customCmd string) (string, error) {
 	}
 }
 
+// ParseFileURI extracts the local file path and optional caption from a file:// URI.
+func ParseFileURI(input string) (string, string) {
+	return parseFileURI(input)
+}
+
 func parseFileURI(input string) (string, string) {
 	rem := strings.TrimPrefix(input, "file://")
 	rem = strings.TrimSpace(rem)
