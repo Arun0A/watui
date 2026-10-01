@@ -202,7 +202,7 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			resp.Error = err.Error()
 		} else {
-			msg, err := s.adapter.SendTextMessage(reqCtx, p.ChatID, p.Text)
+			msg, err := s.adapter.SendTextMessage(reqCtx, p.ChatID, p.Text, p.QuotedID, p.QuotedBody, p.QuotedSender)
 			if err != nil {
 				resp.Error = err.Error()
 			} else {

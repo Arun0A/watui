@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,9 +165,20 @@ func TestChatHistoryStorageAndCyclicPruning(t *testing.T) {
 		timestamp INTEGER NOT NULL,
 		body TEXT,
 		type TEXT,
-		is_from_me BOOLEAN
+		is_from_me BOOLEAN,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		raw_message BLOB
 	);
-	CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);`)
+	CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);
+	CREATE TABLE IF NOT EXISTS watui_media_cache (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		raw_message BLOB NOT NULL,
+		timestamp INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_watui_media_cache_ts ON watui_media_cache(timestamp DESC);`)
 	if err != nil {
 		t.Fatalf("Failed to create tables: %v", err)
 	}
@@ -227,5 +239,244 @@ func TestChatHistoryStorageAndCyclicPruning(t *testing.T) {
 	}
 	if olderMsgs[0].ID != "MSG4" || olderMsgs[1].ID != "MSG5" {
 		t.Errorf("Expected [MSG4, MSG5], got [%s, %s]", olderMsgs[0].ID, olderMsgs[1].ID)
+	}
+}
+
+func TestMediaCachePersistence(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to open in-memory db: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS watui_media_cache (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		raw_message BLOB NOT NULL,
+		timestamp INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_watui_media_cache_ts ON watui_media_cache(timestamp DESC);
+	CREATE TABLE IF NOT EXISTS watui_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT,
+		type TEXT,
+		is_from_me BOOLEAN,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		raw_message BLOB
+	);
+	CREATE TABLE IF NOT EXISTS watui_unread_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		raw_message BLOB
+	);`)
+	if err != nil {
+		t.Fatalf("Failed to create tables: %v", err)
+	}
+
+	persistTrue := true
+	cfg := &config.Config{
+		PersistChatHistory:   &persistTrue,
+		CycleMsgCountPerChat: 30,
+	}
+
+	adapter := &Adapter{
+		localDB:    db,
+		appConfig:  cfg,
+		mediaCache: make(map[string]*waE2E.Message),
+	}
+
+	chatID := "123456789-987654@g.us"
+	msgID := "MEDIA123"
+	caption := "Test Image"
+	rawMsg := &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Caption: &caption,
+		},
+	}
+
+	// 1. Cache media message
+	adapter.cacheMediaMessage(msgID, chatID, rawMsg, time.Now())
+
+	// 2. Also save into history
+	adapter.saveHistoryMessage(domain.Message{
+		ID:        msgID,
+		ChatID:    chatID,
+		Sender:    chatID,
+		Timestamp: time.Now(),
+		Body:      "[Image]",
+		Type:      domain.MessageTypeImage,
+	}, rawMsg)
+
+	// Verify it was saved to watui_media_cache table
+	var dbCount int
+	err = db.QueryRow("SELECT COUNT(*) FROM watui_media_cache WHERE id = ?", msgID).Scan(&dbCount)
+	if err != nil || dbCount != 1 {
+		t.Fatalf("Expected 1 row in watui_media_cache, got %d (err: %v)", dbCount, err)
+	}
+
+	// Verify raw_message in watui_messages
+	var rawBlob []byte
+	err = db.QueryRow("SELECT raw_message FROM watui_messages WHERE id = ?", msgID).Scan(&rawBlob)
+	if err != nil || len(rawBlob) == 0 {
+		t.Fatalf("Expected non-empty raw_message in watui_messages, got len=%d (err: %v)", len(rawBlob), err)
+	}
+
+	// 3. Dismiss unread on chat should NOT delete watui_media_cache
+	_ = adapter.DismissUnread(context.Background(), chatID)
+	err = db.QueryRow("SELECT COUNT(*) FROM watui_media_cache WHERE id = ?", msgID).Scan(&dbCount)
+	if err != nil || dbCount != 1 {
+		t.Fatalf("Expected watui_media_cache to survive DismissUnread, got %d", dbCount)
+	}
+
+	// 4. Clear in-memory cache to simulate daemon restart
+	adapter.mediaMu.Lock()
+	adapter.mediaCache = make(map[string]*waE2E.Message)
+	adapter.mediaMu.Unlock()
+
+	if adapter.getCachedMediaMessage(msgID) != nil {
+		t.Fatal("Expected memory cache to be cleared")
+	}
+
+	// 5. Test DownloadMedia fallback queries SQLite watui_media_cache
+	// (Will fail at a.client.Download because client is nil, but should NOT fail with "media metadata not found")
+	_, dlErr := adapter.DownloadMedia(context.Background(), domain.Message{
+		ID:     msgID,
+		ChatID: chatID,
+		Type:   domain.MessageTypeImage,
+	})
+	if dlErr == nil || strings.Contains(dlErr.Error(), "media metadata not found") {
+		t.Fatalf("Expected DownloadMedia to find metadata and fail on client nil, got: %v", dlErr)
+	}
+}
+
+func TestUnreadReplyRetention(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to open in-memory db: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS watui_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT,
+		type TEXT,
+		is_from_me BOOLEAN,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		raw_message BLOB
+	);
+	CREATE TABLE IF NOT EXISTS watui_unread_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT,
+		type TEXT,
+		is_from_me BOOLEAN,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		raw_message BLOB
+	);`)
+	if err != nil {
+		t.Fatalf("Failed to create tables: %v", err)
+	}
+
+	persistTrue := true
+	cfg := &config.Config{
+		PersistChatHistory:   &persistTrue,
+		CycleMsgCountPerChat: 30,
+	}
+
+	adapter := &Adapter{
+		localDB:   db,
+		appConfig: cfg,
+	}
+
+	chatID := "group123@g.us"
+
+	// 1. Save an earlier message to watui_messages (representing a message in cyclic cache)
+	adapter.saveHistoryMessage(domain.Message{
+		ID:         "MSG_EARLIER",
+		ChatID:     chatID,
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Timestamp:  time.Now().Add(-10 * time.Minute),
+		Body:       "Original question?",
+		Type:       domain.MessageTypeText,
+	})
+
+	// 2. Save an unread message that replies to MSG_EARLIER with explicit QuotedText & QuotedSender
+	replyMsg1 := domain.Message{
+		ID:           "REPLY_1",
+		ChatID:       chatID,
+		Sender:       "bob@s.whatsapp.net",
+		SenderName:   "Bob",
+		Timestamp:    time.Now().Add(-5 * time.Minute),
+		Body:         "Yes, here is the answer",
+		Type:         domain.MessageTypeText,
+		QuotedID:     "MSG_EARLIER",
+		QuotedText:   "Original question?",
+		QuotedSender: "Alice",
+	}
+	adapter.saveUnreadMessage(replyMsg1)
+
+	// 3. Save another unread message that replies to MSG_EARLIER but QuotedText was empty in the wire event
+	replyMsg2 := domain.Message{
+		ID:         "REPLY_2",
+		ChatID:     chatID,
+		Sender:     "charlie@s.whatsapp.net",
+		SenderName: "Charlie",
+		Timestamp:  time.Now().Add(-2 * time.Minute),
+		Body:       "Me too",
+		Type:       domain.MessageTypeText,
+		QuotedID:   "MSG_EARLIER", // QuotedText is empty
+	}
+	adapter.saveUnreadMessage(replyMsg2)
+
+	// 4. Retrieve unread messages as if opening a new TUI session
+	unreads, err := adapter.GetUnreadMessages(context.Background())
+	if err != nil {
+		t.Fatalf("GetUnreadMessages failed: %v", err)
+	}
+	if len(unreads) != 2 {
+		t.Fatalf("Expected 2 unread messages, got %d", len(unreads))
+	}
+
+	// Verify reply 1 retained QuotedID, QuotedText, QuotedSender
+	if unreads[0].QuotedID != "MSG_EARLIER" {
+		t.Errorf("Expected QuotedID MSG_EARLIER, got %q", unreads[0].QuotedID)
+	}
+	if unreads[0].QuotedText != "Original question?" {
+		t.Errorf("Expected QuotedText 'Original question?', got %q", unreads[0].QuotedText)
+	}
+	if unreads[0].QuotedSender != "Alice" {
+		t.Errorf("Expected QuotedSender 'Alice', got %q", unreads[0].QuotedSender)
+	}
+
+	// Verify reply 2 had its QuotedText and QuotedSender automatically resolved from watui_messages!
+	if unreads[1].QuotedID != "MSG_EARLIER" {
+		t.Errorf("Expected QuotedID MSG_EARLIER, got %q", unreads[1].QuotedID)
+	}
+	if unreads[1].QuotedText != "Original question?" {
+		t.Errorf("Expected QuotedText resolved to 'Original question?', got %q", unreads[1].QuotedText)
+	}
+	if unreads[1].QuotedSender != "Alice" {
+		t.Errorf("Expected QuotedSender resolved to 'Alice', got %q", unreads[1].QuotedSender)
 	}
 }

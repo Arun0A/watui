@@ -7,12 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/atotto/clipboard"
+	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -69,6 +72,8 @@ type Model struct {
 	activeMsgs       []domain.Message
 	chatScrollOffset int
 	input            textarea.Model
+	selectedMsgIdx   int             // targeted message index within activeChat (-1 when unfocused)
+	replyToMsg       *domain.Message // message being replied to (nil if none)
 
 	// Media navigation & saving
 	selectedMediaIdx int             // targeted media index within activeChat (0-based)
@@ -203,6 +208,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		readChats:      make(map[string]bool),
 		chatOrder:      make([]string, 0),
 		input:          ti,
+		selectedMsgIdx: -1,
 		contactSearch:  si,
 		openWithInput:  oi,
 		status:         domain.StatusConnecting,
@@ -1313,6 +1319,8 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
+			m.selectedMsgIdx = -1
+			m.replyToMsg = nil
 			mediaIndices := m.getChatMediaIndices()
 			m.selectedMediaIdx = len(mediaIndices) - 1
 
@@ -1495,9 +1503,247 @@ func (m *Model) CleanupOnExit() {
 	}
 }
 
+var linkRegex = regexp.MustCompile(`https?://[^\s<>"']+[^\s<>"'.,!?;:)]`)
+
+func copyToClipboard(text string) error {
+	_, _ = fmt.Fprint(os.Stderr, osc52.New(text))
+	_ = clipboard.WriteAll(text)
+	return nil
+}
+
+func (m *Model) syncSelectedMediaIdx() {
+	if m.selectedMsgIdx < 0 || m.selectedMsgIdx >= len(m.activeMsgs) {
+		return
+	}
+	mediaIndices := m.getChatMediaIndices()
+	for mIdx, origIdx := range mediaIndices {
+		if origIdx == m.selectedMsgIdx {
+			m.selectedMediaIdx = mIdx
+			return
+		}
+	}
+}
+
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
+	// Global hotkeys in chat view
+	switch msg.String() {
+	case "alt+?", "f1":
+		m.showHelp = !m.showHelp
+		return nil
+
+	case "ctrl+c":
+		m.stopActiveViewer()
+		m.CleanupOnExit()
+		return tea.Quit
+
+	case "alt+x":
+		m.stopActiveViewer()
+		m.previewStatus = "Playback stopped"
+		return nil
+	}
+
+	// 1. Message Hover Mode: user is navigating messages in chat
+	if m.selectedMsgIdx >= 0 {
+		switch msg.String() {
+		case "esc":
+			m.selectedMsgIdx = -1
+			m.input.Focus()
+			m.previewStatus = ""
+			return textinput.Blink
+
+		case "r":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				m.replyToMsg = &target
+			}
+			m.selectedMsgIdx = -1
+			m.input.Focus()
+			m.previewStatus = ""
+			return textinput.Blink
+
+		case "c":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				textToCopy := target.Body
+				if textToCopy == "" {
+					m.previewStatus = "Message body is empty"
+				} else {
+					_ = copyToClipboard(textToCopy)
+					m.previewStatus = "Copied message to clipboard"
+				}
+			}
+			return nil
+
+		case "l":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				match := linkRegex.FindString(target.Body)
+				if match == "" {
+					m.previewStatus = "No link in message"
+				} else {
+					_ = copyToClipboard(match)
+					disp := match
+					if len(disp) > 35 {
+						disp = disp[:32] + "..."
+					}
+					m.previewStatus = "Copied link: " + disp
+				}
+			}
+			return nil
+
+		case "p":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				if !target.IsMedia() {
+					m.previewStatus = "Selected message has no media"
+					return nil
+				}
+				m.confirmSave = false
+				m.confirmDocAction = false
+				m.promptOpenWith = false
+				m.pendingDocMsg = nil
+				if target.Type == domain.MessageTypeDocument {
+					m.confirmDocAction = true
+					m.pendingDocMsg = &target
+					m.previewStatus = ""
+					return nil
+				}
+				return m.previewMediaCmd(target)
+			}
+			return nil
+
+		case "k", "up", "alt+k", "alt+up":
+			m.confirmDocAction = false
+			m.pendingDocMsg = nil
+			if len(m.activeMsgs) > 0 {
+				if m.selectedMsgIdx > 0 {
+					m.selectedMsgIdx--
+				} else {
+					m.selectedMsgIdx = len(m.activeMsgs) - 1
+				}
+				m.scrollToMessage(m.selectedMsgIdx)
+				m.syncSelectedMediaIdx()
+				m.previewStatus = fmt.Sprintf("Message %d/%d", m.selectedMsgIdx+1, len(m.activeMsgs))
+			}
+			return nil
+
+		case "j", "down", "alt+j", "alt+down":
+			m.confirmDocAction = false
+			m.pendingDocMsg = nil
+			if len(m.activeMsgs) > 0 {
+				if m.selectedMsgIdx < len(m.activeMsgs)-1 {
+					m.selectedMsgIdx++
+				} else {
+					m.selectedMsgIdx = 0
+				}
+				m.scrollToMessage(m.selectedMsgIdx)
+				m.syncSelectedMediaIdx()
+				m.previewStatus = fmt.Sprintf("Message %d/%d", m.selectedMsgIdx+1, len(m.activeMsgs))
+			}
+			return nil
+
+		case "alt+shift+k", "alt+K", "alt+shift+up", "alt+left":
+			m.confirmDocAction = false
+			m.pendingDocMsg = nil
+			mediaIndices := m.getChatMediaIndices()
+			if len(mediaIndices) == 0 {
+				m.previewStatus = "No media found in this chat"
+				return nil
+			}
+			if m.selectedMediaIdx > 0 {
+				m.selectedMediaIdx--
+			} else {
+				m.selectedMediaIdx = len(mediaIndices) - 1
+			}
+			m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+			m.scrollToMessage(m.selectedMsgIdx)
+			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+			return nil
+
+		case "alt+shift+j", "alt+J", "alt+shift+down", "alt+right":
+			m.confirmDocAction = false
+			m.pendingDocMsg = nil
+			mediaIndices := m.getChatMediaIndices()
+			if len(mediaIndices) == 0 {
+				m.previewStatus = "No media found in this chat"
+				return nil
+			}
+			if m.selectedMediaIdx < len(mediaIndices)-1 {
+				m.selectedMediaIdx++
+			} else {
+				m.selectedMediaIdx = 0
+			}
+			m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+			m.scrollToMessage(m.selectedMsgIdx)
+			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+			return nil
+
+		case "alt+p":
+			if m.selectedMsgIdx < len(m.activeMsgs) && m.activeMsgs[m.selectedMsgIdx].IsMedia() {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				m.confirmSave = false
+				m.confirmDocAction = false
+				m.promptOpenWith = false
+				m.pendingDocMsg = nil
+				if target.Type == domain.MessageTypeDocument {
+					m.confirmDocAction = true
+					m.pendingDocMsg = &target
+					m.previewStatus = ""
+					return nil
+				}
+				return m.previewMediaCmd(target)
+			}
+			mediaIndices := m.getChatMediaIndices()
+			if len(mediaIndices) == 0 {
+				m.previewStatus = "No media found in this chat"
+				return nil
+			}
+			target := m.activeMsgs[mediaIndices[len(mediaIndices)-1]]
+			m.confirmSave = false
+			m.confirmDocAction = false
+			m.promptOpenWith = false
+			m.pendingDocMsg = nil
+			if target.Type == domain.MessageTypeDocument {
+				m.confirmDocAction = true
+				m.pendingDocMsg = &target
+				m.previewStatus = ""
+				return nil
+			}
+			return m.previewMediaCmd(target)
+
+		case "pgup", "ctrl+y":
+			m.chatScrollOffset += 5
+			return nil
+
+		case "pgdown", "ctrl+d", "ctrl+e":
+			m.chatScrollOffset = max(0, m.chatScrollOffset-5)
+			return nil
+
+		case "ctrl+u":
+			if m.cfg.IsHistoryPersistEnabled() {
+				var beforeTS time.Time
+				if len(m.activeMsgs) > 0 {
+					beforeTS = m.activeMsgs[0].Timestamp
+				}
+				m.previewStatus = "Fetching history..."
+				return m.fetchHistoryCmd(m.activeChatID, 5, beforeTS, false)
+			}
+			m.chatScrollOffset += 5
+			return nil
+
+		default:
+			return nil
+		}
+	}
+
+	// 2. Focused on message input box
 	switch msg.String() {
 	case "esc":
+		if m.replyToMsg != nil {
+			m.replyToMsg = nil
+			m.previewStatus = "Reply cancelled"
+			return nil
+		}
 		m.stopActiveViewer()
 		m.previewStatus = ""
 		m.confirmSave = false
@@ -1514,20 +1760,6 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.view = ViewUnreadList
 		return tea.ClearScreen
 
-	case "alt+?", "f1":
-		m.showHelp = !m.showHelp
-		return nil
-
-	case "ctrl+c":
-		m.stopActiveViewer()
-		m.CleanupOnExit()
-		return tea.Quit
-
-	case "alt+x":
-		m.stopActiveViewer()
-		m.previewStatus = "Playback stopped"
-		return nil
-
 	case "alt+p":
 		m.confirmSave = false
 		m.confirmDocAction = false
@@ -1538,10 +1770,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.previewStatus = "No media found in this chat"
 			return nil
 		}
-		if m.selectedMediaIdx < 0 || m.selectedMediaIdx >= len(mediaIndices) {
-			m.selectedMediaIdx = len(mediaIndices) - 1
-		}
-		targetMsg := m.activeMsgs[mediaIndices[m.selectedMediaIdx]]
+		targetMsg := m.activeMsgs[mediaIndices[len(mediaIndices)-1]]
 		if targetMsg.Type == domain.MessageTypeDocument {
 			m.confirmDocAction = true
 			m.promptOpenWith = false
@@ -1551,42 +1780,73 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		}
 		return m.previewMediaCmd(targetMsg)
 
-	case "alt+up", "alt+k", "alt+left":
+	case "alt+up", "alt+k":
 		m.confirmDocAction = false
-		m.promptOpenWith = false
 		m.pendingDocMsg = nil
-		mediaIndices := m.getChatMediaIndices()
-		if len(mediaIndices) > 0 {
-			if m.selectedMediaIdx > 0 {
-				m.selectedMediaIdx--
-			} else {
-				m.selectedMediaIdx = len(mediaIndices) - 1
-			}
-			m.scrollToMediaMessage(mediaIndices[m.selectedMediaIdx])
-			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[mediaIndices[m.selectedMediaIdx]].Type)
+		if len(m.activeMsgs) > 0 {
+			m.selectedMsgIdx = len(m.activeMsgs) - 1
+			m.input.Blur()
+			m.scrollToMessage(m.selectedMsgIdx)
+			m.syncSelectedMediaIdx()
+			m.previewStatus = fmt.Sprintf("Message %d/%d", m.selectedMsgIdx+1, len(m.activeMsgs))
 		}
 		return nil
 
-	case "alt+down", "alt+j", "alt+right":
+	case "alt+down", "alt+j":
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
+		if len(m.activeMsgs) > 0 {
+			m.selectedMsgIdx = 0
+			m.input.Blur()
+			m.scrollToMessage(m.selectedMsgIdx)
+			m.syncSelectedMediaIdx()
+			m.previewStatus = fmt.Sprintf("Message %d/%d", m.selectedMsgIdx+1, len(m.activeMsgs))
+		}
+		return nil
+
+	case "alt+shift+k", "alt+K", "alt+shift+up", "alt+left":
 		m.confirmDocAction = false
 		m.pendingDocMsg = nil
 		mediaIndices := m.getChatMediaIndices()
-		if len(mediaIndices) > 0 {
-			if m.selectedMediaIdx < len(mediaIndices)-1 {
-				m.selectedMediaIdx++
-			} else {
-				m.selectedMediaIdx = 0
-			}
-			m.scrollToMediaMessage(mediaIndices[m.selectedMediaIdx])
-			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[mediaIndices[m.selectedMediaIdx]].Type)
+		if len(mediaIndices) == 0 {
+			m.previewStatus = "No media found in this chat"
+			return nil
 		}
+		if m.selectedMediaIdx > 0 {
+			m.selectedMediaIdx--
+		} else {
+			m.selectedMediaIdx = len(mediaIndices) - 1
+		}
+		m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+		m.input.Blur()
+		m.scrollToMessage(m.selectedMsgIdx)
+		m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+		return nil
+
+	case "alt+shift+j", "alt+J", "alt+shift+down", "alt+right":
+		m.confirmDocAction = false
+		m.pendingDocMsg = nil
+		mediaIndices := m.getChatMediaIndices()
+		if len(mediaIndices) == 0 {
+			m.previewStatus = "No media found in this chat"
+			return nil
+		}
+		if m.selectedMediaIdx < len(mediaIndices)-1 {
+			m.selectedMediaIdx++
+		} else {
+			m.selectedMediaIdx = 0
+		}
+		m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+		m.input.Blur()
+		m.scrollToMessage(m.selectedMsgIdx)
+		m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
 		return nil
 
 	case "alt+f":
 		m.previewStatus = "Opening file selector..."
 		return m.pickFileCmd()
 
-	case "pgup":
+	case "pgup", "ctrl+y":
 		m.chatScrollOffset += 5
 		return nil
 
@@ -1602,7 +1862,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.chatScrollOffset += 5
 		return nil
 
-	case "pgdown", "ctrl+d":
+	case "pgdown", "ctrl+d", "ctrl+e":
 		m.chatScrollOffset = max(0, m.chatScrollOffset-5)
 		return nil
 
@@ -1632,6 +1892,8 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.input.Reset()
 		m.input.SetHeight(1)
 		chatID := m.activeChatID
+		replyTarget := m.replyToMsg
+		m.replyToMsg = nil
 
 		if strings.HasPrefix(text, "file://") {
 			filePath, caption := parseFileURI(text)
@@ -1645,7 +1907,13 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		}
 
 		return func() tea.Msg {
-			sentMsg, err := m.adapter.SendTextMessage(m.ctx, chatID, text)
+			var sentMsg domain.Message
+			var err error
+			if replyTarget != nil {
+				sentMsg, err = m.adapter.SendTextMessage(m.ctx, chatID, text, replyTarget.ID, replyTarget.Body, replyTarget.Sender)
+			} else {
+				sentMsg, err = m.adapter.SendTextMessage(m.ctx, chatID, text)
+			}
 			if err != nil {
 				return sendErrMsg{ChatID: chatID, Text: text, Err: err}
 			}
@@ -1714,6 +1982,10 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
+			m.selectedMsgIdx = -1
+			m.replyToMsg = nil
+			mediaIndices := m.getChatMediaIndices()
+			m.selectedMediaIdx = len(mediaIndices) - 1
 			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
 				limit := m.cfg.GetCycleMsgCountPerChat()
 				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(contact.JID, limit, time.Time{}, true))
@@ -1751,6 +2023,10 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.input.SetHeight(1)
 			m.input.Focus()
 			m.view = ViewChat
+			m.selectedMsgIdx = -1
+			m.replyToMsg = nil
+			mediaIndices := m.getChatMediaIndices()
+			m.selectedMediaIdx = len(mediaIndices) - 1
 			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
 				limit := m.cfg.GetCycleMsgCountPerChat()
 				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(targetID, limit, time.Time{}, true))
@@ -2254,6 +2530,8 @@ func (m *Model) renderChatView() []string {
 			timeStr := msg.Timestamp.Format("15:04")
 			var header string
 			mediaBadge := ""
+			isHovered := (i == m.selectedMsgIdx)
+
 			if msg.IsMedia() {
 				pos := -1
 				for mIdx, origIdx := range mediaIndices {
@@ -2277,8 +2555,14 @@ func (m *Model) renderChatView() []string {
 				}
 			}
 
+			cursorPrefix := "  "
+			if isHovered {
+				cursorPrefix = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("▸ ")
+			}
+
 			if msg.IsFromMe {
-				header = fmt.Sprintf("  %s %s%s",
+				header = fmt.Sprintf("%s%s %s%s",
+					cursorPrefix,
 					lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render("You"),
 					statusStyle.Render(timeStr),
 					mediaBadge,
@@ -2288,7 +2572,8 @@ func (m *Model) renderChatView() []string {
 				if sender == "" {
 					sender = "Them"
 				}
-				header = fmt.Sprintf("  %s %s%s",
+				header = fmt.Sprintf("%s%s %s%s",
+					cursorPrefix,
 					selectedTitleStyle.Render(sender),
 					statusStyle.Render(timeStr),
 					mediaBadge,
@@ -2296,9 +2581,61 @@ func (m *Model) renderChatView() []string {
 			}
 			msgLines = append(msgLines, header)
 
+			bodyPrefix := "    "
+			if isHovered {
+				bodyPrefix = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#FAB387")).Render("┃ ")
+			}
+
+			if msg.QuotedText != "" || msg.QuotedID != "" {
+				quoteContent := msg.QuotedText
+				quoteSender := msg.QuotedSender
+				if quoteContent == "" {
+					// 1. Try to find the quoted message in activeMsgs or chatMessages
+					for _, prev := range m.activeMsgs {
+						if prev.ID == msg.QuotedID && prev.Body != "" {
+							quoteContent = prev.Body
+							if quoteSender == "" {
+								quoteSender = prev.SenderName
+							}
+							break
+						}
+					}
+					if quoteContent == "" {
+						if chat, ok := m.unreadChats[m.activeChatID]; ok && chat != nil {
+							for _, prev := range chat.Messages {
+								if prev.ID == msg.QuotedID && prev.Body != "" {
+									quoteContent = prev.Body
+									if quoteSender == "" {
+										quoteSender = prev.SenderName
+									}
+									break
+								}
+							}
+						}
+					}
+				}
+				if quoteContent == "" {
+					if quoteSender != "" {
+						quoteContent = "Replying to " + quoteSender
+					} else {
+						quoteContent = "[Replying to message]"
+					}
+				} else if quoteSender != "" && !strings.HasPrefix(quoteContent, quoteSender+":") && !strings.HasPrefix(quoteContent, "Replying to ") {
+					quoteContent = quoteSender + ": " + quoteContent
+				}
+
+				quotePreview := strings.ReplaceAll(quoteContent, "\n", " ")
+				maxQuoteW := max(15, cw-12)
+				if len(quotePreview) > maxQuoteW {
+					quotePreview = quotePreview[:maxQuoteW-3] + "..."
+				}
+				quoteLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Italic(true).Render("┌─ " + quotePreview)
+				msgLines = append(msgLines, bodyPrefix+quoteLine)
+			}
+
 			wrapped := wrapStyle.Render(msg.Body)
 			for _, wl := range strings.Split(wrapped, "\n") {
-				msgLines = append(msgLines, "    "+wl)
+				msgLines = append(msgLines, bodyPrefix+wl)
 			}
 			if i < len(m.activeMsgs)-1 {
 				msgLines = append(msgLines, "")
@@ -2306,9 +2643,32 @@ func (m *Model) renderChatView() []string {
 		}
 	}
 
+	replyBarLines := 0
+	var replyBarStr string
+	if m.replyToMsg != nil {
+		replySender := m.replyToMsg.SenderName
+		if replySender == "" {
+			if m.replyToMsg.IsFromMe {
+				replySender = "You"
+			} else {
+				replySender = "Them"
+			}
+		}
+		replySnippet := strings.ReplaceAll(m.replyToMsg.Body, "\n", " ")
+		maxSnippetW := max(15, cw-len(replySender)-25)
+		if len(replySnippet) > maxSnippetW {
+			replySnippet = replySnippet[:maxSnippetW-3] + "..."
+		}
+		replyBarStr = "  " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("↩ Replying to ") +
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CDD6F4")).Render(replySender) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8")).Render(": "+replySnippet) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render("  (Esc to cancel)")
+		replyBarLines = 1
+	}
+
 	m.input.SetWidth(max(20, cw-6))
 	inputLines := strings.Split(m.input.View(), "\n")
-	inputH := len(inputLines)
+	inputH := len(inputLines) + replyBarLines
 	availH := max(3, m.maxCanvasHeight()-5-inputH)
 	scrollInfo := ""
 
@@ -2337,32 +2697,44 @@ func (m *Model) renderChatView() []string {
 		lines = append(lines, "")
 	}
 
-	// One line padding on top of the message box
+	// One line padding on top of the message box / reply bar
 	lines = append(lines, "")
+	if replyBarStr != "" {
+		lines = append(lines, replyBarStr)
+	}
 	lines = append(lines, inputLines...)
 
 	mediaIndices := m.getChatMediaIndices()
-	mediaHelp := ""
-	if len(mediaIndices) > 1 {
-		mediaHelp = fmt.Sprintf("[Alt+P] Preview (%d/%d) · [Alt+↑/↓] Media · [Alt+X] Stop", m.selectedMediaIdx+1, len(mediaIndices))
-	} else if len(mediaIndices) == 1 {
-		mediaHelp = "[Alt+P] Preview Media · [Alt+X] Stop"
-	}
+	var helpText string
+	var dynamicHelp string
 
-	helpText := "[Enter] Send · [Alt+F] Attach · [Esc] Back"
-	if m.cfg.IsHistoryPersistEnabled() {
-		helpText = "[Enter] Send · [Ctrl+U] Load 5 · [Alt+F] Attach · [Esc] Back"
-	}
-	if mediaHelp != "" {
-		helpText += " · " + mediaHelp
-	}
-	helpText += scrollInfo
+	if m.selectedMsgIdx >= 0 {
+		helpText = "[r] Reply · [c] Copy · [l] Copy Link · [p] Preview · [Alt+↑/↓] Move · [Esc] Input"
+		dynamicHelp = "[r] Reply · [c] Copy · [l] Link · [p] Preview · [Esc] Input"
+	} else {
+		mediaHelp := ""
+		if len(mediaIndices) > 1 {
+			mediaHelp = fmt.Sprintf("[Alt+P] Preview (%d/%d) · [Alt+Shift+↑/↓] Media", m.selectedMediaIdx+1, len(mediaIndices))
+		} else if len(mediaIndices) == 1 {
+			mediaHelp = "[Alt+P] Preview Media"
+		}
 
-	dynamicHelp := mediaHelp
-	if dynamicHelp != "" && scrollInfo != "" {
-		dynamicHelp = dynamicHelp + " " + scrollInfo
-	} else if dynamicHelp == "" && scrollInfo != "" {
-		dynamicHelp = strings.TrimPrefix(scrollInfo, " · ")
+		if m.cfg.IsHistoryPersistEnabled() {
+			helpText = "[Enter] Send · [Ctrl+U] Load 5 · [Alt+↑/↓] Select · [Alt+Shift+↑/↓] Media · [Esc] Back"
+		} else {
+			helpText = "[Enter] Send · [Alt+↑/↓] Select · [Alt+Shift+↑/↓] Media · [Alt+F] Attach · [Esc] Back"
+		}
+		if mediaHelp != "" {
+			helpText += " · " + mediaHelp
+		}
+		helpText += scrollInfo
+
+		dynamicHelp = mediaHelp
+		if dynamicHelp != "" && scrollInfo != "" {
+			dynamicHelp = dynamicHelp + " " + scrollInfo
+		} else if dynamicHelp == "" && scrollInfo != "" {
+			dynamicHelp = strings.TrimPrefix(scrollInfo, " · ")
+		}
 	}
 
 	statusNotice := ""
@@ -2547,19 +2919,66 @@ func (m *Model) getChatMediaIndices() []int {
 	return indices
 }
 
-func (m *Model) scrollToMediaMessage(msgIdx int) {
+func (m *Model) scrollToMessage(msgIdx int) {
+	if msgIdx < 0 || msgIdx >= len(m.activeMsgs) {
+		return
+	}
 	cw := m.contentWidth()
 	msgWrapWidth := max(20, cw-6)
 	wrapStyle := lipgloss.NewStyle().Width(msgWrapWidth)
 
-	linesAfter := 0
-	for i := msgIdx + 1; i < len(m.activeMsgs); i++ {
-		linesAfter += 1 // header
-		wrapped := wrapStyle.Render(m.activeMsgs[i].Body)
-		linesAfter += len(strings.Split(wrapped, "\n"))
-		linesAfter += 1 // spacing
+	type msgSpan struct {
+		start int
+		end   int
 	}
-	m.chatScrollOffset = linesAfter
+	spans := make([]msgSpan, len(m.activeMsgs))
+	currentLine := 0
+	for i, msg := range m.activeMsgs {
+		start := currentLine
+		currentLine += 1 // header
+		if msg.QuotedText != "" || msg.QuotedID != "" {
+			currentLine += 1 // quote preview
+		}
+		wrapped := wrapStyle.Render(msg.Body)
+		currentLine += len(strings.Split(wrapped, "\n"))
+		end := currentLine
+		if i < len(m.activeMsgs)-1 {
+			currentLine += 1 // spacing
+		}
+		spans[i] = msgSpan{start: start, end: end}
+	}
+	totalLines := currentLine
+	inputLines := strings.Split(m.input.View(), "\n")
+	extraH := 0
+	if m.replyToMsg != nil {
+		extraH = 1
+	}
+	availH := max(3, m.maxCanvasHeight()-5-len(inputLines)-extraH)
+
+	if totalLines <= availH {
+		m.chatScrollOffset = 0
+		return
+	}
+
+	target := spans[msgIdx]
+	currentEnd := totalLines - m.chatScrollOffset
+	currentStart := max(0, currentEnd-availH)
+
+	if target.start < currentStart {
+		m.chatScrollOffset = totalLines - (target.start + availH)
+		if m.chatScrollOffset > totalLines-availH {
+			m.chatScrollOffset = totalLines - availH
+		}
+	} else if target.end > currentEnd {
+		m.chatScrollOffset = totalLines - target.end
+		if m.chatScrollOffset < 0 {
+			m.chatScrollOffset = 0
+		}
+	}
+}
+
+func (m *Model) scrollToMediaMessage(msgIdx int) {
+	m.scrollToMessage(msgIdx)
 }
 
 func (m *Model) downloadAndOpenDocCmd(msg domain.Message, customCmd ...string) tea.Cmd {

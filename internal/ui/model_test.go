@@ -21,6 +21,7 @@ type mockAdapter struct {
 	statusHandler   domain.StatusHandler
 	archivedChats   map[string]bool
 	lastSentText    string
+	lastQuotedID    string
 	dismissedChats  []string
 	historyMessages map[string][]domain.Message
 }
@@ -30,9 +31,14 @@ func (m *mockAdapter) Disconnect()                       {}
 func (m *mockAdapter) IsLoggedIn() bool                  { return true }
 func (m *mockAdapter) OnMessage(h domain.MessageHandler) { m.msgHandler = h }
 func (m *mockAdapter) OnStatus(h domain.StatusHandler)   { m.statusHandler = h }
-func (m *mockAdapter) SendTextMessage(ctx context.Context, c, t string) (domain.Message, error) {
+func (m *mockAdapter) SendTextMessage(ctx context.Context, c, t string, q ...string) (domain.Message, error) {
 	m.lastSentText = t
-	return domain.Message{ID: "SENT1", ChatID: c, Body: t}, nil
+	if len(q) > 0 {
+		m.lastQuotedID = q[0]
+	} else {
+		m.lastQuotedID = ""
+	}
+	return domain.Message{ID: "SENT1", ChatID: c, Body: t, QuotedID: m.lastQuotedID}, nil
 }
 func (m *mockAdapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
 	return []domain.Contact{
@@ -369,6 +375,20 @@ func TestChatViewportAndScrolling(t *testing.T) {
 
 	// Scroll down with pgdown
 	model.updateChat(tea.KeyMsg{Type: tea.KeyPgDown})
+
+	// Scroll up with ctrl+y
+	offsetBefore := model.chatScrollOffset
+	model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlY})
+	if model.chatScrollOffset <= offsetBefore {
+		t.Errorf("Expected chatScrollOffset to increase after ctrl+y, got %d <= %d", model.chatScrollOffset, offsetBefore)
+	}
+
+	// Scroll down with ctrl+e
+	offsetBefore = model.chatScrollOffset
+	model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlE})
+	if model.chatScrollOffset >= offsetBefore {
+		t.Errorf("Expected chatScrollOffset to decrease after ctrl+e, got %d >= %d", model.chatScrollOffset, offsetBefore)
+	}
 
 	// Render chat view and verify it doesn't panic or exceed height
 	chatLines := model.renderChatView()
@@ -880,16 +900,16 @@ func TestMediaPreviewKeybindings(t *testing.T) {
 		t.Errorf("Expected selectedMediaIdx to default to 1, got %d", model.selectedMediaIdx)
 	}
 
-	// Navigate to previous media using Alt+Up
-	model.updateChat(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	// Navigate to previous media using Alt+K (Alt+Shift+k)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}, Alt: true})
 	if model.selectedMediaIdx != 0 {
-		t.Errorf("Expected selectedMediaIdx to be 0 after Alt+Up, got %d", model.selectedMediaIdx)
+		t.Errorf("Expected selectedMediaIdx to be 0 after Alt+K, got %d", model.selectedMediaIdx)
 	}
 
-	// Press Alt+P to preview the first media (image)
-	chatAltPCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
-	if chatAltPCmd == nil {
-		t.Errorf("Expected non-nil cmd when pressing alt+p in chat with media")
+	// Press 'p' while hovering to preview the first media (image)
+	chatPCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if chatPCmd == nil {
+		t.Errorf("Expected non-nil cmd when pressing 'p' on media message")
 	}
 	if !strings.Contains(model.previewStatus, "Downloading image") {
 		t.Errorf("Expected previewStatus to indicate downloading image, got %q", model.previewStatus)
@@ -1964,5 +1984,230 @@ func TestChatHistoryAlwaysLoad(t *testing.T) {
 
 	if len(curModel.activeMsgs) != 10 {
 		t.Fatalf("Expected 10 auto-loaded messages, got %d", len(curModel.activeMsgs))
+	}
+}
+
+func TestChatMessageHoverNavigationAndActions(t *testing.T) {
+	adapter := &mockAdapter{
+		archivedChats: make(map[string]bool),
+	}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+
+	chatID := "friend@s.whatsapp.net"
+	msg0 := domain.Message{
+		ID:        "msg0",
+		ChatID:    chatID,
+		Sender:    chatID,
+		Body:      "Check https://github.com/Arun0A/watui for the repo",
+		Type:      domain.MessageTypeText,
+		Timestamp: time.Now().Add(-10 * time.Minute),
+	}
+	msg1 := domain.Message{
+		ID:        "msg1",
+		ChatID:    chatID,
+		Sender:    chatID,
+		Body:      "Here is an image",
+		Type:      domain.MessageTypeImage,
+		Timestamp: time.Now().Add(-5 * time.Minute),
+	}
+	msg2 := domain.Message{
+		ID:        "msg2",
+		ChatID:    chatID,
+		Sender:    chatID,
+		Body:      "Plain text message",
+		Type:      domain.MessageTypeText,
+		Timestamp: time.Now().Add(-1 * time.Minute),
+	}
+
+	model.unreadChats[chatID] = &UnreadChat{
+		ChatID:   chatID,
+		Name:     "Friend",
+		Messages: []domain.Message{msg0, msg1, msg2},
+	}
+	model.chatOrder = []string{chatID}
+	model.cursor = 0
+
+	// 1. In ViewUnreadList, test that Alt+P previews recent media (msg1) without opening chat
+	unreadAltPCmd := model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	if unreadAltPCmd == nil {
+		t.Fatalf("Expected Alt+P in ViewUnreadList to return preview cmd for recent media")
+	}
+
+	// 2. Open chat
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat, got %v", model.view)
+	}
+	if model.selectedMsgIdx != -1 {
+		t.Errorf("Expected selectedMsgIdx to be -1 on chat open, got %d", model.selectedMsgIdx)
+	}
+
+	// 3. Alt+P while focused on input box previews most recent media (msg1)
+	chatAltPCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}, Alt: true})
+	if chatAltPCmd == nil {
+		t.Fatalf("Expected Alt+P while focused on input to preview most recent media")
+	}
+
+	// 4. Alt+k navigates to every message (starts at bottom: msg2)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}, Alt: true})
+	if model.selectedMsgIdx != 2 {
+		t.Errorf("Expected selectedMsgIdx to be 2 after Alt+k, got %d", model.selectedMsgIdx)
+	}
+	if model.input.Focused() {
+		t.Errorf("Expected text input to blur when hovering message")
+	}
+
+	// 5. 'k' moves up to msg1 (Image media)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if model.selectedMsgIdx != 1 {
+		t.Errorf("Expected selectedMsgIdx to be 1 after 'k', got %d", model.selectedMsgIdx)
+	}
+
+	// 6. Pressing 'p' on msg1 previews it
+	previewCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if previewCmd == nil {
+		t.Errorf("Expected preview cmd when pressing 'p' on media msg1")
+	}
+
+	// 7. Move up to msg0 (has link and text)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if model.selectedMsgIdx != 0 {
+		t.Errorf("Expected selectedMsgIdx to be 0 after 'k', got %d", model.selectedMsgIdx)
+	}
+
+	// 8. Press 'p' on non-media message (msg0) should not preview
+	nonMediaCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if nonMediaCmd != nil {
+		t.Errorf("Expected nil cmd when pressing 'p' on non-media msg")
+	}
+	if !strings.Contains(model.previewStatus, "no media") {
+		t.Errorf("Expected previewStatus to indicate no media, got %q", model.previewStatus)
+	}
+
+	// 9. Press 'l' to copy link
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if !strings.Contains(model.previewStatus, "Copied link: https://github.com/Arun0A/watui") {
+		t.Errorf("Expected previewStatus to indicate copied link, got %q", model.previewStatus)
+	}
+
+	// 10. Press 'c' to copy message
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if !strings.Contains(model.previewStatus, "Copied message to clipboard") {
+		t.Errorf("Expected previewStatus to indicate copied message, got %q", model.previewStatus)
+	}
+
+	// 11. Press 'r' to reply
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if model.replyToMsg == nil || model.replyToMsg.ID != "msg0" {
+		t.Fatalf("Expected replyToMsg to be msg0, got %+v", model.replyToMsg)
+	}
+	if model.selectedMsgIdx != -1 {
+		t.Errorf("Expected selectedMsgIdx to be -1 after pressing 'r', got %d", model.selectedMsgIdx)
+	}
+	if !model.input.Focused() {
+		t.Errorf("Expected text input to be focused after pressing 'r'")
+	}
+
+	// Check that reply banner renders in View
+	viewOutput := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(viewOutput, "Replying to") {
+		t.Errorf("Expected chat view to render reply banner, got:\n%s", viewOutput)
+	}
+
+	// 12. Send a reply message
+	model.input.SetValue("Awesome repo!")
+	sendCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if sendCmd != nil {
+		_ = sendCmd()
+	}
+	if adapter.lastSentText != "Awesome repo!" {
+		t.Errorf("Expected sent text 'Awesome repo!', got %q", adapter.lastSentText)
+	}
+	if adapter.lastQuotedID != "msg0" {
+		t.Errorf("Expected quoted message ID 'msg0', got %q", adapter.lastQuotedID)
+	}
+	if model.replyToMsg != nil {
+		t.Errorf("Expected replyToMsg to be cleared after sending")
+	}
+
+	// 13. Test Esc defocus from hover mode
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}, Alt: true})
+	if model.selectedMsgIdx < 0 {
+		t.Errorf("Expected selectedMsgIdx >= 0 after Alt+k")
+	}
+	model.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.selectedMsgIdx != -1 {
+		t.Errorf("Expected selectedMsgIdx to be -1 after Esc, got %d", model.selectedMsgIdx)
+	}
+	if !model.input.Focused() {
+		t.Errorf("Expected text input to be focused after Esc from hover")
+	}
+
+	// 14. Test Alt+Shift+K jumps to media only
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}, Alt: true})
+	if model.selectedMsgIdx != 1 {
+		t.Errorf("Expected Alt+K to jump to media msg1 (idx 1), got %d", model.selectedMsgIdx)
+	}
+}
+
+func TestReplyRenderingWhenQuotedMessageNotVisible(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 80
+	model.height = 24
+	model.activeChatID = "group_test@g.us"
+	model.activeName = "Group Test"
+	model.view = ViewChat
+
+	// 1. Message with QuotedText and QuotedSender
+	m1 := domain.Message{
+		ID:           "msg_reply_1",
+		ChatID:       "group_test@g.us",
+		Sender:       "user1@s.whatsapp.net",
+		SenderName:   "User One",
+		Timestamp:    time.Now(),
+		Body:         "I agree with that",
+		QuotedID:     "not_visible_1",
+		QuotedText:   "Let's meet tomorrow",
+		QuotedSender: "Alice",
+	}
+
+	// 2. Message with only QuotedID and QuotedSender
+	m2 := domain.Message{
+		ID:           "msg_reply_2",
+		ChatID:       "group_test@g.us",
+		Sender:       "user2@s.whatsapp.net",
+		SenderName:   "User Two",
+		Timestamp:    time.Now().Add(time.Minute),
+		Body:         "Sure thing",
+		QuotedID:     "not_visible_2",
+		QuotedSender: "Bob",
+	}
+
+	// 3. Message with only QuotedID
+	m3 := domain.Message{
+		ID:         "msg_reply_3",
+		ChatID:     "group_test@g.us",
+		Sender:     "user3@s.whatsapp.net",
+		SenderName: "User Three",
+		Timestamp:  time.Now().Add(2 * time.Minute),
+		Body:       "Count me in",
+		QuotedID:   "not_visible_3",
+	}
+
+	model.activeMsgs = []domain.Message{m1, m2, m3}
+	rendered := model.View()
+
+	if !strings.Contains(rendered, "┌─ Alice: Let's meet tomorrow") {
+		t.Errorf("Expected render to contain quote '┌─ Alice: Let's meet tomorrow', rendered:\n%s", rendered)
+	}
+
+	if !strings.Contains(rendered, "┌─ Replying to Bob") {
+		t.Errorf("Expected render to contain quote '┌─ Replying to Bob', rendered:\n%s", rendered)
+	}
+
+	if !strings.Contains(rendered, "┌─ [Replying to message]") {
+		t.Errorf("Expected render to contain quote '┌─ [Replying to message]', rendered:\n%s", rendered)
 	}
 }

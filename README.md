@@ -139,15 +139,21 @@ nix develop github:Arun0A/watui
 ### Chat View
 | Key | Action |
 | :--- | :--- |
-| `Type text` + <kbd>Enter</kbd> | Send message |
-| <kbd>Esc</kbd> | Back to inbox |
-| <kbd>PgUp</kbd> / <kbd>PgDn</kbd> | Scroll conversation history up / down |
-| <kbd>Alt</kbd> + <kbd>Enter</kbd> / <kbd>C-j</kbd> | Multi-line message |
-| <kbd>Alt</kbd> + <kbd>p</kbd> | Preview selected media attachment |
+| `Type text` + <kbd>Enter</kbd> | Send message (quotes selected message if replying) |
+| <kbd>Esc</kbd> | Cancel reply / Back to inbox |
+| <kbd>Alt</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Navigate through every message in the chat (message hover mode) |
+| <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Jump through media / document messages only |
+| <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |
+| <kbd>c</kbd> *(while hovering)* | Copy message text to clipboard |
+| <kbd>l</kbd> *(while hovering)* | Copy URL/link in the message to clipboard (if any) |
+| <kbd>p</kbd> *(while hovering)* | Preview selected media or open document prompt |
+| <kbd>Esc</kbd> *(while hovering)* | Defocus message hover mode and return to message box |
+| <kbd>Alt</kbd> + <kbd>p</kbd> | Preview most recent media attachment (or preview highlighted chat in inbox) |
 | <kbd>Alt</kbd> + <kbd>x</kbd> | Stop media / audio playback immediately |
-| <kbd>Alt</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Cycle targeted media in the message thread |
 | <kbd>Alt</kbd> + <kbd>f</kbd> | Open file picker to attach and send a file |
 | <kbd>Ctrl</kbd> + <kbd>u</kbd> | Fetch 5 older messages on demand (when `persist-chat-history` is enabled) / Scroll up |
+| <kbd>PgUp</kbd> / <kbd>PgDn</kbd> (or <kbd>Ctrl</kbd>+<kbd>y</kbd> / <kbd>e</kbd>) | Scroll conversation history up / down |
+| <kbd>Alt</kbd> + <kbd>Enter</kbd> / <kbd>Ctrl</kbd>+<kbd>j</kbd> | Insert newline (multi-line message) |
 
 ---
 

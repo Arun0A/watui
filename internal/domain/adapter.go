@@ -41,8 +41,8 @@ type WhatsAppAdapter interface {
 	// OnStatus registers a listener for connection status changes.
 	OnStatus(handler StatusHandler)
 
-	// SendTextMessage sends a plain text message to a given chat JID.
-	SendTextMessage(ctx context.Context, chatID string, text string) (Message, error)
+	// SendTextMessage sends a plain text message to a given chat JID, optionally quoting a message ID/content.
+	SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (Message, error)
 
 	// SendFileMessage uploads and sends a local media or document file to a chat.
 	SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (Message, error)

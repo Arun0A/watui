@@ -314,9 +314,22 @@ func (r *RemoteAdapter) OnChatDismissed(handler func(chatID string)) {
 	r.handlersMu.Unlock()
 }
 
-func (r *RemoteAdapter) SendTextMessage(ctx context.Context, chatID string, text string) (domain.Message, error) {
+func (r *RemoteAdapter) SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (domain.Message, error) {
+	params := SendTextParams{
+		ChatID: chatID,
+		Text:   text,
+	}
+	if len(quotedMsg) > 0 {
+		params.QuotedID = quotedMsg[0]
+	}
+	if len(quotedMsg) > 1 {
+		params.QuotedBody = quotedMsg[1]
+	}
+	if len(quotedMsg) > 2 {
+		params.QuotedSender = quotedMsg[2]
+	}
 	var msg domain.Message
-	err := r.call(ctx, "send_text", SendTextParams{ChatID: chatID, Text: text}, &msg)
+	err := r.call(ctx, "send_text", params, &msg)
 	return msg, err
 }
 

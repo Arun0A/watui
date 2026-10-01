@@ -78,16 +78,69 @@ type Adapter struct {
 	cancel context.CancelFunc
 }
 
-func (a *Adapter) cacheMediaMessage(id string, raw *waE2E.Message) {
+func unwrapMessage(m *waE2E.Message) *waE2E.Message {
+	if m == nil {
+		return nil
+	}
+	for {
+		if m.EphemeralMessage != nil && m.EphemeralMessage.Message != nil {
+			m = m.EphemeralMessage.Message
+			continue
+		}
+		if m.ViewOnceMessage != nil && m.ViewOnceMessage.Message != nil {
+			m = m.ViewOnceMessage.Message
+			continue
+		}
+		if m.ViewOnceMessageV2 != nil && m.ViewOnceMessageV2.Message != nil {
+			m = m.ViewOnceMessageV2.Message
+			continue
+		}
+		if m.ViewOnceMessageV2Extension != nil && m.ViewOnceMessageV2Extension.Message != nil {
+			m = m.ViewOnceMessageV2Extension.Message
+			continue
+		}
+		if m.DocumentWithCaptionMessage != nil && m.DocumentWithCaptionMessage.Message != nil {
+			m = m.DocumentWithCaptionMessage.Message
+			continue
+		}
+		break
+	}
+	return m
+}
+
+func hasMedia(m *waE2E.Message) bool {
+	m = unwrapMessage(m)
+	if m == nil {
+		return false
+	}
+	return m.ImageMessage != nil || m.VideoMessage != nil || m.AudioMessage != nil || m.DocumentMessage != nil || m.StickerMessage != nil
+}
+
+func (a *Adapter) cacheMediaMessage(id string, chatID string, raw *waE2E.Message, ts ...time.Time) {
 	if raw == nil || id == "" {
 		return
 	}
 	a.mediaMu.Lock()
-	defer a.mediaMu.Unlock()
 	if a.mediaCache == nil {
 		a.mediaCache = make(map[string]*waE2E.Message)
 	}
 	a.mediaCache[id] = raw
+	a.mediaMu.Unlock()
+
+	if a.localDB != nil && hasMedia(raw) {
+		rawBytes, err := proto.Marshal(raw)
+		if err == nil && len(rawBytes) > 0 {
+			var msgTs int64
+			if len(ts) > 0 && !ts[0].IsZero() {
+				msgTs = ts[0].Unix()
+			} else {
+				msgTs = time.Now().Unix()
+			}
+			_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_media_cache (id, chat_id, raw_message, timestamp) VALUES (?, ?, ?, ?)`,
+				id, chatID, rawBytes, msgTs)
+			_, _ = a.localDB.Exec(`DELETE FROM watui_media_cache WHERE id NOT IN (SELECT id FROM watui_media_cache ORDER BY timestamp DESC LIMIT 1000)`)
+		}
+	}
 }
 
 func (a *Adapter) getCachedMediaMessage(id string) *waE2E.Message {
@@ -197,9 +250,19 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			body TEXT,
 			type TEXT,
 			is_from_me BOOLEAN,
+			quoted_id TEXT,
+			quoted_text TEXT,
+			quoted_sender TEXT,
 			raw_message BLOB
 		);
 		CREATE INDEX IF NOT EXISTS idx_watui_unread_chat_id ON watui_unread_messages(chat_id);
+		CREATE TABLE IF NOT EXISTS watui_media_cache (
+			id TEXT PRIMARY KEY,
+			chat_id TEXT NOT NULL,
+			raw_message BLOB NOT NULL,
+			timestamp INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_watui_media_cache_ts ON watui_media_cache(timestamp DESC);
 		CREATE TABLE IF NOT EXISTS watui_messages (
 			id TEXT PRIMARY KEY,
 			chat_id TEXT NOT NULL,
@@ -209,11 +272,22 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			timestamp INTEGER NOT NULL,
 			body TEXT,
 			type TEXT,
-			is_from_me BOOLEAN
+			is_from_me BOOLEAN,
+			quoted_id TEXT,
+			quoted_text TEXT,
+			quoted_sender TEXT,
+			raw_message BLOB
 		);
 		CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);`)
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN chat_name TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN raw_message BLOB;")
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_id TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_text TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_sender TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_id TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_text TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_sender TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN raw_message BLOB;")
 
 		// Only run LID migration if there are actually @lid chats present in watui_unread_messages
 		var hasLID int
@@ -552,15 +626,60 @@ func (a *Adapter) SetChatArchived(ctx context.Context, chatID string, archived b
 	return a.client.SendAppState(ctx, patch)
 }
 
-// SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number.
-func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text string) (domain.Message, error) {
+// SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number, optionally quoting a message.
+func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (domain.Message, error) {
 	recipientJID, err := NormalizeJID(chatID)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("invalid recipient %q: %w", chatID, err)
 	}
 
-	msg := &waE2E.Message{
-		Conversation: proto.String(text),
+	var quotedID, quotedBody, quotedSender string
+	if len(quotedMsg) > 0 {
+		quotedID = quotedMsg[0]
+	}
+	if len(quotedMsg) > 1 {
+		quotedBody = quotedMsg[1]
+	}
+	if len(quotedMsg) > 2 {
+		quotedSender = quotedMsg[2]
+	}
+
+	var msg *waE2E.Message
+	if quotedID != "" {
+		if (quotedSender == "" || quotedBody == "") && a.localDB != nil {
+			var s, b string
+			if err := a.localDB.QueryRow("SELECT sender, body FROM watui_messages WHERE id = ?", quotedID).Scan(&s, &b); err == nil {
+				if quotedSender == "" {
+					quotedSender = s
+				}
+				if quotedBody == "" {
+					quotedBody = b
+				}
+			}
+		}
+
+		ctxInfo := &waE2E.ContextInfo{
+			StanzaID: proto.String(quotedID),
+		}
+		if quotedSender != "" {
+			ctxInfo.Participant = proto.String(quotedSender)
+		}
+		if quotedBody != "" {
+			ctxInfo.QuotedMessage = &waE2E.Message{
+				Conversation: proto.String(quotedBody),
+			}
+		}
+
+		msg = &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text:        proto.String(text),
+				ContextInfo: ctxInfo,
+			},
+		}
+	} else {
+		msg = &waE2E.Message{
+			Conversation: proto.String(text),
+		}
 	}
 
 	resp, err := a.client.SendMessage(ctx, recipientJID, msg)
@@ -573,16 +692,24 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		senderID = a.client.Store.ID.ToNonAD().String()
 	}
 
+	var quotedSenderName string
+	if quotedSender != "" {
+		quotedSenderName = a.resolveParticipantName(quotedSender)
+	}
+
 	domainMsg := domain.Message{
-		ID:         resp.ID,
-		ChatID:     recipientJID.String(),
-		Sender:     senderID,
-		SenderName: "Me",
-		Timestamp:  resp.Timestamp,
-		IsFromMe:   true,
-		Type:       domain.MessageTypeText,
-		Body:       text,
-		Status:     domain.MessageStatusSent,
+		ID:           resp.ID,
+		ChatID:       recipientJID.String(),
+		Sender:       senderID,
+		SenderName:   "Me",
+		Timestamp:    resp.Timestamp,
+		IsFromMe:     true,
+		Type:         domain.MessageTypeText,
+		Body:         text,
+		Status:       domain.MessageStatusSent,
+		QuotedID:     quotedID,
+		QuotedText:   quotedBody,
+		QuotedSender: quotedSenderName,
 	}
 	a.saveHistoryMessage(domainMsg)
 	return domainMsg, nil
@@ -722,7 +849,7 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		return domain.Message{}, fmt.Errorf("failed to send media message: %w", err)
 	}
 
-	a.cacheMediaMessage(sendResp.ID, waMsg)
+	a.cacheMediaMessage(sendResp.ID, recipientJID.String(), waMsg, sendResp.Timestamp)
 
 	senderID := ""
 	if a.client.Store.ID != nil {
@@ -740,7 +867,7 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		Body:       bodyText,
 		Status:     domain.MessageStatusSent,
 	}
-	a.saveHistoryMessage(domainMsg)
+	a.saveHistoryMessage(domainMsg, waMsg)
 	return domainMsg, nil
 }
 
@@ -1172,9 +1299,9 @@ func (a *Adapter) saveUnreadMessage(msg domain.Message, rawMsg ...*waE2E.Message
 		rawBytes, _ = proto.Marshal(rawMsg[0])
 	}
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_unread_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, raw_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, rawBytes,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, raw_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, rawBytes,
 	)
 
 	// Keep unread messages table lean by pruning older messages beyond 100 per chat
@@ -1191,7 +1318,7 @@ func (a *Adapter) SetAppConfig(cfg *config.Config) {
 	a.appConfig = cfg
 }
 
-func (a *Adapter) saveHistoryMessage(msg domain.Message) {
+func (a *Adapter) saveHistoryMessage(msg domain.Message, raw ...*waE2E.Message) {
 	if a.localDB == nil || a.appConfig == nil || !a.appConfig.IsHistoryPersistEnabled() {
 		return
 	}
@@ -1200,10 +1327,15 @@ func (a *Adapter) saveHistoryMessage(msg domain.Message) {
 		chatID = parsed.ToNonAD().String()
 	}
 
+	var rawBytes []byte
+	if len(raw) > 0 && raw[0] != nil {
+		rawBytes, _ = proto.Marshal(raw[0])
+	}
+
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, raw_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, rawBytes,
 	)
 
 	// Keep history table strictly bounded per chat according to cyclic limit (default: 30)
@@ -1246,13 +1378,13 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 	var query string
 	var args []interface{}
 	if beforeTimestamp.IsZero() {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender 
 			FROM watui_messages 
 			WHERE chat_id = ? OR chat_id = ? OR chat_id = ? 
 			ORDER BY timestamp DESC LIMIT ?`
 		args = []interface{}{chatID, nonAD, altTarget, limit}
 	} else {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender 
 			FROM watui_messages 
 			WHERE (chat_id = ? OR chat_id = ? OR chat_id = ?) AND timestamp < ? 
 			ORDER BY timestamp DESC LIMIT ?`
@@ -1269,10 +1401,10 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 	for rows.Next() {
 		var m domain.Message
 		var ts int64
-		var chatName, senderName, body sql.NullString
+		var chatName, senderName, body, qID, qText, qSender sql.NullString
 		var msgType string
 		var isFromMe bool
-		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe, &qID, &qText, &qSender); err != nil {
 			continue
 		}
 		m.ChatName = chatName.String
@@ -1281,7 +1413,24 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 		m.Type = domain.MessageType(msgType)
 		m.Timestamp = time.Unix(ts, 0)
 		m.IsFromMe = isFromMe
+		m.QuotedID = qID.String
+		m.QuotedText = qText.String
 		result = append(result, m)
+	}
+	_ = rows.Close()
+
+	if a.localDB != nil {
+		for i := range result {
+			if result[i].QuotedText == "" && result[i].QuotedID != "" {
+				var b, s sql.NullString
+				if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_messages WHERE id = ?", result[i].QuotedID).Scan(&b, &s); err == nil && b.String != "" {
+					result[i].QuotedText = b.String
+					if result[i].QuotedSender == "" {
+						result[i].QuotedSender = s.String
+					}
+				}
+			}
+		}
 	}
 
 	// Reverse so messages are returned in chronological order (oldest first)
@@ -1326,15 +1475,16 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 
 	// Use partitioned window query to only pull the latest 50 unreads per chat, avoiding megabytes of stale backlog
 	rows, err := a.localDB.QueryContext(ctx, `
-		SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me
+		SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender
 		FROM (
 			SELECT id, chat_id, COALESCE(chat_name, '') AS chat_name, sender, sender_name, timestamp, body, type, is_from_me,
+			       quoted_id, quoted_text, quoted_sender,
 			       ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) as rn
 			FROM watui_unread_messages
 		) WHERE rn <= 50
 		ORDER BY timestamp ASC`)
 	if err != nil {
-		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me
+		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender
 			FROM watui_unread_messages ORDER BY timestamp ASC`)
 		if err != nil {
 			return nil, err
@@ -1347,10 +1497,14 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 		var m domain.Message
 		var ts int64
 		var tStr string
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe); err == nil {
+		var qID, qText, qSender sql.NullString
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe, &qID, &qText, &qSender); err == nil {
 			m.Timestamp = time.Unix(ts, 0)
 			m.Type = domain.MessageType(tStr)
 			m.Status = domain.MessageStatusDelivered
+			m.QuotedID = qID.String
+			m.QuotedText = qText.String
+			m.QuotedSender = qSender.String
 			if strings.HasSuffix(m.ChatID, "@lid") {
 				lidUser := strings.TrimSuffix(m.ChatID, "@lid")
 				if idx := strings.Index(lidUser, ":"); idx != -1 {
@@ -1372,7 +1526,21 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 			msgs = append(msgs, m)
 		}
 	}
-	_ = rows.Err()
+	_ = rows.Close()
+
+	if a.localDB != nil {
+		for i := range msgs {
+			if msgs[i].QuotedText == "" && msgs[i].QuotedID != "" {
+				var b, s sql.NullString
+				if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_messages WHERE id = ?", msgs[i].QuotedID).Scan(&b, &s); err == nil && b.String != "" {
+					msgs[i].QuotedText = b.String
+					if msgs[i].QuotedSender == "" {
+						msgs[i].QuotedSender = s.String
+					}
+				}
+			}
+		}
+	}
 	return msgs, nil
 }
 
@@ -1476,7 +1644,10 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 					}
 					webMsg := hMsg.Message
 					if domainMsg, ok := a.extractWebMessage(chatID, webMsg); ok {
-						a.saveHistoryMessage(domainMsg)
+						if webMsg.Message != nil {
+							a.cacheMediaMessage(domainMsg.ID, chatID, webMsg.Message, domainMsg.Timestamp)
+						}
+						a.saveHistoryMessage(domainMsg, webMsg.Message)
 					}
 				}
 				continue
@@ -1494,10 +1665,10 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				domainMsg, ok := a.extractWebMessage(chatID, webMsg)
 				if ok {
 					if webMsg.Message != nil {
-						a.cacheMediaMessage(domainMsg.ID, webMsg.Message)
+						a.cacheMediaMessage(domainMsg.ID, chatID, webMsg.Message, domainMsg.Timestamp)
 					}
 					a.saveUnreadMessage(domainMsg, webMsg.Message)
-					a.saveHistoryMessage(domainMsg)
+					a.saveHistoryMessage(domainMsg, webMsg.Message)
 					a.notifyMessage(domainMsg)
 				}
 			}
@@ -1511,13 +1682,13 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		}
 
 		if evt.Message != nil {
-			a.cacheMediaMessage(domainMsg.ID, evt.Message)
+			a.cacheMediaMessage(domainMsg.ID, domainMsg.ChatID, evt.Message, domainMsg.Timestamp)
 		}
 
 		if !domainMsg.IsFromMe {
 			a.saveUnreadMessage(domainMsg, evt.Message)
 		}
-		a.saveHistoryMessage(domainMsg)
+		a.saveHistoryMessage(domainMsg, evt.Message)
 
 		a.notifyMessage(domainMsg)
 
@@ -1540,6 +1711,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 }
 
 func extractMessageContent(m *waE2E.Message) (string, domain.MessageType, bool) {
+	m = unwrapMessage(m)
 	if m == nil {
 		return "", domain.MessageTypeText, false
 	}
@@ -1629,6 +1801,68 @@ func (a *Adapter) resolveChatName(chat types.JID) string {
 	return ""
 }
 
+func (a *Adapter) resolveParticipantName(participant string) string {
+	if participant == "" {
+		return ""
+	}
+	if a.client != nil && a.client.Store != nil && a.client.Store.ID != nil {
+		myJID := a.client.Store.ID.ToNonAD()
+		if strings.HasPrefix(participant, myJID.User) {
+			return "You"
+		}
+	}
+	pJID, err := types.ParseJID(participant)
+	if err != nil {
+		return participant
+	}
+	pJID = pJID.ToNonAD()
+	if pJID.Server == "lid" {
+		if pn := a.ResolveLIDToPhone(pJID.User); pn != "" {
+			pJID = types.NewJID(pn, types.DefaultUserServer)
+		}
+	}
+	name := a.resolveChatName(pJID)
+	if name != "" {
+		return name
+	}
+	return pJID.User
+}
+
+func extractQuotedInfo(m *waE2E.Message) (string, string, string) {
+	m = unwrapMessage(m)
+	if m == nil {
+		return "", "", ""
+	}
+	var ctxInfo *waE2E.ContextInfo
+	if m.ExtendedTextMessage != nil {
+		ctxInfo = m.ExtendedTextMessage.ContextInfo
+	} else if m.ImageMessage != nil {
+		ctxInfo = m.ImageMessage.ContextInfo
+	} else if m.VideoMessage != nil {
+		ctxInfo = m.VideoMessage.ContextInfo
+	} else if m.AudioMessage != nil {
+		ctxInfo = m.AudioMessage.ContextInfo
+	} else if m.DocumentMessage != nil {
+		ctxInfo = m.DocumentMessage.ContextInfo
+	} else if m.StickerMessage != nil {
+		ctxInfo = m.StickerMessage.ContextInfo
+	}
+	if ctxInfo != nil {
+		var qID, qText, qSender string
+		if ctxInfo.StanzaID != nil {
+			qID = *ctxInfo.StanzaID
+		}
+		if ctxInfo.Participant != nil {
+			qSender = *ctxInfo.Participant
+		}
+		if ctxInfo.QuotedMessage != nil {
+			qText, _, _ = extractMessageContent(ctxInfo.QuotedMessage)
+		}
+		return qID, qText, qSender
+	}
+	return "", "", ""
+}
+
 func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, bool) {
 	body, msgType, ok := extractMessageContent(evt.Message)
 	if !ok {
@@ -1659,17 +1893,42 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 		chatName = senderName
 	}
 
+	qID, qText, qSender := extractQuotedInfo(evt.Message)
+	var qSenderName string
+	if qSender != "" {
+		qSenderName = a.resolveParticipantName(qSender)
+	}
+	if qID != "" {
+		if qText == "" && a.localDB != nil {
+			var b, s sql.NullString
+			if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_messages WHERE id = ?", qID).Scan(&b, &s); err == nil && b.String != "" {
+				qText = b.String
+				if qSenderName == "" && s.String != "" {
+					qSenderName = s.String
+				}
+			} else if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_unread_messages WHERE id = ?", qID).Scan(&b, &s); err == nil && b.String != "" {
+				qText = b.String
+				if qSenderName == "" && s.String != "" {
+					qSenderName = s.String
+				}
+			}
+		}
+	}
+
 	return domain.Message{
-		ID:         evt.Info.ID,
-		ChatID:     chatJID.String(),
-		ChatName:   chatName,
-		Sender:     senderJID.String(),
-		SenderName: senderName,
-		Timestamp:  evt.Info.Timestamp,
-		IsFromMe:   evt.Info.IsFromMe,
-		Type:       msgType,
-		Body:       body,
-		Status:     domain.MessageStatusDelivered,
+		ID:           evt.Info.ID,
+		ChatID:       chatJID.String(),
+		ChatName:     chatName,
+		Sender:       senderJID.String(),
+		SenderName:   senderName,
+		Timestamp:    evt.Info.Timestamp,
+		IsFromMe:     evt.Info.IsFromMe,
+		Type:         msgType,
+		Body:         body,
+		Status:       domain.MessageStatusDelivered,
+		QuotedID:     qID,
+		QuotedText:   qText,
+		QuotedSender: qSenderName,
 	}, true
 }
 
@@ -1724,17 +1983,42 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 		msgID = *webMsg.Key.ID
 	}
 
+	qID, qText, qSender := extractQuotedInfo(webMsg.Message)
+	var qSenderName string
+	if qSender != "" {
+		qSenderName = a.resolveParticipantName(qSender)
+	}
+	if qID != "" {
+		if qText == "" && a.localDB != nil {
+			var b, s sql.NullString
+			if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_messages WHERE id = ?", qID).Scan(&b, &s); err == nil && b.String != "" {
+				qText = b.String
+				if qSenderName == "" && s.String != "" {
+					qSenderName = s.String
+				}
+			} else if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_unread_messages WHERE id = ?", qID).Scan(&b, &s); err == nil && b.String != "" {
+				qText = b.String
+				if qSenderName == "" && s.String != "" {
+					qSenderName = s.String
+				}
+			}
+		}
+	}
+
 	return domain.Message{
-		ID:         msgID,
-		ChatID:     chatID,
-		ChatName:   chatName,
-		Sender:     sender,
-		SenderName: senderName,
-		Timestamp:  ts,
-		IsFromMe:   false,
-		Type:       msgType,
-		Body:       body,
-		Status:     domain.MessageStatusDelivered,
+		ID:           msgID,
+		ChatID:       chatID,
+		ChatName:     chatName,
+		Sender:       sender,
+		SenderName:   senderName,
+		Timestamp:    ts,
+		IsFromMe:     false,
+		Type:         msgType,
+		Body:         body,
+		Status:       domain.MessageStatusDelivered,
+		QuotedID:     qID,
+		QuotedText:   qText,
+		QuotedSender: qSenderName,
 	}, true
 }
 
@@ -1785,27 +2069,47 @@ func (a *Adapter) DownloadMedia(ctx context.Context, msg domain.Message) (string
 	safeID := strings.ReplaceAll(msg.ID, "/", "_")
 	filePath := filepath.Join(cacheDir, fmt.Sprintf("%s%s", safeID, ext))
 
-	// Return cached file if already on disk and non-empty
+	// Return cached file if already on disk and non-empty (check exact or any matching prefix)
 	if fi, err := os.Stat(filePath); err == nil && fi.Size() > 0 {
 		return filePath, nil
+	}
+	if matches, err := filepath.Glob(filepath.Join(cacheDir, safeID+"*")); err == nil {
+		for _, m := range matches {
+			if fi, err := os.Stat(m); err == nil && fi.Size() > 0 {
+				return m, nil
+			}
+		}
 	}
 
 	rawMsg := a.getCachedMediaMessage(msg.ID)
 	if rawMsg == nil && a.localDB != nil {
 		var rawBytes []byte
-		row := a.localDB.QueryRowContext(ctx, "SELECT raw_message FROM watui_unread_messages WHERE id = ?", msg.ID)
-		if err := row.Scan(&rawBytes); err == nil && len(rawBytes) > 0 {
+		// 1. Check dedicated media cache table
+		row := a.localDB.QueryRowContext(ctx, "SELECT raw_message FROM watui_media_cache WHERE id = ?", msg.ID)
+		if err := row.Scan(&rawBytes); err != nil || len(rawBytes) == 0 {
+			// 2. Check history messages table
+			row = a.localDB.QueryRowContext(ctx, "SELECT raw_message FROM watui_messages WHERE id = ? AND raw_message IS NOT NULL", msg.ID)
+			_ = row.Scan(&rawBytes)
+		}
+		if len(rawBytes) == 0 {
+			// 3. Check unread messages table
+			row = a.localDB.QueryRowContext(ctx, "SELECT raw_message FROM watui_unread_messages WHERE id = ? AND raw_message IS NOT NULL", msg.ID)
+			_ = row.Scan(&rawBytes)
+		}
+		if len(rawBytes) > 0 {
 			var parsed waE2E.Message
 			if err := proto.Unmarshal(rawBytes, &parsed); err == nil {
 				rawMsg = &parsed
-				a.cacheMediaMessage(msg.ID, &parsed)
+				a.cacheMediaMessage(msg.ID, msg.ChatID, &parsed)
 			}
 		}
 	}
 
 	if rawMsg == nil {
-		return "", fmt.Errorf("media metadata not found for message %s", msg.ID)
+		return "", fmt.Errorf("media metadata not found for message %s (attachment was not cached or has expired)", msg.ID)
 	}
+
+	rawMsg = unwrapMessage(rawMsg)
 
 	var downloadable whatsmeow.DownloadableMessage
 	if rawMsg.ImageMessage != nil {

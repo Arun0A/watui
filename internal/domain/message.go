@@ -41,6 +41,9 @@ type Message struct {
 	Type       MessageType   `json:"type"`
 	Body       string        `json:"body"`
 	Status     MessageStatus `json:"status"`
+	QuotedID     string        `json:"quoted_id,omitempty"`
+	QuotedText   string        `json:"quoted_text,omitempty"`
+	QuotedSender string        `json:"quoted_sender,omitempty"`
 }
 
 // IsMedia returns true if the message represents a media attachment that can be previewed.

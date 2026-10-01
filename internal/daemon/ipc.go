@@ -31,8 +31,11 @@ type InitialSnapshot struct {
 }
 
 type SendTextParams struct {
-	ChatID string `json:"chat_id"`
-	Text   string `json:"text"`
+	ChatID       string `json:"chat_id"`
+	Text         string `json:"text"`
+	QuotedID     string `json:"quoted_id,omitempty"`
+	QuotedBody   string `json:"quoted_body,omitempty"`
+	QuotedSender string `json:"quoted_sender,omitempty"`
 }
 
 type SendFileParams struct {

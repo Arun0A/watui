@@ -25,7 +25,7 @@ func (m *mockAdapter) OnContactsUpdated(h func([]domain.Contact)) {
 	m.contactsHandler = h
 }
 func (m *mockAdapter) OnChatDismissed(h func(string)) { m.dismissHandler = h }
-func (m *mockAdapter) SendTextMessage(ctx context.Context, chatID string, text string) (domain.Message, error) {
+func (m *mockAdapter) SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (domain.Message, error) {
 	return domain.Message{ID: "TEST1", ChatID: chatID, Body: text}, nil
 }
 func (m *mockAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
