@@ -210,6 +210,12 @@ func (r *RemoteAdapter) dispatchStatus(status domain.ConnectionStatus) {
 }
 
 func (r *RemoteAdapter) call(ctx context.Context, method string, params interface{}, result interface{}) error {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+	}
+
 	id := atomic.AddUint64(&r.reqID, 1)
 	ch := make(chan RPCResponse, 1)
 

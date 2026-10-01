@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,14 +15,19 @@ import (
 	"watui/internal/domain"
 )
 
+type clientWriter struct {
+	enc *json.Encoder
+	mu  sync.Mutex
+}
+
 // Server coordinates IPC connections between the background daemon and attached TUI clients.
 type Server struct {
 	adapter  domain.WhatsAppAdapter
 	dbPath   string
 	listener net.Listener
 
-	clientsMu sync.Mutex
-	clients   map[net.Conn]*json.Encoder
+	clientsMu sync.RWMutex
+	clients   map[net.Conn]*clientWriter
 
 	activeClients int32
 
@@ -44,7 +50,7 @@ func NewServer(adapter domain.WhatsAppAdapter, dbPath string) (*Server, error) {
 		adapter:       adapter,
 		dbPath:        dbPath,
 		listener:      l,
-		clients:       make(map[net.Conn]*json.Encoder),
+		clients:       make(map[net.Conn]*clientWriter),
 		ctx:           ctx,
 		cancel:        cancel,
 		currentStatus: domain.StatusConnected,
@@ -98,11 +104,11 @@ func (s *Server) acceptLoop() {
 }
 
 func (s *Server) handleClient(conn net.Conn) {
-	enc := json.NewEncoder(conn)
+	cw := &clientWriter{enc: json.NewEncoder(conn)}
 	dec := json.NewDecoder(conn)
 
 	s.clientsMu.Lock()
-	s.clients[conn] = enc
+	s.clients[conn] = cw
 	s.clientsMu.Unlock()
 	atomic.AddInt32(&s.activeClients, 1)
 
@@ -132,10 +138,12 @@ func (s *Server) handleClient(conn net.Conn) {
 	}
 
 	snapData, _ := json.Marshal(snapshot)
-	_ = enc.Encode(RPCResponse{
+	cw.mu.Lock()
+	_ = cw.enc.Encode(RPCResponse{
 		Event:  "snapshot",
 		Result: snapData,
 	})
+	cw.mu.Unlock()
 
 	// Stream contacts in the background after the fast handshake completes
 	go func() {
@@ -145,33 +153,32 @@ func (s *Server) handleClient(conn net.Conn) {
 		if err == nil && len(contacts) > 0 {
 			cData, err := json.Marshal(contacts)
 			if err == nil {
-				s.clientsMu.Lock()
-				_ = enc.Encode(RPCResponse{
+				cw.mu.Lock()
+				_ = cw.enc.Encode(RPCResponse{
 					Event:  "contacts",
 					Result: cData,
 				})
-				s.clientsMu.Unlock()
+				cw.mu.Unlock()
 			}
 		}
 	}()
 
-	// 2. Request / Response loop
+	// 2. Request / Response loop: execute requests concurrently to prevent head-of-line blocking
 	for {
 		var req RPCRequest
 		if err := dec.Decode(&req); err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
 				log.Printf("[daemon-ipc] client decode error: %v\n", err)
 			}
 			return
 		}
 
-		resp := s.executeRequest(req)
-		s.clientsMu.Lock()
-		err := enc.Encode(resp)
-		s.clientsMu.Unlock()
-		if err != nil {
-			return
-		}
+		go func(r RPCRequest) {
+			resp := s.executeRequest(r)
+			cw.mu.Lock()
+			_ = cw.enc.Encode(resp)
+			cw.mu.Unlock()
+		}(req)
 	}
 }
 
@@ -321,12 +328,19 @@ func (s *Server) BroadcastEvent(event string, payload interface{}) {
 		Result: data,
 	}
 
-	s.clientsMu.Lock()
-	defer s.clientsMu.Unlock()
+	s.clientsMu.RLock()
+	writers := make([]*clientWriter, 0, len(s.clients))
+	for _, cw := range s.clients {
+		writers = append(writers, cw)
+	}
+	s.clientsMu.RUnlock()
 
-	for conn, enc := range s.clients {
-		_ = enc.Encode(msg)
-		_ = conn // in case of failure, handleClient will clean it up on read
+	for _, cw := range writers {
+		go func(w *clientWriter) {
+			w.mu.Lock()
+			_ = w.enc.Encode(msg)
+			w.mu.Unlock()
+		}(cw)
 	}
 }
 

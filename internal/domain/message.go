@@ -31,16 +31,16 @@ const (
 
 // Message is the core protocol-agnostic representation of a WhatsApp message.
 type Message struct {
-	ID         string        `json:"id"`
-	ChatID     string        `json:"chat_id"`
-	ChatName   string        `json:"chat_name,omitempty"`
-	Sender     string        `json:"sender"`
-	SenderName string        `json:"sender_name,omitempty"`
-	Timestamp  time.Time     `json:"timestamp"`
-	IsFromMe   bool          `json:"is_from_me"`
-	Type       MessageType   `json:"type"`
-	Body       string        `json:"body"`
-	Status     MessageStatus `json:"status"`
+	ID           string        `json:"id"`
+	ChatID       string        `json:"chat_id"`
+	ChatName     string        `json:"chat_name,omitempty"`
+	Sender       string        `json:"sender"`
+	SenderName   string        `json:"sender_name,omitempty"`
+	Timestamp    time.Time     `json:"timestamp"`
+	IsFromMe     bool          `json:"is_from_me"`
+	Type         MessageType   `json:"type"`
+	Body         string        `json:"body"`
+	Status       MessageStatus `json:"status"`
 	QuotedID     string        `json:"quoted_id,omitempty"`
 	QuotedText   string        `json:"quoted_text,omitempty"`
 	QuotedSender string        `json:"quoted_sender,omitempty"`

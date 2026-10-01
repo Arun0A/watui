@@ -74,6 +74,10 @@ type Adapter struct {
 	archivedMu    sync.RWMutex
 	archivedChats map[string]bool
 
+	lidMapMu       sync.RWMutex
+	lidMapCache    map[string]string
+	lidMapCachedAt time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -212,27 +216,38 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	dsn := security.BuildEncryptedDSN(cfg.DBPath, dbKey)
 
-	container, err := sqlstore.New(ctx, "sqlite3", dsn, dbLog)
+	sharedDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	sharedDB.SetMaxOpenConns(10)
+	sharedDB.SetMaxIdleConns(5)
+	sharedDB.SetConnMaxLifetime(10 * time.Minute)
+
+	// Explicitly configure SQLite pragmas on the shared connection
+	_, _ = sharedDB.Exec(`
+		PRAGMA busy_timeout = 30000;
+		PRAGMA journal_mode = WAL;
+		PRAGMA synchronous = NORMAL;
+	`)
+
+	container := sqlstore.NewWithDB(sharedDB, "sqlite3", dbLog)
+	if err := container.Upgrade(ctx); err != nil {
+		_ = sharedDB.Close()
 		if strings.Contains(err.Error(), "file is not a database") {
 			return nil, fmt.Errorf("failed to open encrypted database %q: encryption key mismatch or file corrupted (is this database from another machine or user?): %w", cfg.DBPath, err)
 		}
-		return nil, fmt.Errorf("failed to open session store: %w", err)
+		return nil, fmt.Errorf("failed to upgrade session store: %w", err)
 	}
 
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
+		_ = container.Close()
 		return nil, fmt.Errorf("failed to get device store: %w", err)
 	}
 
 	client := whatsmeow.NewClient(deviceStore, clientLog)
-
-	localDB, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open local database: %w", err)
-	}
-	localDB.SetMaxOpenConns(10)
-	localDB.SetMaxIdleConns(5)
+	localDB := sharedDB
 
 	security.EnsureSecurePermissions(cfg.DBPath)
 	if localDB != nil {
@@ -256,6 +271,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			raw_message BLOB
 		);
 		CREATE INDEX IF NOT EXISTS idx_watui_unread_chat_id ON watui_unread_messages(chat_id);
+		CREATE INDEX IF NOT EXISTS idx_watui_unread_chat_ts ON watui_unread_messages(chat_id, timestamp DESC);
 		CREATE TABLE IF NOT EXISTS watui_media_cache (
 			id TEXT PRIMARY KEY,
 			chat_id TEXT NOT NULL,
@@ -450,22 +466,20 @@ func (a *Adapter) Disconnect() {
 		if a.client != nil {
 			a.client.Disconnect()
 		}
-		if a.localDB != nil {
-			_ = a.localDB.Close()
-		}
 		if a.container != nil {
 			_ = a.container.Close()
+		} else if a.localDB != nil {
+			_ = a.localDB.Close()
 		}
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(1 * time.Second):
-		if a.localDB != nil {
-			_ = a.localDB.Close()
-		}
 		if a.container != nil {
 			_ = a.container.Close()
+		} else if a.localDB != nil {
+			_ = a.localDB.Close()
 		}
 	}
 
@@ -495,7 +509,7 @@ func NormalizeJID(chatID string) (types.JID, error) {
 	return types.NewJID(num, types.DefaultUserServer), nil
 }
 
-// ResolveLIDToPhone maps an internal WhatsApp LID user to its real phone number using SQLite cache.
+// ResolveLIDToPhone maps an internal WhatsApp LID to a phone number using SQLite/in-memory cache.
 func (a *Adapter) ResolveLIDToPhone(lidUser string) string {
 	if a.localDB == nil || lidUser == "" {
 		return ""
@@ -503,12 +517,14 @@ func (a *Adapter) ResolveLIDToPhone(lidUser string) string {
 	if idx := strings.Index(lidUser, ":"); idx != -1 {
 		lidUser = lidUser[:idx]
 	}
-	var pn string
-	_ = a.localDB.QueryRow("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", lidUser).Scan(&pn)
-	return pn
+	lm := a.getLIDMap()
+	if pn, ok := lm[lidUser]; ok && pn != "" {
+		return pn
+	}
+	return ""
 }
 
-// ResolvePhoneToLID maps a phone number user to its internal WhatsApp LID using SQLite cache.
+// ResolvePhoneToLID maps a phone number user to its internal WhatsApp LID using SQLite/in-memory cache.
 func (a *Adapter) ResolvePhoneToLID(phoneUser string) string {
 	if a.localDB == nil || phoneUser == "" {
 		return ""
@@ -516,9 +532,13 @@ func (a *Adapter) ResolvePhoneToLID(phoneUser string) string {
 	if idx := strings.Index(phoneUser, ":"); idx != -1 {
 		phoneUser = phoneUser[:idx]
 	}
-	var lid string
-	_ = a.localDB.QueryRow("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", phoneUser).Scan(&lid)
-	return lid
+	lm := a.getLIDMap()
+	for lid, pn := range lm {
+		if pn == phoneUser {
+			return lid
+		}
+	}
+	return ""
 }
 
 func (a *Adapter) loadArchivedChats() {
@@ -682,6 +702,17 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		}
 	}
 
+	if a.client == nil {
+		return domain.Message{}, errors.New("whatsapp client not initialized")
+	}
+
+	if !a.client.IsConnected() {
+		if !a.client.WaitForConnection(4 * time.Second) {
+			go func() { _ = a.client.Connect() }()
+			return domain.Message{}, errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+		}
+	}
+
 	resp, err := a.client.SendMessage(ctx, recipientJID, msg)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("failed to send message: %w", err)
@@ -719,6 +750,13 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
 	if a.client == nil {
 		return domain.Message{}, fmt.Errorf("client not connected")
+	}
+
+	if !a.client.IsConnected() {
+		if !a.client.WaitForConnection(4 * time.Second) {
+			go func() { _ = a.client.Connect() }()
+			return domain.Message{}, errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+		}
 	}
 
 	recipientJID, err := NormalizeJID(chatID)
@@ -1002,11 +1040,26 @@ func (a *Adapter) saveLocalGroups(groups []*types.GroupInfo) {
 }
 
 func (a *Adapter) getLIDMap() map[string]string {
+	a.lidMapMu.RLock()
+	if a.lidMapCache != nil && time.Since(a.lidMapCachedAt) < 30*time.Second {
+		res := make(map[string]string, len(a.lidMapCache))
+		for k, v := range a.lidMapCache {
+			res[k] = v
+		}
+		a.lidMapMu.RUnlock()
+		return res
+	}
+	a.lidMapMu.RUnlock()
+
 	m := make(map[string]string)
 	if a.localDB == nil {
 		return m
 	}
-	rows, err := a.localDB.Query("SELECT lid, pn FROM whatsmeow_lid_map")
+
+	queryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	rows, err := a.localDB.QueryContext(queryCtx, "SELECT lid, pn FROM whatsmeow_lid_map")
 	if err != nil {
 		return m
 	}
@@ -1020,6 +1073,12 @@ func (a *Adapter) getLIDMap() map[string]string {
 	if err := rows.Err(); err != nil {
 		return m
 	}
+
+	a.lidMapMu.Lock()
+	a.lidMapCache = m
+	a.lidMapCachedAt = time.Now()
+	a.lidMapMu.Unlock()
+
 	return m
 }
 
@@ -1280,8 +1339,14 @@ func (a *Adapter) notifyMessage(msg domain.Message) {
 
 // Sync explicitly pulls server updates (such as read state mutations) from WhatsApp.
 func (a *Adapter) Sync(ctx context.Context) error {
-	if a.client == nil || !a.client.IsConnected() {
+	if a.client == nil {
 		return nil
+	}
+	if !a.client.IsConnected() {
+		if !a.client.WaitForConnection(3 * time.Second) {
+			go func() { _ = a.client.Connect() }()
+			return errors.New("client is reconnecting")
+		}
 	}
 	// Fetch regular_low (contains read/unread statuses) and regular_high
 	_ = a.client.FetchAppState(ctx, appstate.WAPatchRegularLow, false, false)
@@ -1419,14 +1484,39 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 	}
 	_ = rows.Close()
 
-	if a.localDB != nil {
-		for i := range result {
-			if result[i].QuotedText == "" && result[i].QuotedID != "" {
-				var b, s sql.NullString
-				if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_messages WHERE id = ?", result[i].QuotedID).Scan(&b, &s); err == nil && b.String != "" {
-					result[i].QuotedText = b.String
-					if result[i].QuotedSender == "" {
-						result[i].QuotedSender = s.String
+	if a.localDB != nil && len(result) > 0 {
+		var missingIDs []interface{}
+		seen := make(map[string]bool)
+		for _, m := range result {
+			if m.QuotedText == "" && m.QuotedID != "" && !seen[m.QuotedID] {
+				missingIDs = append(missingIDs, m.QuotedID)
+				seen[m.QuotedID] = true
+			}
+		}
+		if len(missingIDs) > 0 {
+			placeholders := strings.Repeat("?,", len(missingIDs))
+			placeholders = placeholders[:len(placeholders)-1]
+			qQuery := fmt.Sprintf("SELECT id, body, sender_name FROM watui_messages WHERE id IN (%s)", placeholders)
+			qRows, err := a.localDB.QueryContext(ctx, qQuery, missingIDs...)
+			if err == nil {
+				defer qRows.Close()
+				type qInfo struct{ body, sender string }
+				qMap := make(map[string]qInfo)
+				for qRows.Next() {
+					var id string
+					var b, s sql.NullString
+					if err := qRows.Scan(&id, &b, &s); err == nil {
+						qMap[id] = qInfo{body: b.String, sender: s.String}
+					}
+				}
+				for i := range result {
+					if result[i].QuotedText == "" && result[i].QuotedID != "" {
+						if info, ok := qMap[result[i].QuotedID]; ok && info.body != "" {
+							result[i].QuotedText = info.body
+							if result[i].QuotedSender == "" {
+								result[i].QuotedSender = info.sender
+							}
+						}
 					}
 				}
 			}
@@ -1528,14 +1618,39 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 	}
 	_ = rows.Close()
 
-	if a.localDB != nil {
-		for i := range msgs {
-			if msgs[i].QuotedText == "" && msgs[i].QuotedID != "" {
-				var b, s sql.NullString
-				if err := a.localDB.QueryRow("SELECT body, sender_name FROM watui_messages WHERE id = ?", msgs[i].QuotedID).Scan(&b, &s); err == nil && b.String != "" {
-					msgs[i].QuotedText = b.String
-					if msgs[i].QuotedSender == "" {
-						msgs[i].QuotedSender = s.String
+	if a.localDB != nil && len(msgs) > 0 {
+		var missingIDs []interface{}
+		seen := make(map[string]bool)
+		for _, m := range msgs {
+			if m.QuotedText == "" && m.QuotedID != "" && !seen[m.QuotedID] {
+				missingIDs = append(missingIDs, m.QuotedID)
+				seen[m.QuotedID] = true
+			}
+		}
+		if len(missingIDs) > 0 {
+			placeholders := strings.Repeat("?,", len(missingIDs))
+			placeholders = placeholders[:len(placeholders)-1]
+			qQuery := fmt.Sprintf("SELECT id, body, sender_name FROM watui_messages WHERE id IN (%s)", placeholders)
+			qRows, err := a.localDB.QueryContext(ctx, qQuery, missingIDs...)
+			if err == nil {
+				defer qRows.Close()
+				type qInfo struct{ body, sender string }
+				qMap := make(map[string]qInfo)
+				for qRows.Next() {
+					var id string
+					var b, s sql.NullString
+					if err := qRows.Scan(&id, &b, &s); err == nil {
+						qMap[id] = qInfo{body: b.String, sender: s.String}
+					}
+				}
+				for i := range msgs {
+					if msgs[i].QuotedText == "" && msgs[i].QuotedID != "" {
+						if info, ok := qMap[msgs[i].QuotedID]; ok && info.body != "" {
+							msgs[i].QuotedText = info.body
+							if msgs[i].QuotedSender == "" {
+								msgs[i].QuotedSender = info.sender
+							}
+						}
 					}
 				}
 			}
@@ -1583,6 +1698,9 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularHigh, false, false)
 			a.loadArchivedChats()
 		}()
+
+	case *events.Disconnected:
+		a.setStatus(domain.StatusDisconnected)
 
 	case *events.AppState:
 		go a.loadArchivedChats()

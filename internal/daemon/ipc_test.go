@@ -167,3 +167,47 @@ func TestIPCEndToEnd(t *testing.T) {
 		t.Errorf("Expected 0 active clients after disconnect")
 	}
 }
+
+func TestConcurrentIPCExecution(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "watui.db")
+
+	mock := &mockAdapter{}
+	server, err := NewServer(mock, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create daemon server: %v", err)
+	}
+	defer server.Close()
+
+	client, err := ConnectRemote(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to connect client: %v", err)
+	}
+	defer client.Disconnect()
+
+	// Concurrent calls
+	const count = 10
+	errChan := make(chan error, count)
+	for i := 0; i < count; i++ {
+		go func(idx int) {
+			if idx%2 == 0 {
+				_, err := client.GetUnreadMessages(context.Background())
+				errChan <- err
+			} else {
+				_, err := client.GetChatHistory(context.Background(), "friend@s.whatsapp.net", 5, time.Time{})
+				errChan <- err
+			}
+		}(i)
+	}
+
+	for i := 0; i < count; i++ {
+		select {
+		case err := <-errChan:
+			if err != nil {
+				t.Fatalf("Concurrent call failed: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Timeout waiting for concurrent calls")
+		}
+	}
+}

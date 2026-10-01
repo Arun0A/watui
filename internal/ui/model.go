@@ -276,7 +276,9 @@ func (m *Model) loadPersistedUnread() tea.Cmd {
 
 func (m *Model) fetchHistoryCmd(chatID string, limit int, beforeTS time.Time, autoLoad bool) tea.Cmd {
 	return func() tea.Msg {
-		msgs, err := m.adapter.GetChatHistory(m.ctx, chatID, limit, beforeTS)
+		fetchCtx, cancel := context.WithTimeout(m.ctx, 6*time.Second)
+		defer cancel()
+		msgs, err := m.adapter.GetChatHistory(fetchCtx, chatID, limit, beforeTS)
 		return historyLoadedMsg{
 			ChatID:   chatID,
 			Messages: msgs,
@@ -1482,23 +1484,44 @@ func (m *Model) CleanupOnExit() {
 
 	m.stopActiveViewer()
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 
 	dismissed := make(map[string]bool)
+	var targets []string
 
 	for id, chat := range m.unreadChats {
 		if chat != nil && chat.UnreadCount == 0 && !chat.IsPinned {
 			if !dismissed[id] {
-				_ = m.adapter.DismissUnread(cleanupCtx, id)
+				targets = append(targets, id)
 				dismissed[id] = true
 			}
 		}
 	}
 	for id := range m.readChats {
 		if !dismissed[id] {
-			_ = m.adapter.DismissUnread(cleanupCtx, id)
+			targets = append(targets, id)
 			dismissed[id] = true
+		}
+	}
+
+	if len(targets) > 0 {
+		var wg sync.WaitGroup
+		for _, id := range targets {
+			wg.Add(1)
+			go func(cID string) {
+				defer wg.Done()
+				_ = m.adapter.DismissUnread(cleanupCtx, cID)
+			}(id)
+		}
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-cleanupCtx.Done():
 		}
 	}
 }
@@ -2975,10 +2998,6 @@ func (m *Model) scrollToMessage(msgIdx int) {
 			m.chatScrollOffset = 0
 		}
 	}
-}
-
-func (m *Model) scrollToMediaMessage(msgIdx int) {
-	m.scrollToMessage(msgIdx)
 }
 
 func (m *Model) downloadAndOpenDocCmd(msg domain.Message, customCmd ...string) tea.Cmd {
