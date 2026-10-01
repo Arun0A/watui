@@ -460,3 +460,9 @@ func (r *RemoteAdapter) GetChatHistory(ctx context.Context, chatID string, limit
 	}, &msgs)
 	return msgs, err
 }
+
+func (r *RemoteAdapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]domain.Contact, error) {
+	var participants []domain.Contact
+	err := r.call(ctx, "get_group_participants", groupJID, &participants)
+	return participants, err
+}

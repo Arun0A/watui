@@ -36,6 +36,9 @@ type Server struct {
 
 	statusMu      sync.RWMutex
 	currentStatus domain.ConnectionStatus
+
+	unreadsMu     sync.RWMutex
+	cachedUnreads []domain.Message
 }
 
 // NewServer creates a new daemon IPC server for the given adapter.
@@ -56,8 +59,16 @@ func NewServer(adapter domain.WhatsAppAdapter, dbPath string) (*Server, error) {
 		currentStatus: domain.StatusConnected,
 	}
 
+	unreads, err := adapter.GetUnreadMessages(ctx)
+	if err == nil {
+		s.cachedUnreads = unreads
+	}
+
 	// Register listeners with underlying WhatsApp adapter to forward live events to all clients
 	adapter.OnMessage(func(msg domain.Message) {
+		s.unreadsMu.Lock()
+		s.cachedUnreads = append(s.cachedUnreads, msg)
+		s.unreadsMu.Unlock()
 		s.BroadcastEvent("message", msg)
 	})
 
@@ -73,6 +84,17 @@ func NewServer(adapter domain.WhatsAppAdapter, dbPath string) (*Server, error) {
 	})
 
 	adapter.OnChatDismissed(func(chatID string) {
+		s.unreadsMu.Lock()
+		if s.cachedUnreads != nil {
+			var filtered []domain.Message
+			for _, m := range s.cachedUnreads {
+				if m.ChatID != chatID {
+					filtered = append(filtered, m)
+				}
+			}
+			s.cachedUnreads = filtered
+		}
+		s.unreadsMu.Unlock()
 		s.BroadcastEvent("dismiss", chatID)
 	})
 
@@ -120,10 +142,20 @@ func (s *Server) handleClient(conn net.Conn) {
 		atomic.AddInt32(&s.activeClients, -1)
 	}()
 
-	// 1. Send initial snapshot immediately to make client launch snappy quick (<5ms)
-	initCtx, initCancel := context.WithTimeout(s.ctx, 2*time.Second)
-	unreads, _ := s.adapter.GetUnreadMessages(initCtx)
-	initCancel()
+	// 1. Send initial snapshot immediately to make client launch snappy quick (<1ms)
+	s.unreadsMu.RLock()
+	var unreads []domain.Message
+	if s.cachedUnreads != nil {
+		unreads = make([]domain.Message, len(s.cachedUnreads))
+		copy(unreads, s.cachedUnreads)
+	}
+	s.unreadsMu.RUnlock()
+
+	if unreads == nil {
+		initCtx, initCancel := context.WithTimeout(s.ctx, 2*time.Second)
+		unreads, _ = s.adapter.GetUnreadMessages(initCtx)
+		initCancel()
+	}
 
 	s.statusMu.RLock()
 	currentStatus := s.currentStatus
@@ -189,6 +221,15 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 
 	switch req.Method {
 	case "get_unread":
+		s.unreadsMu.RLock()
+		if s.cachedUnreads != nil {
+			snap := make([]domain.Message, len(s.cachedUnreads))
+			copy(snap, s.cachedUnreads)
+			s.unreadsMu.RUnlock()
+			resp.Result, _ = json.Marshal(snap)
+			return resp
+		}
+		s.unreadsMu.RUnlock()
 		unreads, err := s.adapter.GetUnreadMessages(reqCtx)
 		if err != nil {
 			resp.Error = err.Error()
@@ -238,6 +279,18 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			err := s.adapter.MarkRead(reqCtx, p.ChatID, p.SenderID, p.MessageIDs)
 			if err != nil {
 				resp.Error = err.Error()
+			} else {
+				s.unreadsMu.Lock()
+				if s.cachedUnreads != nil {
+					var filtered []domain.Message
+					for _, m := range s.cachedUnreads {
+						if m.ChatID != p.ChatID {
+							filtered = append(filtered, m)
+						}
+					}
+					s.cachedUnreads = filtered
+				}
+				s.unreadsMu.Unlock()
 			}
 		}
 
@@ -249,6 +302,18 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			err := s.adapter.DismissUnread(reqCtx, p.ChatID)
 			if err != nil {
 				resp.Error = err.Error()
+			} else {
+				s.unreadsMu.Lock()
+				if s.cachedUnreads != nil {
+					var filtered []domain.Message
+					for _, m := range s.cachedUnreads {
+						if m.ChatID != p.ChatID {
+							filtered = append(filtered, m)
+						}
+					}
+					s.cachedUnreads = filtered
+				}
+				s.unreadsMu.Unlock()
 			}
 		}
 
@@ -306,6 +371,19 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 				resp.Error = err.Error()
 			} else {
 				resp.Result, _ = json.Marshal(msgs)
+			}
+		}
+
+	case "get_group_participants":
+		var groupJID string
+		if err := json.Unmarshal(req.Params, &groupJID); err != nil {
+			resp.Error = err.Error()
+		} else {
+			participants, err := s.adapter.GetGroupParticipants(reqCtx, groupJID)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.Result, _ = json.Marshal(participants)
 			}
 		}
 

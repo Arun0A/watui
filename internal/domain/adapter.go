@@ -86,4 +86,7 @@ type WhatsAppAdapter interface {
 	// GetChatHistory fetches up to limit historical messages for the given chat from local storage,
 	// returning messages strictly older than beforeTimestamp (if non-zero) or the latest if beforeTimestamp is zero.
 	GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]Message, error)
+
+	// GetGroupParticipants retrieves the list of participants in a group chat.
+	GetGroupParticipants(ctx context.Context, groupJID string) ([]Contact, error)
 }

@@ -58,6 +58,9 @@ func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archiv
 func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
 	return []domain.Message{{ID: "HIST1", ChatID: chatID, Body: "History message"}}, nil
 }
+func (m *mockAdapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]domain.Contact, error) {
+	return []domain.Contact{{JID: "user1@s.whatsapp.net", Name: "User One"}}, nil
+}
 
 func TestIPCEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()

@@ -64,6 +64,7 @@ type Adapter struct {
 
 	contactsMu       sync.RWMutex
 	cachedContacts   []domain.Contact
+	contactsByJID    map[string]string
 	contactsLoaded   bool
 	contactsHandlers []func([]domain.Contact)
 	refreshMu        sync.Mutex
@@ -78,6 +79,9 @@ type Adapter struct {
 	lidMapMu       sync.RWMutex
 	lidMapCache    map[string]string
 	lidMapCachedAt time.Time
+
+	groupParticipantsMu sync.RWMutex
+	groupParticipants   map[string][]domain.Contact
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -348,16 +352,17 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	adapterCtx, cancel := context.WithCancel(ctx)
 	adapter := &Adapter{
-		client:        client,
-		container:     container,
-		localDB:       localDB,
-		config:        cfg,
-		appConfig:     cfg.AppConfig,
-		currentStatus: domain.StatusDisconnected,
-		mediaCache:    make(map[string]*waE2E.Message),
-		archivedChats: make(map[string]bool),
-		ctx:           adapterCtx,
-		cancel:        cancel,
+		client:            client,
+		container:         container,
+		localDB:           localDB,
+		config:            cfg,
+		appConfig:         cfg.AppConfig,
+		currentStatus:     domain.StatusDisconnected,
+		mediaCache:        make(map[string]*waE2E.Message),
+		archivedChats:     make(map[string]bool),
+		groupParticipants: make(map[string][]domain.Contact),
+		ctx:               adapterCtx,
+		cancel:            cancel,
 	}
 
 	client.AddEventHandler(adapter.handleEvent)
@@ -367,8 +372,9 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		adapter.loadArchivedChats()
 		initial := adapter.fetchLocalContacts(adapterCtx)
 		if len(initial) > 0 {
-			adapter.cachedContacts = initial
-			adapter.contactsLoaded = true
+			adapter.contactsMu.Lock()
+			adapter.updateContactsIndexLocked(initial)
+			adapter.contactsMu.Unlock()
 		}
 	}
 
@@ -665,41 +671,96 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		quotedSender = quotedMsg[2]
 	}
 
-	var msg *waE2E.Message
-	if quotedID != "" {
-		if (quotedSender == "" || quotedBody == "") && a.localDB != nil {
-			var s, b string
-			if err := a.localDB.QueryRow("SELECT sender, body FROM watui_messages WHERE id = ?", quotedID).Scan(&s, &b); err == nil {
-				if quotedSender == "" {
-					quotedSender = s
-				}
-				if quotedBody == "" {
-					quotedBody = b
+	wireText := text
+	var mentionedJIDs []string
+
+	if strings.Contains(chatID, "@g.us") {
+		participants, _ := a.GetGroupParticipants(ctx, chatID)
+		// Sort participants by Name length descending so longer matches take precedence
+		sort.Slice(participants, func(i, j int) bool {
+			return len(participants[i].Name) > len(participants[j].Name)
+		})
+		seenJID := make(map[string]bool)
+		for _, p := range participants {
+			if p.Name == "" || p.Name == "You" {
+				continue
+			}
+			tag := "@" + p.Name
+			if strings.Contains(wireText, tag) {
+				pJID, err := types.ParseJID(p.JID)
+				if err == nil {
+					user := pJID.User
+					if idx := strings.Index(user, ":"); idx != -1 {
+						user = user[:idx]
+					}
+					if pJID.Server == "lid" {
+						if pn := a.ResolveLIDToPhone(user); pn != "" {
+							pJID = types.NewJID(pn, types.DefaultUserServer)
+							user = pn
+						}
+					}
+					cleanJID := pJID.ToNonAD().String()
+					if !seenJID[cleanJID] {
+						seenJID[cleanJID] = true
+						mentionedJIDs = append(mentionedJIDs, cleanJID)
+					}
+					wireText = strings.ReplaceAll(wireText, tag, "@"+user)
 				}
 			}
 		}
 
-		ctxInfo := &waE2E.ContextInfo{
-			StanzaID: proto.String(quotedID),
-		}
-		if quotedSender != "" {
-			ctxInfo.Participant = proto.String(quotedSender)
-		}
-		if quotedBody != "" {
-			ctxInfo.QuotedMessage = &waE2E.Message{
-				Conversation: proto.String(quotedBody),
+		matches := mentionRegex.FindAllStringSubmatchIndex(wireText, -1)
+		for _, sub := range matches {
+			startDigit, endDigit := sub[2], sub[3]
+			digitStr := wireText[startDigit:endDigit]
+			pJID := types.NewJID(digitStr, types.DefaultUserServer)
+			cleanJID := pJID.String()
+			if !seenJID[cleanJID] {
+				seenJID[cleanJID] = true
+				mentionedJIDs = append(mentionedJIDs, cleanJID)
 			}
+		}
+	}
+
+	var msg *waE2E.Message
+	if quotedID != "" || len(mentionedJIDs) > 0 {
+		ctxInfo := &waE2E.ContextInfo{}
+		if quotedID != "" {
+			if (quotedSender == "" || quotedBody == "") && a.localDB != nil {
+				var s, b string
+				if err := a.localDB.QueryRow("SELECT sender, body FROM watui_messages WHERE id = ?", quotedID).Scan(&s, &b); err == nil {
+					if quotedSender == "" {
+						quotedSender = s
+					}
+					if quotedBody == "" {
+						quotedBody = b
+					}
+				}
+			}
+
+			ctxInfo.StanzaID = proto.String(quotedID)
+			if quotedSender != "" {
+				ctxInfo.Participant = proto.String(quotedSender)
+			}
+			if quotedBody != "" {
+				ctxInfo.QuotedMessage = &waE2E.Message{
+					Conversation: proto.String(quotedBody),
+				}
+			}
+		}
+		if len(mentionedJIDs) > 0 {
+			ctxInfo.MentionedJID = mentionedJIDs
 		}
 
 		msg = &waE2E.Message{
 			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
-				Text:        proto.String(text),
+				Text:        proto.String(wireText),
 				ContextInfo: ctxInfo,
 			},
 		}
 	} else {
 		msg = &waE2E.Message{
-			Conversation: proto.String(text),
+			Conversation: proto.String(wireText),
 		}
 	}
 
@@ -1251,6 +1312,104 @@ func (a *Adapter) EnsureGroupNames(ctx context.Context, jids []string) {
 	}()
 }
 
+// GetGroupParticipants retrieves the list of participants in a group chat,
+// resolving human names and filtering out the current user.
+func (a *Adapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]domain.Contact, error) {
+	if groupJID == "" {
+		return nil, nil
+	}
+
+	a.groupParticipantsMu.RLock()
+	if cached, ok := a.groupParticipants[groupJID]; ok && len(cached) > 0 {
+		a.groupParticipantsMu.RUnlock()
+		return cached, nil
+	}
+	a.groupParticipantsMu.RUnlock()
+
+	parsedJID, err := NormalizeJID(groupJID)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []domain.Contact
+	seen := make(map[string]bool)
+
+	if a.client != nil {
+		reqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		info, err := a.client.GetGroupInfo(reqCtx, parsedJID.ToNonAD())
+		cancel()
+		if err == nil && info != nil {
+			for _, p := range info.Participants {
+				pNonAD := p.JID.ToNonAD()
+				name := a.resolveParticipantName(pNonAD.String(), p.DisplayName)
+				if name == "You" {
+					continue
+				}
+				user := pNonAD.User
+				if idx := strings.Index(user, ":"); idx != -1 {
+					user = user[:idx]
+				}
+				if seen[user] {
+					continue
+				}
+				seen[user] = true
+				result = append(result, domain.Contact{
+					JID:      pNonAD.String(),
+					Name:     name,
+					PushName: p.DisplayName,
+					IsGroup:  false,
+				})
+			}
+		}
+	}
+
+	// Also supplement from recent message senders in this group
+	if a.localDB != nil {
+		rows, err := a.localDB.QueryContext(ctx,
+			"SELECT DISTINCT sender, sender_name FROM watui_messages WHERE chat_id = ? AND sender != '' ORDER BY timestamp DESC LIMIT 100",
+			groupJID,
+		)
+		if err == nil {
+			for rows.Next() {
+				var s, sn string
+				if err := rows.Scan(&s, &sn); err == nil && s != "" {
+					pJID, err := types.ParseJID(s)
+					if err == nil {
+						user := pJID.ToNonAD().User
+						if idx := strings.Index(user, ":"); idx != -1 {
+							user = user[:idx]
+						}
+						if !seen[user] {
+							name := a.resolveParticipantName(s, sn)
+							if name != "You" {
+								seen[user] = true
+								result = append(result, domain.Contact{
+									JID:      pJID.ToNonAD().String(),
+									Name:     name,
+									PushName: sn,
+									IsGroup:  false,
+								})
+							}
+						}
+					}
+				}
+			}
+			_ = rows.Close()
+		}
+	}
+
+	if len(result) > 0 {
+		a.groupParticipantsMu.Lock()
+		if a.groupParticipants == nil {
+			a.groupParticipants = make(map[string][]domain.Contact)
+		}
+		a.groupParticipants[groupJID] = result
+		a.groupParticipantsMu.Unlock()
+	}
+
+	return result, nil
+}
+
 func (a *Adapter) refreshContactsCache(ctx context.Context) {
 	if a.client == nil {
 		return
@@ -1284,8 +1443,7 @@ func (a *Adapter) refreshContactsCache(ctx context.Context) {
 	combined := a.fetchLocalContacts(ctx)
 
 	a.contactsMu.Lock()
-	a.cachedContacts = combined
-	a.contactsLoaded = true
+	a.updateContactsIndexLocked(combined)
 	var handlers []func([]domain.Contact)
 	if len(a.contactsHandlers) > 0 {
 		handlers = make([]func([]domain.Contact), len(a.contactsHandlers))
@@ -1312,6 +1470,22 @@ func (a *Adapter) OnContactsUpdated(handler func([]domain.Contact)) {
 	if len(cached) > 0 {
 		go handler(cached)
 	}
+}
+
+func (a *Adapter) updateContactsIndexLocked(list []domain.Contact) {
+	a.cachedContacts = list
+	a.contactsByJID = make(map[string]string, len(list)*2)
+	for _, c := range list {
+		if c.Name != "" {
+			a.contactsByJID[c.JID] = c.Name
+			user := strings.Split(c.JID, "@")[0]
+			if idx := strings.Index(user, ":"); idx != -1 {
+				user = user[:idx]
+			}
+			a.contactsByJID[user] = c.Name
+		}
+	}
+	a.contactsLoaded = true
 }
 
 func sortContacts(list []domain.Contact) {
@@ -1525,12 +1699,12 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 				m.SenderName = resolved
 			}
 		}
-		m.Body = a.resolveMentionsInText(body.String)
+		m.Body = body.String
 		m.Type = domain.MessageType(msgType)
 		m.Timestamp = time.Unix(ts, 0)
 		m.IsFromMe = isFromMe
 		m.QuotedID = qID.String
-		m.QuotedText = a.resolveMentionsInText(qText.String)
+		m.QuotedText = qText.String
 		result = append(result, m)
 	}
 	_ = rows.Close()
@@ -1634,6 +1808,7 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 	defer func() { _ = rows.Close() }()
 
 	var msgs []domain.Message
+	senderNameCache := make(map[string]string)
 	for rows.Next() {
 		var m domain.Message
 		var ts int64
@@ -1665,12 +1840,19 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 				}
 			}
 			if !m.IsFromMe && isGenericName(m.SenderName, m.Sender) {
-				if resolved := a.resolveParticipantName(m.Sender); resolved != "" && !isGenericName(resolved, m.Sender) {
-					m.SenderName = resolved
+				if cached, ok := senderNameCache[m.Sender]; ok {
+					if cached != "" {
+						m.SenderName = cached
+					}
+				} else {
+					if resolved := a.resolveParticipantName(m.Sender); resolved != "" && !isGenericName(resolved, m.Sender) {
+						senderNameCache[m.Sender] = resolved
+						m.SenderName = resolved
+					} else {
+						senderNameCache[m.Sender] = ""
+					}
 				}
 			}
-			m.Body = a.resolveMentionsInText(m.Body)
-			m.QuotedText = a.resolveMentionsInText(m.QuotedText)
 			msgs = append(msgs, m)
 		}
 	}
@@ -1944,22 +2126,23 @@ func (a *Adapter) resolveChatName(chat types.JID) string {
 				return name
 			}
 		}
-		if a.client != nil && a.client.IsConnected() {
-			infoCtx, infoCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			info, err := a.client.GetGroupInfo(infoCtx, chatNonAD)
-			infoCancel()
-			if err == nil && info != nil && info.Name != "" {
-				name := strings.TrimSpace(info.Name)
-				if a.localDB != nil {
-					_, _ = a.localDB.Exec("INSERT OR REPLACE INTO watui_groups (jid, name) VALUES (?, ?)", chatStr, name)
-				}
-				return name
-			}
-		}
 		return "Group (" + chatNonAD.User + ")"
 	}
 
-	// 1-on-1 contact
+	// 1-on-1 contact: check fast in-memory cache first
+	a.contactsMu.RLock()
+	if a.contactsByJID != nil {
+		if name, ok := a.contactsByJID[chatStr]; ok && name != "" {
+			a.contactsMu.RUnlock()
+			return name
+		}
+		if name, ok := a.contactsByJID[chatNonAD.User]; ok && name != "" {
+			a.contactsMu.RUnlock()
+			return name
+		}
+	}
+	a.contactsMu.RUnlock()
+
 	if a.client != nil && a.client.Store != nil && a.client.Store.Contacts != nil {
 		contact, err := a.client.Store.Contacts.GetContact(context.Background(), chatNonAD)
 		if err == nil && contact.Found {

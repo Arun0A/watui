@@ -496,3 +496,25 @@ func TestResolveMentionsInText(t *testing.T) {
 		t.Errorf("Expected %q, got %q", emailText, res)
 	}
 }
+
+func TestGetGroupParticipants(t *testing.T) {
+	adapter := &Adapter{
+		groupParticipants: map[string][]domain.Contact{
+			"group1@g.us": {
+				{JID: "919876543210@s.whatsapp.net", Name: "Alice"},
+				{JID: "919876543211@s.whatsapp.net", Name: "Bob"},
+			},
+		},
+	}
+
+	participants, err := adapter.GetGroupParticipants(context.Background(), "group1@g.us")
+	if err != nil {
+		t.Fatalf("GetGroupParticipants failed: %v", err)
+	}
+	if len(participants) != 2 {
+		t.Fatalf("Expected 2 participants, got %d", len(participants))
+	}
+	if participants[0].Name != "Alice" || participants[1].Name != "Bob" {
+		t.Errorf("Unexpected participants: %v", participants)
+	}
+}

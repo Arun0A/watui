@@ -24,6 +24,7 @@ type mockAdapter struct {
 	lastQuotedID    string
 	dismissedChats  []string
 	historyMessages map[string][]domain.Message
+	participants    []domain.Contact
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -110,6 +111,13 @@ func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit i
 		filtered = filtered[len(filtered)-limit:]
 	}
 	return filtered, nil
+}
+
+func (m *mockAdapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]domain.Contact, error) {
+	if m.participants != nil {
+		return m.participants, nil
+	}
+	return nil, nil
 }
 
 func TestUnreadModelLifecycle(t *testing.T) {
@@ -2464,5 +2472,101 @@ func TestMentionResolutionInChatAndViews(t *testing.T) {
 	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if copiedText != "@You hi" {
 		t.Errorf("Hover copy 'y' copied %q; want %q", copiedText, "@You hi")
+	}
+}
+
+func TestGroupMentionHintsAndCompletion(t *testing.T) {
+	adapter := &mockAdapter{
+		participants: []domain.Contact{
+			{JID: "919876543210@s.whatsapp.net", Name: "Alice Smith"},
+			{JID: "919876543211@s.whatsapp.net", Name: "Bob Jones"},
+			{JID: "919876543212@s.whatsapp.net", Name: "Charlie"},
+		},
+	}
+	model := NewModel(context.Background(), adapter)
+	model.activeChatID = "120363430194759319@g.us"
+	model.activeName = "Group test"
+	model.view = ViewChat
+	model.width = 80
+	model.height = 24
+	model.groupParticipants = adapter.participants
+
+	// 1. In non-group chat, typing '@' should NOT activate mention hints
+	model.activeChatID = "919000000000@s.whatsapp.net"
+	model.input.SetValue("@")
+	model.updateMentionHints()
+	if len(model.mentionHints) != 0 {
+		t.Fatalf("Expected 0 hints in 1-on-1 chat, got %d", len(model.mentionHints))
+	}
+
+	// 2. In group chat, typing '@' shows all group participants
+	model.activeChatID = "120363430194759319@g.us"
+	model.input.SetValue("@")
+	model.updateMentionHints()
+	if len(model.mentionHints) != 3 {
+		t.Fatalf("Expected 3 hints for '@', got %d", len(model.mentionHints))
+	}
+
+	// 3. renderChatView displays mention hint list vertically below message box
+	lines := model.renderChatView()
+	fullView := strings.Join(lines, "\n")
+	if !strings.Contains(fullView, "@ Mention") {
+		t.Errorf("Expected '@ Mention' in renderChatView, got:\n%s", fullView)
+	}
+	if !strings.Contains(fullView, "Alice Smith") || !strings.Contains(fullView, "Bob Jones") {
+		t.Errorf("Expected Alice Smith and Bob Jones in hints bar, got:\n%s", fullView)
+	}
+	if !strings.Contains(fullView, "▸") {
+		t.Errorf("Expected selection pointer '▸' in vertical hints list, got:\n%s", fullView)
+	}
+
+	// 4. Filtering by query '@Ali'
+	model.input.SetValue("@Ali")
+	model.updateMentionHints()
+	if len(model.mentionHints) != 1 || model.mentionHints[0].Name != "Alice Smith" {
+		t.Fatalf("Expected 1 hint 'Alice Smith' for '@Ali', got %v", model.mentionHints)
+	}
+
+	// 5. Ctrl+N and Ctrl+P navigate hints (arrow keys do not hijack mention hints)
+	model.input.SetValue("@")
+	model.updateMentionHints()
+	if model.mentionCursor != 0 {
+		t.Errorf("Expected initial cursor 0, got %d", model.mentionCursor)
+	}
+	model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlN})
+	if model.mentionCursor != 1 {
+		t.Errorf("Expected cursor 1 after Ctrl+N, got %d", model.mentionCursor)
+	}
+	model.updateChat(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if model.mentionCursor != 0 {
+		t.Errorf("Expected cursor 0 after Ctrl+P, got %d", model.mentionCursor)
+	}
+	// Arrow keys should not alter mention cursor
+	model.updateChat(tea.KeyMsg{Type: tea.KeyDown})
+	if model.mentionCursor != 0 {
+		t.Errorf("Expected cursor 0 (unchanged) after Down arrow, got %d", model.mentionCursor)
+	}
+
+	// 6. Tab applies the highlighted mention hint
+	model.updateChat(tea.KeyMsg{Type: tea.KeyTab})
+	if model.input.Value() != "@Alice Smith " {
+		t.Errorf("Expected input to be '@Alice Smith ', got %q", model.input.Value())
+	}
+	if len(model.mentionHints) != 0 {
+		t.Errorf("Expected hints to be cleared after Tab completion, got %d hints", len(model.mentionHints))
+	}
+
+	// 7. Esc dismisses hints without sending
+	model.input.SetValue("hey @Bo")
+	model.updateMentionHints()
+	if len(model.mentionHints) != 1 {
+		t.Fatalf("Expected 1 hint for '@Bo', got %d", len(model.mentionHints))
+	}
+	model.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if len(model.mentionHints) != 0 {
+		t.Errorf("Expected hints to be dismissed on Esc, got %d hints", len(model.mentionHints))
+	}
+	if model.input.Value() != "hey @Bo" {
+		t.Errorf("Expected input to remain 'hey @Bo', got %q", model.input.Value())
 	}
 }

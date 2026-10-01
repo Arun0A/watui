@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/atotto/clipboard"
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
@@ -86,6 +87,11 @@ type Model struct {
 	openWithInput    textinput.Model // textinput for custom application name
 	pendingDocMsg    *domain.Message // message awaiting document action choice
 
+	// Group mention completion
+	groupParticipants []domain.Contact // participants of active group chat
+	mentionHints      []domain.Contact // filtered hints currently visible
+	mentionCursor     int              // index of highlighted hint in mentionHints
+
 	// Contact search view
 	contacts       []domain.Contact
 	contactsByJID  map[string]*domain.Contact
@@ -155,6 +161,10 @@ type historyLoadedMsg struct {
 	Messages []domain.Message
 	Err      error
 	AutoLoad bool
+}
+type groupParticipantsMsg struct {
+	ChatID       string
+	Participants []domain.Contact
 }
 
 // NewModel initializes the TUI model.
@@ -286,6 +296,24 @@ func (m *Model) fetchHistoryCmd(chatID string, limit int, beforeTS time.Time, au
 			Messages: msgs,
 			Err:      err,
 			AutoLoad: autoLoad,
+		}
+	}
+}
+
+func (m *Model) fetchGroupParticipantsCmd(chatID string) tea.Cmd {
+	return func() tea.Msg {
+		if m.adapter == nil {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(m.ctx, 4*time.Second)
+		defer cancel()
+		participants, err := m.adapter.GetGroupParticipants(ctx, chatID)
+		if err != nil || len(participants) == 0 {
+			return nil
+		}
+		return groupParticipantsMsg{
+			ChatID:       chatID,
+			Participants: participants,
 		}
 	}
 }
@@ -497,6 +525,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			chat.Messages = append([]domain.Message(nil), m.activeMsgs...)
 		}
 		m.mu.Unlock()
+		return m, nil
+
+	case groupParticipantsMsg:
+		if msg.ChatID == m.activeChatID {
+			m.groupParticipants = msg.Participants
+			m.updateMentionHints()
+		}
 		return m, nil
 
 	case mediaPreviewErrMsg:
@@ -1439,12 +1474,19 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			}
 			m.readChats[chatID] = true
 
+			cmds := []tea.Cmd{tea.ClearScreen, textinput.Blink}
+			if chat.IsGroup || strings.Contains(chatID, "@g.us") {
+				m.groupParticipants = nil
+				m.mentionHints = nil
+				m.mentionCursor = 0
+				cmds = append(cmds, m.fetchGroupParticipantsCmd(chatID))
+			}
 			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
 				limit := m.cfg.GetCycleMsgCountPerChat()
-				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(chatID, limit, time.Time{}, true))
+				cmds = append(cmds, m.fetchHistoryCmd(chatID, limit, time.Time{}, true))
 			}
 
-			return tea.Batch(tea.ClearScreen, textinput.Blink)
+			return tea.Batch(cmds...)
 		}
 
 	case "a": // toggle archived chats
@@ -1909,6 +1951,11 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	// 2. Focused on message input box
 	switch msg.String() {
 	case "esc":
+		if len(m.mentionHints) > 0 {
+			m.mentionHints = nil
+			m.mentionCursor = 0
+			return nil
+		}
 		if m.replyToMsg != nil {
 			m.replyToMsg = nil
 			m.previewStatus = "Reply cancelled"
@@ -2036,6 +2083,24 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.chatScrollOffset = max(0, m.chatScrollOffset-5)
 		return nil
 
+	case "tab":
+		if len(m.mentionHints) > 0 {
+			m.applyMentionHint()
+			return nil
+		}
+
+	case "ctrl+n":
+		if len(m.mentionHints) > 0 {
+			m.mentionCursor = (m.mentionCursor + 1) % len(m.mentionHints)
+			return nil
+		}
+
+	case "ctrl+p":
+		if len(m.mentionHints) > 0 {
+			m.mentionCursor = (m.mentionCursor - 1 + len(m.mentionHints)) % len(m.mentionHints)
+			return nil
+		}
+
 	case "up":
 		if m.input.Value() == "" {
 			m.chatScrollOffset++
@@ -2051,9 +2116,14 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	case "shift+enter", "alt+enter", "ctrl+j", "ctrl+enter":
 		m.input.InsertString("\n")
 		m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+		m.updateMentionHints()
 		return nil
 
 	case "enter":
+		if len(m.mentionHints) > 0 {
+			m.applyMentionHint()
+			return nil
+		}
 		text := strings.TrimSpace(m.input.Value())
 		if text == "" {
 			return nil
@@ -2061,6 +2131,8 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.previewStatus = "Sending..."
 		m.input.Reset()
 		m.input.SetHeight(1)
+		m.mentionHints = nil
+		m.mentionCursor = 0
 		chatID := m.activeChatID
 		replyTarget := m.replyToMsg
 		m.replyToMsg = nil
@@ -2094,6 +2166,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+	m.updateMentionHints()
 	return cmd
 }
 
@@ -2154,9 +2227,23 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.selectedMediaIdx = len(mediaIndices) - 1
 			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
 				limit := m.cfg.GetCycleMsgCountPerChat()
-				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(contact.JID, limit, time.Time{}, true))
+				cmds := []tea.Cmd{tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(contact.JID, limit, time.Time{}, true)}
+				if contact.IsGroup || strings.Contains(contact.JID, "@g.us") {
+					m.groupParticipants = nil
+					m.mentionHints = nil
+					m.mentionCursor = 0
+					cmds = append(cmds, m.fetchGroupParticipantsCmd(contact.JID))
+				}
+				return tea.Batch(cmds...)
 			}
-			return tea.Batch(tea.ClearScreen, textinput.Blink)
+			cmds := []tea.Cmd{tea.ClearScreen, textinput.Blink}
+			if contact.IsGroup || strings.Contains(contact.JID, "@g.us") {
+				m.groupParticipants = nil
+				m.mentionHints = nil
+				m.mentionCursor = 0
+				cmds = append(cmds, m.fetchGroupParticipantsCmd(contact.JID))
+			}
+			return tea.Batch(cmds...)
 		}
 		// Direct input fallback
 		rawInput := strings.TrimSpace(m.contactSearch.Value())
@@ -2193,11 +2280,18 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.replyToMsg = nil
 			mediaIndices := m.getChatMediaIndices()
 			m.selectedMediaIdx = len(mediaIndices) - 1
+			cmds := []tea.Cmd{tea.ClearScreen, textinput.Blink}
+			if strings.Contains(targetID, "@g.us") {
+				m.groupParticipants = nil
+				m.mentionHints = nil
+				m.mentionCursor = 0
+				cmds = append(cmds, m.fetchGroupParticipantsCmd(targetID))
+			}
 			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
 				limit := m.cfg.GetCycleMsgCountPerChat()
-				return tea.Batch(tea.ClearScreen, textinput.Blink, m.fetchHistoryCmd(targetID, limit, time.Time{}, true))
+				cmds = append(cmds, m.fetchHistoryCmd(targetID, limit, time.Time{}, true))
 			}
-			return tea.Batch(tea.ClearScreen, textinput.Blink)
+			return tea.Batch(cmds...)
 		}
 		return nil
 	}
@@ -2881,10 +2975,75 @@ func (m *Model) renderChatView() []string {
 		replyBarLines = 1
 	}
 
+	var mentionHintLines []string
+	if len(m.mentionHints) > 0 {
+		header := "  " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89DCEB")).Render("@ Mention") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" [Tab/Enter: tag · Ctrl+N/P: select · Esc: close]:")
+		mentionHintLines = append(mentionHintLines, header)
+
+		maxVisible := 4
+		if m.maxCanvasHeight() < 16 {
+			maxVisible = 2
+		}
+		startIdx := 0
+		if m.mentionCursor >= maxVisible {
+			startIdx = m.mentionCursor - maxVisible + 1
+		}
+		endIdx := min(len(m.mentionHints), startIdx+maxVisible)
+
+		for i := startIdx; i < endIdx; i++ {
+			h := m.mentionHints[i]
+			user := strings.Split(h.JID, "@")[0]
+			if idx := strings.Index(user, ":"); idx != -1 {
+				user = user[:idx]
+			}
+			phoneInfo := ""
+			if user != "" && user != h.Name {
+				phoneInfo = fmt.Sprintf(" (@%s)", user)
+			}
+			name := h.Name
+
+			prefix := "    "
+			if i == m.mentionCursor {
+				prefix = "  ▸ "
+			}
+
+			// Ensure item fits within terminal content width cw
+			prefixLen := 4
+			phoneLen := len([]rune(phoneInfo))
+			availName := max(8, cw-prefixLen-phoneLen-2)
+			rName := []rune(name)
+			if len(rName) > availName {
+				name = string(rName[:availName-3]) + "..."
+			}
+
+			var itemLine string
+			if i == m.mentionCursor {
+				styledPrefix := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render(prefix)
+				styledName := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render(name)
+				styledPhone := lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(phoneInfo)
+				itemLine = styledPrefix + styledName + styledPhone
+			} else {
+				styledPrefix := prefix
+				styledName := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Render(name)
+				styledPhone := lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(phoneInfo)
+				itemLine = styledPrefix + styledName + styledPhone
+			}
+			mentionHintLines = append(mentionHintLines, itemLine)
+		}
+
+		if len(m.mentionHints) > maxVisible {
+			footer := "    " + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(
+				fmt.Sprintf("... (%d/%d matches · type to filter)", m.mentionCursor+1, len(m.mentionHints)),
+			)
+			mentionHintLines = append(mentionHintLines, footer)
+		}
+	}
+
 	m.input.SetWidth(max(20, cw-6))
 	inputLines := strings.Split(m.input.View(), "\n")
-	inputH := len(inputLines) + replyBarLines
-	availH := max(3, m.maxCanvasHeight()-5-inputH)
+	inputH := len(inputLines) + replyBarLines + len(mentionHintLines)
+	availH := max(1, m.maxCanvasHeight()-5-inputH)
 	scrollInfo := ""
 
 	if len(msgLines) <= availH {
@@ -2918,6 +3077,9 @@ func (m *Model) renderChatView() []string {
 		lines = append(lines, replyBarStr)
 	}
 	lines = append(lines, inputLines...)
+	if len(mentionHintLines) > 0 {
+		lines = append(lines, mentionHintLines...)
+	}
 
 	mediaIndices := m.getChatMediaIndices()
 	var dynamicHelp string
@@ -3637,4 +3799,99 @@ func expandPath(p string) string {
 		}
 	}
 	return p
+}
+
+func (m *Model) updateMentionHints() {
+	isGroup := strings.Contains(m.activeChatID, "@g.us")
+	if !isGroup {
+		if chat, ok := m.unreadChats[m.activeChatID]; ok && chat != nil && chat.IsGroup {
+			isGroup = true
+		}
+	}
+	if m.view != ViewChat || !isGroup {
+		m.mentionHints = nil
+		m.mentionCursor = 0
+		return
+	}
+	val := m.input.Value()
+	lastAt := strings.LastIndex(val, "@")
+	if lastAt == -1 {
+		m.mentionHints = nil
+		m.mentionCursor = 0
+		return
+	}
+	if lastAt > 0 {
+		prev := rune(val[lastAt-1])
+		if !unicode.IsSpace(prev) && prev != '(' && prev != '[' && prev != '{' {
+			m.mentionHints = nil
+			m.mentionCursor = 0
+			return
+		}
+	}
+	query := val[lastAt+1:]
+	if strings.ContainsAny(query, " \n\r\t") {
+		m.mentionHints = nil
+		m.mentionCursor = 0
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+
+	// Collect pool of candidates: groupParticipants + senders from activeMsgs
+	var candidates []domain.Contact
+	seen := make(map[string]bool)
+	for _, p := range m.groupParticipants {
+		if p.Name == "" || p.Name == "You" {
+			continue
+		}
+		if !seen[p.JID] {
+			seen[p.JID] = true
+			candidates = append(candidates, p)
+		}
+	}
+	for _, msg := range m.activeMsgs {
+		if msg.IsFromMe {
+			continue
+		}
+		name := m.resolveMsgSenderName(msg)
+		if name == "" || name == "You" || name == "Them" || isRawJID(name) {
+			continue
+		}
+		if !seen[msg.Sender] {
+			seen[msg.Sender] = true
+			candidates = append(candidates, domain.Contact{
+				JID:  msg.Sender,
+				Name: name,
+			})
+		}
+	}
+
+	var matches []domain.Contact
+	for _, c := range candidates {
+		if q == "" || strings.Contains(strings.ToLower(c.Name), q) || strings.Contains(strings.ToLower(c.PushName), q) || strings.Contains(c.JID, q) {
+			matches = append(matches, c)
+		}
+	}
+
+	m.mentionHints = matches
+	if m.mentionCursor >= len(matches) {
+		m.mentionCursor = 0
+	}
+}
+
+func (m *Model) applyMentionHint() {
+	if len(m.mentionHints) == 0 || m.mentionCursor >= len(m.mentionHints) {
+		return
+	}
+	c := m.mentionHints[m.mentionCursor]
+	val := m.input.Value()
+	lastAt := strings.LastIndex(val, "@")
+	if lastAt == -1 {
+		return
+	}
+	tag := "@" + c.Name + " "
+	newVal := val[:lastAt] + tag
+	m.input.SetValue(newVal)
+	m.input.CursorEnd()
+	m.mentionHints = nil
+	m.mentionCursor = 0
 }
