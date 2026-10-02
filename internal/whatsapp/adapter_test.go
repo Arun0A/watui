@@ -1,9 +1,14 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"image"
+	"image/color"
+	"image/gif"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +116,47 @@ func TestExtractDomainMessage(t *testing.T) {
 			},
 			expectedType: domain.MessageTypeReaction,
 			expectedBody: "[Reaction: +1]",
+		},
+		{
+			name: "video message with gif playback",
+			evt: &events.Message{
+				Info: types.MessageInfo{
+					MessageSource: types.MessageSource{
+						Chat:   testChatJID,
+						Sender: testSenderJID,
+					},
+					ID:        "GIF123",
+					Timestamp: testTimestamp,
+				},
+				Message: &waE2E.Message{
+					VideoMessage: &waE2E.VideoMessage{
+						GifPlayback: proto.Bool(true),
+					},
+				},
+			},
+			expectedType: domain.MessageTypeVideo,
+			expectedBody: "[GIF]",
+		},
+		{
+			name: "video message with gif playback and caption",
+			evt: &events.Message{
+				Info: types.MessageInfo{
+					MessageSource: types.MessageSource{
+						Chat:   testChatJID,
+						Sender: testSenderJID,
+					},
+					ID:        "GIF124",
+					Timestamp: testTimestamp,
+				},
+				Message: &waE2E.Message{
+					VideoMessage: &waE2E.VideoMessage{
+						GifPlayback: proto.Bool(true),
+						Caption:     proto.String("Dancing cat"),
+					},
+				},
+			},
+			expectedType: domain.MessageTypeVideo,
+			expectedBody: "Dancing cat",
 		},
 	}
 
@@ -562,5 +608,39 @@ func TestReactionQuotedAssociation(t *testing.T) {
 	}
 	if msg.QuotedSender != "919876543211" {
 		t.Errorf("Expected QuotedSender 919876543211, got %q", msg.QuotedSender)
+	}
+}
+
+func TestConvertGifToMp4(t *testing.T) {
+	// Create sample animated GIF in memory (odd dimensions to test padding scale)
+	rect := image.Rect(0, 0, 61, 61)
+	pal := color.Palette{color.Black, color.White}
+	img1 := image.NewPaletted(rect, pal)
+	img2 := image.NewPaletted(rect, pal)
+	img2.Set(10, 10, color.White)
+	g := &gif.GIF{
+		Image: []*image.Paletted{img1, img2},
+		Delay: []int{10, 10},
+	}
+	var buf bytes.Buffer
+	if err := gif.EncodeAll(&buf, g); err != nil {
+		t.Fatalf("Failed to encode test GIF: %v", err)
+	}
+
+	_, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed, skipping GIF conversion test")
+	}
+
+	mp4Data, err := convertGifToMp4(context.Background(), buf.Bytes())
+	if err != nil {
+		t.Fatalf("convertGifToMp4 failed: %v", err)
+	}
+	if len(mp4Data) == 0 {
+		t.Fatalf("convertGifToMp4 returned empty data")
+	}
+	// Verify MP4 signature (ftyp)
+	if !bytes.Contains(mp4Data[:min(len(mp4Data), 32)], []byte("ftyp")) {
+		t.Errorf("Converted data does not have MP4 ftyp box signature")
 	}
 }

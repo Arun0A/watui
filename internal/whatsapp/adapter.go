@@ -1,13 +1,17 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"image/gif"
+	"image/jpeg"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -808,6 +812,43 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 	return domainMsg, nil
 }
 
+// convertGifToMp4 converts raw GIF image bytes into an MP4 video (H.264 / yuv420p)
+// suitable for WhatsApp's native looping GIF playback.
+func convertGifToMp4(ctx context.Context, gifData []byte) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, errors.New("ffmpeg not found in PATH")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "watui-gif-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	inputPath := filepath.Join(tmpDir, "input.gif")
+	if err := os.WriteFile(inputPath, gifData, 0600); err != nil {
+		return nil, err
+	}
+
+	outputPath := filepath.Join(tmpDir, "output.mp4")
+	cmd := exec.CommandContext(ctx, ffmpegPath,
+		"-y",
+		"-i", inputPath,
+		"-c:v", "libx264",
+		"-pix_fmt", "yuv420p",
+		"-movflags", "+faststart",
+		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+		"-an",
+		outputPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("ffmpeg gif conversion failed: %w (output: %s)", err, string(out))
+	}
+
+	return os.ReadFile(outputPath)
+}
+
 // SendFileMessage uploads and sends a file attachment to a WhatsApp chat JID or raw phone number.
 func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
 	if a.client == nil {
@@ -846,21 +887,64 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		mimeType = detectedMime
 	}
 
+	var isGif bool
+	var gifThumb []byte
+	var gifWidth, gifHeight, gifSeconds uint32
+
+	if ext == ".gif" {
+		if g, err := gif.DecodeAll(bytes.NewReader(fileData)); err == nil && len(g.Image) > 0 {
+			firstFrame := g.Image[0]
+			bounds := firstFrame.Bounds()
+			gifWidth = uint32(bounds.Dx())
+			gifHeight = uint32(bounds.Dy())
+
+			var totalDelay100ths int
+			for _, d := range g.Delay {
+				totalDelay100ths += d
+			}
+			gifSeconds = uint32(totalDelay100ths / 100)
+			if gifSeconds == 0 {
+				gifSeconds = 1
+			}
+
+			var thumbBuf bytes.Buffer
+			if err := jpeg.Encode(&thumbBuf, firstFrame, &jpeg.Options{Quality: 60}); err == nil {
+				if len(thumbBuf.Bytes()) <= 32768 {
+					gifThumb = thumbBuf.Bytes()
+				}
+			}
+		}
+
+		mp4Data, err := convertGifToMp4(ctx, fileData)
+		if err == nil && len(mp4Data) > 0 {
+			fileData = mp4Data
+			mimeType = "video/mp4"
+			isGif = true
+		}
+	}
+
 	var appInfo whatsmeow.MediaType
 	var msgType domain.MessageType
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".gif", ".bmp":
-		appInfo = whatsmeow.MediaImage
-		msgType = domain.MessageTypeImage
-	case ".mp4", ".mov", ".avi", ".mkv", ".webm":
+	if isGif {
 		appInfo = whatsmeow.MediaVideo
 		msgType = domain.MessageTypeVideo
-	case ".mp3", ".ogg", ".wav", ".m4a", ".aac", ".flac":
-		appInfo = whatsmeow.MediaAudio
-		msgType = domain.MessageTypeAudio
-	default:
-		appInfo = whatsmeow.MediaDocument
-		msgType = domain.MessageTypeDocument
+	} else {
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".bmp":
+			appInfo = whatsmeow.MediaImage
+			msgType = domain.MessageTypeImage
+		case ".mp4", ".mov", ".avi", ".mkv", ".webm":
+			appInfo = whatsmeow.MediaVideo
+			msgType = domain.MessageTypeVideo
+		case ".mp3", ".ogg", ".wav", ".m4a", ".aac", ".flac":
+			appInfo = whatsmeow.MediaAudio
+			msgType = domain.MessageTypeAudio
+		default:
+			// Non-video, non-image files, or GIFs without ffmpeg installed,
+			// are safely uploaded as DocumentMessage so WhatsApp doesn't drop them.
+			appInfo = whatsmeow.MediaDocument
+			msgType = domain.MessageTypeDocument
+		}
 	}
 
 	resp, err := a.client.Upload(ctx, fileData, appInfo)
@@ -869,14 +953,20 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 	}
 
 	var waMsg *waE2E.Message
-	label := "Document"
-	switch msgType {
-	case domain.MessageTypeImage:
-		label = "Image"
-	case domain.MessageTypeVideo:
-		label = "Video"
-	case domain.MessageTypeAudio:
-		label = "Audio"
+	var label string
+	if isGif {
+		label = "GIF"
+	} else {
+		switch msgType {
+		case domain.MessageTypeImage:
+			label = "Image"
+		case domain.MessageTypeVideo:
+			label = "Video"
+		case domain.MessageTypeAudio:
+			label = "Audio"
+		default:
+			label = "Document"
+		}
 	}
 	bodyText := fmt.Sprintf("[%s: %s]", label, fileName)
 	if caption != "" {
@@ -908,6 +998,19 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 			FileEncSHA256: resp.FileEncSHA256,
 			FileSHA256:    resp.FileSHA256,
 			FileLength:    &resp.FileLength,
+		}
+		if isGif {
+			vidMsg.GifPlayback = proto.Bool(true)
+			if len(gifThumb) > 0 {
+				vidMsg.JPEGThumbnail = gifThumb
+			}
+			if gifWidth > 0 && gifHeight > 0 {
+				vidMsg.Width = proto.Uint32(gifWidth)
+				vidMsg.Height = proto.Uint32(gifHeight)
+			}
+			if gifSeconds > 0 {
+				vidMsg.Seconds = proto.Uint32(gifSeconds)
+			}
 		}
 		if caption != "" {
 			vidMsg.Caption = proto.String(caption)
@@ -2087,6 +2190,12 @@ func extractMessageContent(m *waE2E.Message) (string, domain.MessageType, bool) 
 	} else if m.AudioMessage != nil {
 		return "[Audio / Voice Note]", domain.MessageTypeAudio, true
 	} else if m.VideoMessage != nil {
+		if m.VideoMessage.GetGifPlayback() {
+			if m.VideoMessage.Caption != nil && *m.VideoMessage.Caption != "" {
+				return *m.VideoMessage.Caption, domain.MessageTypeVideo, true
+			}
+			return "[GIF]", domain.MessageTypeVideo, true
+		}
 		if m.VideoMessage.Caption != nil && *m.VideoMessage.Caption != "" {
 			return *m.VideoMessage.Caption, domain.MessageTypeVideo, true
 		}
