@@ -6,6 +6,10 @@
 
 A minimal WhatsApp TUI, specifically designed to reduce dependency on a browser or desktop application.
 
+<p align="center">
+  <img src="./demo.gif" alt="iblind demo">
+</p>
+
 **Philosophy**: Most of the time you do not require past conversation context visible for a reply. And you often have to keep whatsapp (either in web or desktop-app) open anticipating a message from someone, this eats up a lot of RAM of your system (which you were saving for absolutely nothing).
 
 So WA-TUI, just shows you the unread messages with message context persisting only for your active session. Although, you can start a new chat with any contact on demand. It is however a stripped down version of WhatsApp.
