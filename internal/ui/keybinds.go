@@ -60,7 +60,7 @@ var allKeybindGroups = []keybindGroup{
 			{key: "PgUp / Ctrl+Y", desc: "Scroll chat history up 5 lines"},
 			{key: "PgDn / Ctrl+D / Ctrl+E", desc: "Scroll chat history down 5 lines"},
 			{key: "Alt+J / Alt+K", desc: "Enter message navigation / hover mode"},
-			{key: "Alt+Shift+J / Alt+Shift+K", desc: "Jump to next / previous media message"},
+			{key: "Alt+M / Alt+Shift+J/K", desc: "Jump to next / previous media message"},
 		},
 	},
 	{
@@ -68,7 +68,7 @@ var allKeybindGroups = []keybindGroup{
 		items: []keybindEntry{
 			{key: "j / Down / Ctrl+N", desc: "Hover next message down"},
 			{key: "k / Up / Ctrl+P", desc: "Hover previous message up"},
-			{key: "Alt+Shift+J / K", desc: "Jump to next / previous media message"},
+			{key: "J / K (or m / M)", desc: "Jump to next / previous media message"},
 			{key: "r", desc: "Reply to hovered message (focuses input box)"},
 			{key: "y", desc: "Copy hovered message text to system clipboard"},
 			{key: "Ctrl+V / Alt+V", desc: "Paste from clipboard into input (focuses input)"},

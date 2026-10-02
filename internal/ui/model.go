@@ -1797,12 +1797,98 @@ func (m *Model) syncSelectedMediaIdx() {
 		return
 	}
 	mediaIndices := m.getChatMediaIndices()
+	if len(mediaIndices) == 0 {
+		return
+	}
 	for mIdx, origIdx := range mediaIndices {
 		if origIdx == m.selectedMsgIdx {
 			m.selectedMediaIdx = mIdx
 			return
 		}
 	}
+	for mIdx, origIdx := range mediaIndices {
+		if origIdx >= m.selectedMsgIdx {
+			m.selectedMediaIdx = mIdx
+			return
+		}
+	}
+	m.selectedMediaIdx = len(mediaIndices) - 1
+}
+
+func (m *Model) jumpToNextMedia() bool {
+	m.confirmDocAction = false
+	m.pendingDocMsg = nil
+	mediaIndices := m.getChatMediaIndices()
+	if len(mediaIndices) == 0 {
+		m.previewStatus = "No media found in this chat"
+		return false
+	}
+	if m.selectedMsgIdx < 0 {
+		if m.selectedMediaIdx < len(mediaIndices)-1 {
+			m.selectedMediaIdx++
+		} else {
+			m.selectedMediaIdx = 0
+		}
+		m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+		m.input.Blur()
+		m.scrollToMessage(m.selectedMsgIdx)
+		m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+		return true
+	}
+	targetMediaIdx := -1
+	for mIdx, origIdx := range mediaIndices {
+		if origIdx > m.selectedMsgIdx {
+			targetMediaIdx = mIdx
+			break
+		}
+	}
+	if targetMediaIdx == -1 {
+		targetMediaIdx = len(mediaIndices) - 1
+	}
+	m.selectedMediaIdx = targetMediaIdx
+	m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+	m.input.Blur()
+	m.scrollToMessage(m.selectedMsgIdx)
+	m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+	return true
+}
+
+func (m *Model) jumpToPrevMedia() bool {
+	m.confirmDocAction = false
+	m.pendingDocMsg = nil
+	mediaIndices := m.getChatMediaIndices()
+	if len(mediaIndices) == 0 {
+		m.previewStatus = "No media found in this chat"
+		return false
+	}
+	if m.selectedMsgIdx < 0 {
+		if m.selectedMediaIdx > 0 {
+			m.selectedMediaIdx--
+		} else {
+			m.selectedMediaIdx = len(mediaIndices) - 1
+		}
+		m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+		m.input.Blur()
+		m.scrollToMessage(m.selectedMsgIdx)
+		m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+		return true
+	}
+	targetMediaIdx := -1
+	for i := len(mediaIndices) - 1; i >= 0; i-- {
+		if mediaIndices[i] < m.selectedMsgIdx {
+			targetMediaIdx = i
+			break
+		}
+	}
+	if targetMediaIdx == -1 {
+		targetMediaIdx = 0
+	}
+	m.selectedMediaIdx = targetMediaIdx
+	m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+	m.input.Blur()
+	m.scrollToMessage(m.selectedMsgIdx)
+	m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+	return true
 }
 
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
@@ -1939,40 +2025,12 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			}
 			return nil
 
-		case "alt+shift+k", "alt+K", "alt+shift+up", "alt+left":
-			m.confirmDocAction = false
-			m.pendingDocMsg = nil
-			mediaIndices := m.getChatMediaIndices()
-			if len(mediaIndices) == 0 {
-				m.previewStatus = "No media found in this chat"
-				return nil
-			}
-			if m.selectedMediaIdx > 0 {
-				m.selectedMediaIdx--
-			} else {
-				m.selectedMediaIdx = len(mediaIndices) - 1
-			}
-			m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
-			m.scrollToMessage(m.selectedMsgIdx)
-			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+		case "alt+shift+k", "alt+K", "alt+shift+up", "alt+left", "K", "shift+up", "M", "[":
+			m.jumpToPrevMedia()
 			return nil
 
-		case "alt+shift+j", "alt+J", "alt+shift+down", "alt+right":
-			m.confirmDocAction = false
-			m.pendingDocMsg = nil
-			mediaIndices := m.getChatMediaIndices()
-			if len(mediaIndices) == 0 {
-				m.previewStatus = "No media found in this chat"
-				return nil
-			}
-			if m.selectedMediaIdx < len(mediaIndices)-1 {
-				m.selectedMediaIdx++
-			} else {
-				m.selectedMediaIdx = 0
-			}
-			m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
-			m.scrollToMessage(m.selectedMsgIdx)
-			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+		case "alt+shift+j", "alt+J", "alt+shift+down", "alt+right", "J", "shift+down", "m", "]":
+			m.jumpToNextMedia()
 			return nil
 
 		case "alt+p":
@@ -2106,42 +2164,31 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 
-	case "alt+shift+k", "alt+K", "alt+shift+up", "alt+left":
-		m.confirmDocAction = false
-		m.pendingDocMsg = nil
-		mediaIndices := m.getChatMediaIndices()
-		if len(mediaIndices) == 0 {
-			m.previewStatus = "No media found in this chat"
+	case "alt+m":
+		if m.selectedMsgIdx < 0 {
+			mediaIndices := m.getChatMediaIndices()
+			if len(mediaIndices) == 0 {
+				m.previewStatus = "No media found in this chat"
+				return nil
+			}
+			if m.selectedMediaIdx < 0 || m.selectedMediaIdx >= len(mediaIndices) {
+				m.selectedMediaIdx = len(mediaIndices) - 1
+			}
+			m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
+			m.input.Blur()
+			m.scrollToMessage(m.selectedMsgIdx)
+			m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
 			return nil
 		}
-		if m.selectedMediaIdx > 0 {
-			m.selectedMediaIdx--
-		} else {
-			m.selectedMediaIdx = len(mediaIndices) - 1
-		}
-		m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
-		m.input.Blur()
-		m.scrollToMessage(m.selectedMsgIdx)
-		m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+		m.jumpToNextMedia()
 		return nil
 
-	case "alt+shift+j", "alt+J", "alt+shift+down", "alt+right":
-		m.confirmDocAction = false
-		m.pendingDocMsg = nil
-		mediaIndices := m.getChatMediaIndices()
-		if len(mediaIndices) == 0 {
-			m.previewStatus = "No media found in this chat"
-			return nil
-		}
-		if m.selectedMediaIdx < len(mediaIndices)-1 {
-			m.selectedMediaIdx++
-		} else {
-			m.selectedMediaIdx = 0
-		}
-		m.selectedMsgIdx = mediaIndices[m.selectedMediaIdx]
-		m.input.Blur()
-		m.scrollToMessage(m.selectedMsgIdx)
-		m.previewStatus = fmt.Sprintf("Media %d/%d (%s)", m.selectedMediaIdx+1, len(mediaIndices), m.activeMsgs[m.selectedMsgIdx].Type)
+	case "alt+shift+k", "alt+K", "alt+shift+up", "alt+left", "alt+M", "alt+shift+m", "alt+[":
+		m.jumpToPrevMedia()
+		return nil
+
+	case "alt+shift+j", "alt+J", "alt+shift+down", "alt+right", "alt+]":
+		m.jumpToNextMedia()
 		return nil
 
 	case "alt+f":
@@ -3210,11 +3257,11 @@ func (m *Model) renderChatView() []string {
 	var dynamicHelp string
 
 	if m.selectedMsgIdx >= 0 {
-		dynamicHelp = "[r] Reply · [y] Copy · [l] Link · [p] Preview · [Esc] Input"
+		dynamicHelp = "[j/k] Msg · [J/K] Media · [p] Preview · [r] Reply · [y] Copy · [Esc] Input"
 	} else {
 		mediaHelp := ""
 		if len(mediaIndices) > 1 {
-			mediaHelp = fmt.Sprintf("[Alt+P] Preview (%d/%d) · [Alt+Shift+↑/↓] Media", m.selectedMediaIdx+1, len(mediaIndices))
+			mediaHelp = fmt.Sprintf("[Alt+P] Preview (%d/%d) · [Alt+M] Media", m.selectedMediaIdx+1, len(mediaIndices))
 		} else if len(mediaIndices) == 1 {
 			mediaHelp = "[Alt+P] Preview Media"
 		}

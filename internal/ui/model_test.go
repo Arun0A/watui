@@ -2198,6 +2198,127 @@ func TestChatMessageHoverNavigationAndActions(t *testing.T) {
 	}
 }
 
+func TestMediaJumpingShortcuts(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 80
+	model.height = 24
+
+	chatID := "media_test@s.whatsapp.net"
+	messages := []domain.Message{
+		{ID: "m0", ChatID: chatID, Sender: chatID, Body: "Text 0", Type: domain.MessageTypeText, Timestamp: time.Now().Add(-5 * time.Minute)},
+		{ID: "m1", ChatID: chatID, Sender: chatID, Body: "Image 1", Type: domain.MessageTypeImage, Timestamp: time.Now().Add(-4 * time.Minute)},
+		{ID: "m2", ChatID: chatID, Sender: chatID, Body: "Text 2", Type: domain.MessageTypeText, Timestamp: time.Now().Add(-3 * time.Minute)},
+		{ID: "m3", ChatID: chatID, Sender: chatID, Body: "Audio 3", Type: domain.MessageTypeAudio, Timestamp: time.Now().Add(-2 * time.Minute)},
+		{ID: "m4", ChatID: chatID, Sender: chatID, Body: "Text 4", Type: domain.MessageTypeText, Timestamp: time.Now().Add(-1 * time.Minute)},
+		{ID: "m5", ChatID: chatID, Sender: chatID, Body: "Video 5", Type: domain.MessageTypeVideo, Timestamp: time.Now()},
+	}
+
+	model.unreadChats[chatID] = &UnreadChat{
+		ChatID:   chatID,
+		Name:     "Media Tester",
+		Messages: messages,
+	}
+	model.chatOrder = []string{chatID}
+	model.cursor = 0
+
+	// Open chat
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat, got %v", model.view)
+	}
+	if model.selectedMsgIdx != -1 {
+		t.Fatalf("Expected selectedMsgIdx -1 on open, got %d", model.selectedMsgIdx)
+	}
+
+	// 1. Alt+M from compose box jumps to latest media (m5, index 5)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}, Alt: true})
+	if model.selectedMsgIdx != 5 {
+		t.Errorf("Expected Alt+M to jump to m5 (idx 5), got %d", model.selectedMsgIdx)
+	}
+	if model.input.Focused() {
+		t.Errorf("Expected text input to blur on media jump")
+	}
+
+	// 2. In hover mode, press 'K' (shift+k) to jump to previous media (m3, idx 3)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}})
+	if model.selectedMsgIdx != 3 {
+		t.Errorf("Expected 'K' to jump to m3 (idx 3), got %d", model.selectedMsgIdx)
+	}
+
+	// 3. Press 'M' (shift+m) to jump to previous media (m1, idx 1)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	if model.selectedMsgIdx != 1 {
+		t.Errorf("Expected 'M' to jump to m1 (idx 1), got %d", model.selectedMsgIdx)
+	}
+
+	// 4. At first media, pressing 'K' should stay at first media
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}})
+	if model.selectedMsgIdx != 1 {
+		t.Errorf("Expected 'K' at first media to stay at idx 1, got %d", model.selectedMsgIdx)
+	}
+
+	// 5. Press 'J' (shift+j) to jump forward to next media (m3, idx 3)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
+	if model.selectedMsgIdx != 3 {
+		t.Errorf("Expected 'J' to jump forward to m3 (idx 3), got %d", model.selectedMsgIdx)
+	}
+
+	// 6. Press 'm' to jump forward to next media (m5, idx 5)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if model.selectedMsgIdx != 5 {
+		t.Errorf("Expected 'm' to jump forward to m5 (idx 5), got %d", model.selectedMsgIdx)
+	}
+
+	// 7. Press '[' to jump backward to previous media (m3, idx 3)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	if model.selectedMsgIdx != 3 {
+		t.Errorf("Expected '[' to jump to m3 (idx 3), got %d", model.selectedMsgIdx)
+	}
+
+	// 8. Press ']' to jump forward to next media (m5, idx 5)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	if model.selectedMsgIdx != 5 {
+		t.Errorf("Expected ']' to jump to m5 (idx 5), got %d", model.selectedMsgIdx)
+	}
+
+	// 9. Regular 'k' moves to m4 (Text 4, idx 4)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if model.selectedMsgIdx != 4 {
+		t.Errorf("Expected 'k' to move to m4 (idx 4), got %d", model.selectedMsgIdx)
+	}
+
+	// 10. While on text message (idx 4), pressing 'K' jumps to previous media (m3, idx 3)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}})
+	if model.selectedMsgIdx != 3 {
+		t.Errorf("Expected 'K' from text message idx 4 to jump to m3 (idx 3), got %d", model.selectedMsgIdx)
+	}
+
+	// 11. Esc back to compose box
+	model.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.selectedMsgIdx != -1 || !model.input.Focused() {
+		t.Fatalf("Expected Esc to return to compose box")
+	}
+
+	// 12. From compose box, Alt+M jumps back into media hover mode at current media (m3, idx 3)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}, Alt: true})
+	if model.selectedMsgIdx != 3 {
+		t.Errorf("Expected Alt+M to jump to m3 (idx 3), got %d", model.selectedMsgIdx)
+	}
+
+	// 13. While hovering, Alt+Shift+K jumps up to m1 (idx 1)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}, Alt: true})
+	if model.selectedMsgIdx != 1 {
+		t.Errorf("Expected Alt+Shift+K while hovering to jump to m1 (idx 1), got %d", model.selectedMsgIdx)
+	}
+
+	// 14. While hovering, Alt+Shift+J jumps down to m3 (idx 3)
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}, Alt: true})
+	if model.selectedMsgIdx != 3 {
+		t.Errorf("Expected Alt+Shift+J to jump down to m3 (idx 3), got %d", model.selectedMsgIdx)
+	}
+}
+
 func TestReplyRenderingWhenQuotedMessageNotVisible(t *testing.T) {
 	adapter := &mockAdapter{}
 	model := NewModel(context.Background(), adapter)

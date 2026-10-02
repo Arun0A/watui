@@ -142,7 +142,8 @@ nix develop github:Arun0A/watui
 | <kbd>Esc</kbd> | Cancel reply / Back to inbox |
 | <kbd>Ctrl</kbd> + <kbd>h</kbd> / <kbd>Ctrl</kbd> + <kbd>/</kbd> | Open all keybinds menu (also <kbd>F1</kbd>) |
 | <kbd>Alt</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Navigate through every message in the chat (message hover mode) |
-| <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>j</kbd> / <kbd>k</kbd> | Jump through media / document messages only |
+| <kbd>J</kbd> / <kbd>K</kbd> *(while hovering)* | Jump to next / previous media message |
+| <kbd>Alt</kbd> + <kbd>m</kbd> | Jump to media messages from message box |
 | <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |
 | <kbd>y</kbd> *(while hovering)* | Copy message text to clipboard |
 | <kbd>l</kbd> *(while hovering)* | Open link(s) in default browser |
