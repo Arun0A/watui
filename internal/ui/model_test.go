@@ -2922,3 +2922,82 @@ func TestCleanupOnExitClearsClipboardCache(t *testing.T) {
 		t.Errorf("Expected file to be removed after CleanupOnExit, got err=%v", err)
 	}
 }
+
+func TestArchivedChatWithMentionDisplayedInUnreadSection(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+
+	// Mock adapter: both chats are archived in WhatsApp
+	adapter.archivedChats = map[string]bool{
+		"archived_group@g.us":          true,
+		"archived_user@s.whatsapp.net": true,
+	}
+
+	// 1. Incoming message in archived group WITHOUT mention
+	model.handleIncomingMessage(domain.Message{
+		ID:         "m_no_mention",
+		ChatID:     "archived_group@g.us",
+		ChatName:   "Archived Work Group",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Body:       "Just some general chat message",
+		Timestamp:  time.Now(),
+	})
+
+	// When showArchived is false, it should NOT be in active chatOrder
+	if len(model.chatOrder) != 0 {
+		t.Fatalf("Expected 0 chats in active unread list for archived group without mention, got %d", len(model.chatOrder))
+	}
+
+	// 2. Incoming message in archived group WITH mention (@You)
+	model.handleIncomingMessage(domain.Message{
+		ID:         "m_with_mention",
+		ChatID:     "archived_group@g.us",
+		ChatName:   "Archived Work Group",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Body:       "Hey @You need your urgent review here",
+		Timestamp:  time.Now().Add(time.Second),
+	})
+
+	// Now it MUST be displayed in active unread section (!m.showArchived)
+	if len(model.chatOrder) != 1 || model.chatOrder[0] != "archived_group@g.us" {
+		t.Fatalf("Expected archived group with mention to be displayed in unread section, got %v", model.chatOrder)
+	}
+
+	// Check rendering contains [Archived] and mention indicator
+	rendered := strings.Join(model.renderUnreadListView(), "\n")
+	if !strings.Contains(rendered, "[Archived]") {
+		t.Errorf("Expected '[Archived]' in rendered view for archived chat displayed in unread section, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "@") {
+		t.Errorf("Expected '@' mention badge in rendered unread view, got:\n%s", rendered)
+	}
+
+	// 3. Incoming message in archived 1-on-1 chat WITH mention
+	model.handleIncomingMessage(domain.Message{
+		ID:          "m_dm_mention",
+		ChatID:      "archived_user@s.whatsapp.net",
+		ChatName:    "Old Friend",
+		Sender:      "archived_user@s.whatsapp.net",
+		SenderName:  "Old Friend",
+		Body:        "Hey @You are you still around?",
+		IsMentioned: true,
+		Timestamp:   time.Now().Add(2 * time.Second),
+	})
+
+	// Now both chats should be in active unread section
+	if len(model.chatOrder) != 2 {
+		t.Fatalf("Expected 2 chats in active unread section, got %d (%v)", len(model.chatOrder), model.chatOrder)
+	}
+
+	// 4. Opening the chat clears HasMention
+	model.cursor = 0
+	_ = model.updateUnreadList(tea.KeyMsg{Type: tea.KeyEnter})
+	openedID := model.activeChatID
+	if model.unreadChats[openedID].HasMention {
+		t.Errorf("Expected HasMention to be cleared after opening chat %s", openedID)
+	}
+}

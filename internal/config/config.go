@@ -53,10 +53,11 @@ func (p *PreviewConfig) UnmarshalYAML(value *yaml.Node) error {
 
 // NotificationConfig controls desktop notifications and sounds for incoming messages.
 type NotificationConfig struct {
-	Enabled   bool   `json:"enabled" yaml:"enabled"`
-	Banner    bool   `json:"banner" yaml:"banner"`
-	Sound     bool   `json:"sound" yaml:"sound"`
-	SoundPath string `json:"sound_path" yaml:"sound_path"`
+	Enabled       bool   `json:"enabled" yaml:"enabled"`
+	Banner        bool   `json:"banner" yaml:"banner"`
+	Sound         bool   `json:"sound" yaml:"sound"`
+	SoundPath     string `json:"sound_path" yaml:"sound_path"`
+	OnlyOnMention bool   `json:"only_on_mention" yaml:"only_on_mention"`
 }
 
 // HistoryConfig controls local message history caching and cyclic retention.
@@ -190,7 +191,18 @@ func (c *Config) GetNotificationConfig() NotificationConfig {
 	if n.SoundPath == "" && c.Notification.SoundPath != "" {
 		n.SoundPath = c.Notification.SoundPath
 	}
+	if !n.OnlyOnMention && c.Notification.OnlyOnMention {
+		n.OnlyOnMention = true
+	}
 	return n
+}
+
+// IsOnlyOnMention returns true if group chat notifications should only be triggered on mentions.
+func (c *Config) IsOnlyOnMention() bool {
+	if c == nil {
+		return false
+	}
+	return c.GetNotificationConfig().OnlyOnMention
 }
 
 // ResolveSoundPath resolves the audio file path to play for notifications.

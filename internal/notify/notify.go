@@ -11,6 +11,11 @@ import (
 	"watui/internal/domain"
 )
 
+var (
+	sendBannerFunc = SendBanner
+	playSoundFunc  = PlaySound
+)
+
 // Dispatch evaluates config and triggers banner and/or sound notifications for an incoming message.
 func Dispatch(cfg *config.Config, msg domain.Message) {
 	if cfg == nil {
@@ -33,16 +38,22 @@ func Dispatch(cfg *config.Config, msg domain.Message) {
 		return
 	}
 
+	// For group chats, if only_on_mention is enabled, notify only when user is tagged/mentioned
+	isGroup := strings.HasSuffix(msg.ChatID, "@g.us") || strings.Contains(msg.ChatID, "@g.us")
+	if isGroup && notifCfg.OnlyOnMention && !msg.MentionsMe() {
+		return
+	}
+
 	title, body := FormatNotification(msg)
 
 	if notifCfg.Banner {
-		SendBanner(title, body)
+		sendBannerFunc(title, body)
 	}
 
 	if notifCfg.Sound {
 		soundPath := cfg.ResolveSoundPath()
 		if soundPath != "" {
-			PlaySound(soundPath)
+			playSoundFunc(soundPath)
 		}
 	}
 }

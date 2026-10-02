@@ -565,7 +565,10 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 	}
 
 	adapter.OnMessage(func(msg domain.Message) {
-		if appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) || adapter.IsChatArchived(msg.ChatID) {
+		if appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+			return
+		}
+		if adapter.IsChatArchived(msg.ChatID) && !msg.MentionsMe() {
 			return
 		}
 		if loggingEnabled {

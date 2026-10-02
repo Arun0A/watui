@@ -44,6 +44,7 @@ type UnreadChat struct {
 	IsGroup      bool
 	IsPinned     bool
 	IsArchived   bool
+	HasMention   bool
 	UnreadCount  int
 	Sender       string
 	Messages     []domain.Message
@@ -1159,7 +1160,7 @@ func (m *Model) sortChatOrderLocked() {
 		if m.showArchived {
 			return chat.IsArchived
 		}
-		return !chat.IsArchived
+		return !chat.IsArchived || chat.HasMention
 	}
 
 	pinnedRules := m.cfg.GetPinned()
@@ -1282,6 +1283,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 				IsGroup:      isGroup,
 				IsPinned:     isPinned,
 				IsArchived:   isArchived,
+				HasMention:   msg.MentionsMe(),
 				UnreadCount:  1,
 				Sender:       msg.Sender,
 				Messages:     []domain.Message{msg},
@@ -1307,6 +1309,9 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 					chat.Messages[len(chat.Messages)-1] = msg
 				}
 				chat.LastReceived = msg.Timestamp
+			}
+			if msg.MentionsMe() {
+				chat.HasMention = true
 			}
 			if isPinned {
 				chat.IsPinned = true
@@ -1402,6 +1407,7 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 			IsGroup:      isGroup,
 			IsPinned:     isPinned,
 			IsArchived:   isArchived,
+			HasMention:   msg.MentionsMe(),
 			UnreadCount:  1,
 			Sender:       msg.Sender,
 			Messages:     []domain.Message{msg},
@@ -1410,6 +1416,9 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		m.unreadChats[msg.ChatID] = chat
 	} else {
 		chat.UnreadCount++
+		if msg.MentionsMe() {
+			chat.HasMention = true
+		}
 		if len(chat.Messages) < 50 {
 			chat.Messages = append(chat.Messages, msg)
 		} else {
@@ -1533,6 +1542,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			}(chat.ChatID, chat.Sender, ids)
 
 			chat.UnreadCount = 0
+			chat.HasMention = false
 			if m.readChats == nil {
 				m.readChats = make(map[string]bool)
 			}
@@ -1647,6 +1657,7 @@ func (m *Model) dismissUnread(chatID string) {
 
 	if chat != nil && chat.IsPinned {
 		chat.Messages = nil
+		chat.HasMention = false
 		return
 	}
 
@@ -2498,6 +2509,12 @@ var (
 			Background(lipgloss.Color("#F9E2AF")).
 			Padding(0, 1)
 
+	mentionBadgeStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#11111B")).
+				Background(lipgloss.Color("#A6E3A1")).
+				Padding(0, 1)
+
 	selectedTitleStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#89B4FA"))
@@ -2746,7 +2763,11 @@ func (m *Model) renderUnreadListView() []string {
 
 			var badge string
 			if chat.UnreadCount > 0 {
-				badge = badgeStyle.Render(fmt.Sprintf("%d", chat.UnreadCount))
+				if chat.HasMention {
+					badge = mentionBadgeStyle.Render(fmt.Sprintf("@ %d", chat.UnreadCount))
+				} else {
+					badge = badgeStyle.Render(fmt.Sprintf("%d", chat.UnreadCount))
+				}
 			} else if chat.IsPinned {
 				badge = pinBadgeStyle.Render("PIN")
 			}
@@ -2754,6 +2775,9 @@ func (m *Model) renderUnreadListView() []string {
 			name := chat.Name
 			if chat.IsGroup || strings.Contains(chat.ChatID, "@g.us") {
 				name = "[Group] " + chat.Name
+			}
+			if chat.IsArchived && !m.showArchived {
+				name = "[Archived] " + name
 			}
 			if chat.IsPinned {
 				name = "* " + name

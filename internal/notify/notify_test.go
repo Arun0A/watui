@@ -109,3 +109,89 @@ func TestDispatchRules(t *testing.T) {
 		Body:       "Buy crypto",
 	})
 }
+
+func TestOnlyOnMentionNotifications(t *testing.T) {
+	origBanner := sendBannerFunc
+	origSound := playSoundFunc
+	defer func() {
+		sendBannerFunc = origBanner
+		playSoundFunc = origSound
+	}()
+
+	var bannerDispatched bool
+	sendBannerFunc = func(title, body string) {
+		bannerDispatched = true
+	}
+	playSoundFunc = func(path string) {}
+
+	cfg := &config.Config{
+		Notifications: config.NotificationConfig{
+			Enabled:       true,
+			Banner:        true,
+			Sound:         false,
+			OnlyOnMention: true,
+		},
+	}
+
+	// 1. Group message without mention -> should NOT trigger notification
+	bannerDispatched = false
+	Dispatch(cfg, domain.Message{
+		ChatID:     "120363000000000000@g.us",
+		ChatName:   "Tech Group",
+		SenderName: "Bob",
+		Body:       "Regular discussion without tags",
+	})
+	if bannerDispatched {
+		t.Errorf("Expected NO notification for group message without mention when only_on_mention: true")
+	}
+
+	// 2. Group message with @You mention -> SHOULD trigger notification
+	bannerDispatched = false
+	Dispatch(cfg, domain.Message{
+		ChatID:     "120363000000000000@g.us",
+		ChatName:   "Tech Group",
+		SenderName: "Alice",
+		Body:       "Hey @You please take a look at this PR",
+	})
+	if !bannerDispatched {
+		t.Errorf("Expected notification for group message with @You mention")
+	}
+
+	// 3. Group message with IsMentioned flag -> SHOULD trigger notification
+	bannerDispatched = false
+	Dispatch(cfg, domain.Message{
+		ChatID:      "120363000000000000@g.us",
+		ChatName:    "Tech Group",
+		SenderName:  "Charlie",
+		Body:        "Tagged in message",
+		IsMentioned: true,
+	})
+	if !bannerDispatched {
+		t.Errorf("Expected notification for group message with IsMentioned: true")
+	}
+
+	// 4. Direct message (1-on-1) without mention -> SHOULD trigger notification (only_on_mention only filters group chats)
+	bannerDispatched = false
+	Dispatch(cfg, domain.Message{
+		ChatID:     "123456789@s.whatsapp.net",
+		ChatName:   "Alice",
+		SenderName: "Alice",
+		Body:       "Direct private message",
+	})
+	if !bannerDispatched {
+		t.Errorf("Expected notification for direct 1-on-1 message when only_on_mention is true")
+	}
+
+	// 5. When only_on_mention is false -> group messages without mention notify normally
+	cfg.Notifications.OnlyOnMention = false
+	bannerDispatched = false
+	Dispatch(cfg, domain.Message{
+		ChatID:     "120363000000000000@g.us",
+		ChatName:   "Tech Group",
+		SenderName: "Bob",
+		Body:       "General group announcement",
+	})
+	if !bannerDispatched {
+		t.Errorf("Expected notification for general group message when only_on_mention: false")
+	}
+}

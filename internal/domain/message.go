@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -29,21 +31,25 @@ const (
 	MessageStatusFailed    MessageStatus = "failed"
 )
 
+var mentionYouRegex = regexp.MustCompile(`(?:^|[^\w@])(@You)\b`)
+
 // Message is the core protocol-agnostic representation of a WhatsApp message.
 type Message struct {
-	ID           string        `json:"id"`
-	ChatID       string        `json:"chat_id"`
-	ChatName     string        `json:"chat_name,omitempty"`
-	Sender       string        `json:"sender"`
-	SenderName   string        `json:"sender_name,omitempty"`
-	Timestamp    time.Time     `json:"timestamp"`
-	IsFromMe     bool          `json:"is_from_me"`
-	Type         MessageType   `json:"type"`
-	Body         string        `json:"body"`
-	Status       MessageStatus `json:"status"`
-	QuotedID     string        `json:"quoted_id,omitempty"`
-	QuotedText   string        `json:"quoted_text,omitempty"`
-	QuotedSender string        `json:"quoted_sender,omitempty"`
+	ID            string        `json:"id"`
+	ChatID        string        `json:"chat_id"`
+	ChatName      string        `json:"chat_name,omitempty"`
+	Sender        string        `json:"sender"`
+	SenderName    string        `json:"sender_name,omitempty"`
+	Timestamp     time.Time     `json:"timestamp"`
+	IsFromMe      bool          `json:"is_from_me"`
+	Type          MessageType   `json:"type"`
+	Body          string        `json:"body"`
+	Status        MessageStatus `json:"status"`
+	QuotedID      string        `json:"quoted_id,omitempty"`
+	QuotedText    string        `json:"quoted_text,omitempty"`
+	QuotedSender  string        `json:"quoted_sender,omitempty"`
+	MentionedJIDs []string      `json:"mentioned_jids,omitempty"`
+	IsMentioned   bool          `json:"is_mentioned,omitempty"`
 }
 
 // IsMedia returns true if the message represents a media attachment that can be previewed.
@@ -54,4 +60,18 @@ func (m Message) IsMedia() bool {
 	default:
 		return false
 	}
+}
+
+// MentionsMe checks whether the incoming message explicitly mentions or tags the logged-in user.
+func (m Message) MentionsMe() bool {
+	if m.IsFromMe {
+		return false
+	}
+	if m.IsMentioned {
+		return true
+	}
+	if mentionYouRegex.MatchString(m.Body) || strings.Contains(m.Body, "@You") {
+		return true
+	}
+	return false
 }

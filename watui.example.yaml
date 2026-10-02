@@ -103,6 +103,7 @@
 #   banner: true            # Desktop notification banner (notify-send on Linux, toast on Windows, macOS alert)
 #   sound: true             # Audio notification sound
 #   sound_path: ""          # Custom audio file path (defaults to assets/default.mp3 next to binary/config)
+#   only_on_mention: true   # Group chats: notify only when mentioned/tagged (@you). Works irrespective of archive status (default: false)
 
 # 9. Background Notification Daemon Settings
 # Options for running watui headlessly in the background (watui -d).

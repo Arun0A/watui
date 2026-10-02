@@ -2395,23 +2395,35 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 	if ctxInfo := extractContextInfo(evt.Message); ctxInfo != nil {
 		mentionedJIDs = ctxInfo.GetMentionedJID()
 	}
+	isMentioned := false
+	for _, j := range mentionedJIDs {
+		if a.resolveParticipantName(j) == "You" {
+			isMentioned = true
+			break
+		}
+	}
 	body = a.resolveMentionsInText(body, mentionedJIDs...)
 	qText = a.resolveMentionsInText(qText)
+	if !isMentioned && strings.Contains(body, "@You") {
+		isMentioned = true
+	}
 
 	return domain.Message{
-		ID:           evt.Info.ID,
-		ChatID:       chatJID.String(),
-		ChatName:     chatName,
-		Sender:       senderJID.String(),
-		SenderName:   senderName,
-		Timestamp:    evt.Info.Timestamp,
-		IsFromMe:     evt.Info.IsFromMe,
-		Type:         msgType,
-		Body:         body,
-		Status:       domain.MessageStatusDelivered,
-		QuotedID:     qID,
-		QuotedText:   qText,
-		QuotedSender: qSenderName,
+		ID:            evt.Info.ID,
+		ChatID:        chatJID.String(),
+		ChatName:      chatName,
+		Sender:        senderJID.String(),
+		SenderName:    senderName,
+		Timestamp:     evt.Info.Timestamp,
+		IsFromMe:      evt.Info.IsFromMe,
+		Type:          msgType,
+		Body:          body,
+		Status:        domain.MessageStatusDelivered,
+		QuotedID:      qID,
+		QuotedText:    qText,
+		QuotedSender:  qSenderName,
+		MentionedJIDs: mentionedJIDs,
+		IsMentioned:   isMentioned,
 	}, true
 }
 
@@ -2501,23 +2513,35 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 	if ctxInfo := extractContextInfo(webMsg.Message); ctxInfo != nil {
 		mentionedJIDs = ctxInfo.GetMentionedJID()
 	}
+	isMentioned := false
+	for _, j := range mentionedJIDs {
+		if a.resolveParticipantName(j) == "You" {
+			isMentioned = true
+			break
+		}
+	}
 	body = a.resolveMentionsInText(body, mentionedJIDs...)
 	qText = a.resolveMentionsInText(qText)
+	if !isMentioned && strings.Contains(body, "@You") {
+		isMentioned = true
+	}
 
 	return domain.Message{
-		ID:           msgID,
-		ChatID:       chatID,
-		ChatName:     chatName,
-		Sender:       sender,
-		SenderName:   senderName,
-		Timestamp:    ts,
-		IsFromMe:     false,
-		Type:         msgType,
-		Body:         body,
-		Status:       domain.MessageStatusDelivered,
-		QuotedID:     qID,
-		QuotedText:   qText,
-		QuotedSender: qSenderName,
+		ID:            msgID,
+		ChatID:        chatID,
+		ChatName:      chatName,
+		Sender:        sender,
+		SenderName:    senderName,
+		Timestamp:     ts,
+		IsFromMe:      false,
+		Type:          msgType,
+		Body:          body,
+		Status:        domain.MessageStatusDelivered,
+		QuotedID:      qID,
+		QuotedText:    qText,
+		QuotedSender:  qSenderName,
+		MentionedJIDs: mentionedJIDs,
+		IsMentioned:   isMentioned,
 	}, true
 }
 

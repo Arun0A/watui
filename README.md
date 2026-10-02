@@ -254,7 +254,8 @@ notifications:
   enabled: true          # Master toggle: set to true to enable alerts
   banner: true            # Desktop notification banner (notify-send on Linux, toast on Windows, macOS)
   sound: true             # Audio chime on incoming message
-  # sound_path: ""          # Custom audio file path (defaults to whatsapp_notification.mp3)
+  # sound_path: ""          # Custom audio file path (defaults to assets/default.mp3)
+  # only_on_mention: true   # Group chats: notify only when mentioned/tagged (@you). Works irrespective of archive status (default: false)
 
 # 9. Chat Reactions Display (Optional)
 # Set to true to completely hide reactions in chat view (false by default)
