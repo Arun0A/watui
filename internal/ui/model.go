@@ -1451,16 +1451,26 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		m.CleanupOnExit()
 		return tea.Quit
 
-	case "j", "down":
+	case "j", "down", "ctrl+n":
 		m.previewStatus = ""
 		if m.cursor < len(m.chatOrder)-1 {
 			m.cursor++
 		}
 
-	case "k", "up":
+	case "k", "up", "ctrl+p":
 		m.previewStatus = ""
 		if m.cursor > 0 {
 			m.cursor--
+		}
+
+	case "g", "home":
+		m.previewStatus = ""
+		m.cursor = 0
+
+	case "G", "shift+g", "end":
+		m.previewStatus = ""
+		if len(m.chatOrder) > 0 {
+			m.cursor = len(m.chatOrder) - 1
 		}
 
 	case "r", "d": // mark as read / dismiss
@@ -1505,7 +1515,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 
-	case "enter": // open chat
+	case "enter", "l", "right": // open chat
 		m.previewStatus = ""
 		m.confirmSave = false
 		m.confirmDocAction = false

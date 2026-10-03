@@ -3122,3 +3122,91 @@ func TestArchivedChatWithMentionDisplayedInUnreadSection(t *testing.T) {
 		t.Errorf("Expected HasMention to be cleared after opening chat %s", openedID)
 	}
 }
+
+func TestUnreadListNavigationKeybinds(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 80
+	model.height = 24
+	model.view = ViewUnreadList
+
+	chats := []string{"chat1@s.whatsapp.net", "chat2@s.whatsapp.net", "chat3@s.whatsapp.net", "chat4@s.whatsapp.net"}
+	for _, id := range chats {
+		model.unreadChats[id] = &UnreadChat{
+			ChatID: id,
+			Name:   id,
+			Messages: []domain.Message{
+				{ID: "m_" + id, ChatID: id, Sender: id, Body: "Hello from " + id, Timestamp: time.Now()},
+			},
+		}
+	}
+	model.chatOrder = chats
+	model.cursor = 0
+
+	// 1. Test Ctrl+N moves down
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyCtrlN})
+	if model.cursor != 1 {
+		t.Errorf("Expected cursor=1 after Ctrl+N, got %d", model.cursor)
+	}
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyCtrlN})
+	if model.cursor != 2 {
+		t.Errorf("Expected cursor=2 after second Ctrl+N, got %d", model.cursor)
+	}
+
+	// 2. Test Ctrl+P moves up
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if model.cursor != 1 {
+		t.Errorf("Expected cursor=1 after Ctrl+P, got %d", model.cursor)
+	}
+
+	// 3. Test 'G' jumps to bottom (index 3)
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if model.cursor != 3 {
+		t.Errorf("Expected cursor=3 after 'G', got %d", model.cursor)
+	}
+
+	// 4. Test 'g' jumps to top (index 0)
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if model.cursor != 0 {
+		t.Errorf("Expected cursor=0 after 'g', got %d", model.cursor)
+	}
+
+	// 5. Test 'End' jumps to bottom
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyEnd})
+	if model.cursor != 3 {
+		t.Errorf("Expected cursor=3 after 'End', got %d", model.cursor)
+	}
+
+	// 6. Test 'Home' jumps to top
+	model.updateUnreadList(tea.KeyMsg{Type: tea.KeyHome})
+	if model.cursor != 0 {
+		t.Errorf("Expected cursor=0 after 'Home', got %d", model.cursor)
+	}
+
+	// 7. Test 'l' opens selected chat
+	model.cursor = 1
+	openCmd := model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if model.view != ViewChat {
+		t.Errorf("Expected ViewChat after 'l', got %v", model.view)
+	}
+	if model.activeChatID != "chat2@s.whatsapp.net" {
+		t.Errorf("Expected activeChatID chat2 after 'l', got %s", model.activeChatID)
+	}
+	if openCmd == nil {
+		t.Errorf("Expected non-nil openCmd after 'l'")
+	}
+
+	// 8. Return to inbox and test 'Right' arrow opens chat
+	model.view = ViewUnreadList
+	model.cursor = 2
+	rightCmd := model.updateUnreadList(tea.KeyMsg{Type: tea.KeyRight})
+	if model.view != ViewChat {
+		t.Errorf("Expected ViewChat after 'Right', got %v", model.view)
+	}
+	if model.activeChatID != "chat3@s.whatsapp.net" {
+		t.Errorf("Expected activeChatID chat3 after 'Right', got %s", model.activeChatID)
+	}
+	if rightCmd == nil {
+		t.Errorf("Expected non-nil rightCmd after 'Right'")
+	}
+}

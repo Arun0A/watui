@@ -37,6 +37,7 @@ var allKeybindGroups = []keybindGroup{
 			{key: "G / End", desc: "Jump to bottom of chat list"},
 			{key: "Enter / l / Right", desc: "Open selected chat conversation"},
 			{key: "r", desc: "Dismiss unread messages (mark chat as read)"},
+			{key: "a", desc: "Toggle view of archived conversations"},
 			{key: "Shift+A", desc: "Toggle chat archive status (archive / unarchive)"},
 			{key: "Alt+P", desc: "Quick-preview latest media/doc without opening"},
 			{key: "n / c", desc: "Start new chat (open contact & group picker)"},

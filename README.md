@@ -130,9 +130,10 @@ nix develop github:Arun0A/watui
 
 ### Inbox View (Main Screen)
 | Key | Action |
-| :--- | :--- |
-| <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↓</kbd> / <kbd>↑</kbd> | Navigate unread / pinned conversations |
-| <kbd>Enter</kbd> | Open selected conversation |
+| <kbd>j</kbd> / <kbd>k</kbd> (or <kbd>Ctrl</kbd>+<kbd>n</kbd> / <kbd>Ctrl</kbd>+<kbd>p</kbd>) | Navigate unread / pinned conversations |
+| <kbd>g</kbd> / <kbd>Home</kbd> | Jump to top of conversation list |
+| <kbd>G</kbd> / <kbd>End</kbd> | Jump to bottom of conversation list |
+| <kbd>Enter</kbd> / <kbd>l</kbd> | Open selected conversation |
 | <kbd>a</kbd> | Toggle Archived chats section (press again or <kbd>Esc</kbd> to return) |
 | <kbd>Shift</kbd>+<kbd>a</kbd> / <kbd>A</kbd> | Archive / Unarchive selected conversation |
 | <kbd>n</kbd> | Start a new chat (search all contacts & groups) |
