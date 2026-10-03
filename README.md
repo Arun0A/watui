@@ -130,6 +130,7 @@ nix develop github:Arun0A/watui
 
 ### Inbox View (Main Screen)
 | Key | Action |
+| :--- | :--- |
 | <kbd>j</kbd> / <kbd>k</kbd> (or <kbd>Ctrl</kbd>+<kbd>n</kbd> / <kbd>Ctrl</kbd>+<kbd>p</kbd>) | Navigate unread / pinned conversations |
 | <kbd>g</kbd> / <kbd>Home</kbd> | Jump to top of conversation list |
 | <kbd>G</kbd> / <kbd>End</kbd> | Jump to bottom of conversation list |
