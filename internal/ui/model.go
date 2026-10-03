@@ -25,6 +25,7 @@ import (
 
 	"watui/internal/config"
 	"watui/internal/domain"
+	"watui/internal/media"
 )
 
 // ViewState represents the currently active screen in the TUI.
@@ -211,6 +212,9 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		cfg = cfgs[0]
 	} else {
 		cfg = &config.Config{}
+	}
+	if cfg.IsClearOnExitEnabled() {
+		_ = media.ClearMediaCache()
 	}
 
 	m := &Model{
@@ -1747,6 +1751,17 @@ func (m *Model) CleanupOnExit() {
 		}
 	}
 	_ = ClearClipboardCache()
+	if m.cfg != nil && m.cfg.IsClearOnExitEnabled() {
+		_ = media.ClearMediaCache()
+	} else {
+		expireHours := 72
+		if m.cfg != nil {
+			expireHours = m.cfg.GetExpireMediaHours()
+		}
+		if expireHours > 0 {
+			_, _ = media.CleanExpiredMedia(expireHours)
+		}
+	}
 }
 
 var linkRegex = regexp.MustCompile(`(?:https?://|www\.)[^\s<>"']+[^\s<>"'.,!?;:)]`)

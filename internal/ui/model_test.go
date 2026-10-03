@@ -14,6 +14,7 @@ import (
 
 	"watui/internal/config"
 	"watui/internal/domain"
+	"watui/internal/media"
 )
 
 type mockAdapter struct {
@@ -3041,6 +3042,76 @@ func TestCleanupOnExitClearsClipboardCache(t *testing.T) {
 	// Verify file is cleared
 	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
 		t.Errorf("Expected file to be removed after CleanupOnExit, got err=%v", err)
+	}
+}
+
+func TestCleanupOnExitCleansExpiredMedia(t *testing.T) {
+	adapter := &mockAdapter{}
+	expireHours := 48
+	cfg := &config.Config{
+		ExpireMedia: &expireHours,
+	}
+	model := NewModel(context.Background(), adapter, cfg)
+
+	mediaDir, err := media.GetMediaCacheDir()
+	if err != nil {
+		t.Fatalf("Failed to get media cache dir: %v", err)
+	}
+
+	// 1. Create a fresh file (1 hour ago)
+	freshFile := filepath.Join(mediaDir, "tui_exit_fresh.jpg")
+	if err := os.WriteFile(freshFile, []byte("fresh media"), 0644); err != nil {
+		t.Fatalf("Failed to write fresh file: %v", err)
+	}
+	defer os.Remove(freshFile)
+
+	// 2. Create an expired file (50 hours ago > 48 hours)
+	expiredFile := filepath.Join(mediaDir, "tui_exit_expired.jpg")
+	if err := os.WriteFile(expiredFile, []byte("expired media"), 0644); err != nil {
+		t.Fatalf("Failed to write expired file: %v", err)
+	}
+	defer os.Remove(expiredFile)
+
+	oldTime := time.Now().Add(-50 * time.Hour)
+	_ = os.Chtimes(expiredFile, oldTime, oldTime)
+
+	// Exit TUI
+	model.CleanupOnExit()
+
+	// Verify expired file is cleaned, fresh file is preserved
+	if _, err := os.Stat(expiredFile); !os.IsNotExist(err) {
+		t.Errorf("Expected expired file %s to be deleted on CleanupOnExit", expiredFile)
+	}
+	if _, err := os.Stat(freshFile); err != nil {
+		t.Errorf("Expected fresh file %s to be kept on CleanupOnExit, got err=%v", freshFile, err)
+	}
+}
+
+func TestCleanupOnExitClearsMediaWhenClearOnExitEnabled(t *testing.T) {
+	adapter := &mockAdapter{}
+	clearOnExit := true
+	cfg := &config.Config{
+		ClearOnExit: &clearOnExit,
+	}
+	model := NewModel(context.Background(), adapter, cfg)
+
+	mediaDir, err := media.GetMediaCacheDir()
+	if err != nil {
+		t.Fatalf("Failed to get media cache dir: %v", err)
+	}
+
+	freshFile := filepath.Join(mediaDir, "tui_exit_clear_all.jpg")
+	if err := os.WriteFile(freshFile, []byte("fresh media that should be cleared"), 0644); err != nil {
+		t.Fatalf("Failed to write fresh file: %v", err)
+	}
+	defer os.Remove(freshFile)
+
+	// Exit TUI
+	model.CleanupOnExit()
+
+	// Verify fresh file is cleared because clear_on_exit is true
+	if _, err := os.Stat(freshFile); !os.IsNotExist(err) {
+		t.Errorf("Expected media file %s to be deleted on CleanupOnExit when clear_on_exit is true", freshFile)
 	}
 }
 

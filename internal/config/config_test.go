@@ -640,3 +640,105 @@ func TestClipboardPasteConfig(t *testing.T) {
 		t.Errorf("Expected clipboard paste disabled for disable_clipboard_paste: true, got enabled")
 	}
 }
+
+func TestExpireMediaConfig(t *testing.T) {
+	// 1. Default should be 72 hours
+	var defaultCfg *Config
+	if defaultCfg.GetExpireMediaHours() != 72 {
+		t.Errorf("Expected default 72 hours on nil config, got %d", defaultCfg.GetExpireMediaHours())
+	}
+	emptyCfg := &Config{}
+	if emptyCfg.GetExpireMediaHours() != 72 {
+		t.Errorf("Expected default 72 hours on empty config, got %d", emptyCfg.GetExpireMediaHours())
+	}
+
+	// 2. Custom value: expire_media: 24
+	yamlContent := `expire_media: 24`
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "custom_expire.yaml")
+	if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write temp config: %v", err)
+	}
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfg.GetExpireMediaHours() != 24 {
+		t.Errorf("Expected 24 hours, got %d", cfg.GetExpireMediaHours())
+	}
+
+	// 3. Disabled: expire_media: 0
+	yamlDisabled := `expire_media: 0`
+	cfgFileDisabled := filepath.Join(tmpDir, "disabled_expire.yaml")
+	if err := os.WriteFile(cfgFileDisabled, []byte(yamlDisabled), 0644); err != nil {
+		t.Fatalf("Failed to write temp config: %v", err)
+	}
+	cfgDis, err := Load(cfgFileDisabled)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfgDis.GetExpireMediaHours() != 0 {
+		t.Errorf("Expected 0 hours (disabled), got %d", cfgDis.GetExpireMediaHours())
+	}
+}
+
+func TestClearOnExitConfig(t *testing.T) {
+	// 1. Default should be false
+	var defaultCfg *Config
+	if defaultCfg.IsClearOnExitEnabled() {
+		t.Errorf("Expected default false on nil config, got true")
+	}
+	emptyCfg := &Config{}
+	if emptyCfg.IsClearOnExitEnabled() {
+		t.Errorf("Expected default false on empty config, got true")
+	}
+
+	// 2. Custom value: clear_on_exit: true
+	tmpDir := t.TempDir()
+	cfgTrue := filepath.Join(tmpDir, "clear_true.yaml")
+	if err := os.WriteFile(cfgTrue, []byte("clear_on_exit: true"), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfg, err := Load(cfgTrue)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if !cfg.IsClearOnExitEnabled() {
+		t.Errorf("Expected clear_on_exit to be true")
+	}
+
+	// 3. Custom value: clear_on_exit: false
+	cfgFalse := filepath.Join(tmpDir, "clear_false.yaml")
+	if err := os.WriteFile(cfgFalse, []byte("clear_on_exit: false"), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfgF, err := Load(cfgFalse)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if cfgF.IsClearOnExitEnabled() {
+		t.Errorf("Expected clear_on_exit to be false")
+	}
+
+	// 4. Alias clear_media_on_exit: true
+	cfgAlias := filepath.Join(tmpDir, "clear_alias.yaml")
+	if err := os.WriteFile(cfgAlias, []byte("clear_media_on_exit: true"), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	cfgA, err := Load(cfgAlias)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if !cfgA.IsClearOnExitEnabled() {
+		t.Errorf("Expected clear_media_on_exit alias to enable clear on exit")
+	}
+
+	// 5. Test mergeConfig with ClearOnExit
+	base := &Config{}
+	tr := true
+	overlay := &Config{ClearOnExit: &tr}
+	mergeConfig(base, overlay)
+	if !base.IsClearOnExitEnabled() {
+		t.Errorf("Expected mergeConfig to apply ClearOnExit")
+	}
+}

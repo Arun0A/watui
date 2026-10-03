@@ -136,8 +136,43 @@ type Config struct {
 	EnableClipboardPaste  *bool `json:"enable_clipboard_paste" yaml:"enable_clipboard_paste"`
 	DisableClipboardPaste *bool `json:"disable_clipboard_paste" yaml:"disable_clipboard_paste"`
 
+	// ExpireMedia controls after how many hours of last access cached media files expire (default: 72 hours / 3 days).
+	// Set to 0 to disable automatic expiration.
+	ExpireMedia *int `json:"expire_media" yaml:"expire_media"`
+
+	// ClearOnExit controls whether the entire media cache is cleared whenever the TUI session is closed (default: false).
+	ClearOnExit      *bool `json:"clear_on_exit" yaml:"clear_on_exit"`
+	ClearMediaOnExit *bool `json:"clear_media_on_exit" yaml:"clear_media_on_exit"`
+
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
+}
+
+// IsClearOnExitEnabled returns true if all cached media files should be cleared when the TUI exits.
+// Defaults to false.
+func (c *Config) IsClearOnExitEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.ClearOnExit != nil {
+		return *c.ClearOnExit
+	}
+	if c.ClearMediaOnExit != nil {
+		return *c.ClearMediaOnExit
+	}
+	return false
+}
+
+// GetExpireMediaHours returns the media expiration threshold in hours.
+// Defaults to 72 hours (3 days). If configured to <= 0, returns 0 (expiration disabled).
+func (c *Config) GetExpireMediaHours() int {
+	if c == nil || c.ExpireMedia == nil {
+		return 72
+	}
+	if *c.ExpireMedia <= 0 {
+		return 0
+	}
+	return *c.ExpireMedia
 }
 
 // IsDaemonLogEnabled reports whether daemon file logging is enabled in config.
@@ -795,6 +830,15 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if overlay.DisableClipboardPaste != nil {
 		base.DisableClipboardPaste = overlay.DisableClipboardPaste
+	}
+	if overlay.ExpireMedia != nil {
+		base.ExpireMedia = overlay.ExpireMedia
+	}
+	if overlay.ClearOnExit != nil {
+		base.ClearOnExit = overlay.ClearOnExit
+	}
+	if overlay.ClearMediaOnExit != nil {
+		base.ClearMediaOnExit = overlay.ClearMediaOnExit
 	}
 }
 

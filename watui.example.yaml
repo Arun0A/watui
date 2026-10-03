@@ -132,3 +132,18 @@
 #
 # clipboard_paste: true
 
+# 13. Media Cache Expiration
+# Control automatic expiration and cleanup of locally cached media files (images, videos, audio, documents).
+# Files in the media cache directory are pruned when their last access time exceeds expire_media hours (default: 72 hours / 3 days).
+# Set to 0 to disable automatic expiration.
+#
+# expire_media: 72
+
+# 14. Clear Media Cache On Exit
+# Option to clear the entire media cache folder as soon as the TUI session is closed.
+# When set to true, all cached media files are removed when quitting the TUI. It can always be fetched as long as it is in history.
+#
+# clear_on_exit: false
+
+
+

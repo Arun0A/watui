@@ -20,6 +20,7 @@ import (
 	"watui/internal/config"
 	"watui/internal/daemon"
 	"watui/internal/domain"
+	"watui/internal/media"
 	"watui/internal/notify"
 	"watui/internal/ui"
 	"watui/internal/whatsapp"
@@ -346,6 +347,12 @@ func main() {
 		return
 	}
 
+	if appCfg.GetExpireMediaHours() > 0 {
+		go func() {
+			_, _ = media.CleanExpiredMedia(appCfg.GetExpireMediaHours())
+		}()
+	}
+
 	uiModel := ui.NewModel(ctx, adapter, appCfg)
 	p := tea.NewProgram(
 		uiModel,
@@ -530,6 +537,15 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 		if notifCfg.Sound {
 			log.Printf("[watui daemon] Sound file: %s\n", appCfg.ResolveSoundPath())
 		}
+	}
+
+	if appCfg.GetExpireMediaHours() > 0 {
+		go func() {
+			n, _ := media.CleanExpiredMedia(appCfg.GetExpireMediaHours())
+			if n > 0 && loggingEnabled {
+				log.Printf("[watui daemon] Cleaned %d expired media files\n", n)
+			}
+		}()
 	}
 
 	adapter, err := whatsapp.NewAdapter(ctx, whatsapp.Config{

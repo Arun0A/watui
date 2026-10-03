@@ -270,6 +270,10 @@ notifications:
 # 10. Clipboard Paste Support (Optional)
 # Set to false to disable pasting images/files/text from clipboard (true by default)
 # clipboard_paste: true
+
+# 11. Media Cache Expiration & Cleanup (Optional)
+# expire_media: 72       # Cache lifetime in hours (default: 72 hours / 3 days; 0 to disable expiration)
+# clear_on_exit: false   # Set to true to clear all cached media on TUI exit (default: false)
 ```
 
 ---

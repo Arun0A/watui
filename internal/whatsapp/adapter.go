@@ -35,6 +35,7 @@ import (
 
 	"watui/internal/config"
 	"watui/internal/domain"
+	"watui/internal/media"
 	"watui/internal/security"
 )
 
@@ -2676,13 +2677,8 @@ func (a *Adapter) DownloadMedia(ctx context.Context, msg domain.Message) (string
 		return "", fmt.Errorf("client not connected")
 	}
 
-	cacheDir, err := os.UserCacheDir()
-	if err != nil || cacheDir == "" {
-		cacheDir = filepath.Join(os.TempDir(), "watui-media")
-	} else {
-		cacheDir = filepath.Join(cacheDir, "watui", "media")
-	}
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	cacheDir, err := media.GetMediaCacheDir()
+	if err != nil {
 		return "", fmt.Errorf("failed to create media cache dir: %w", err)
 	}
 
@@ -2703,11 +2699,13 @@ func (a *Adapter) DownloadMedia(ctx context.Context, msg domain.Message) (string
 
 	// Return cached file if already on disk and non-empty (check exact or any matching prefix)
 	if fi, err := os.Stat(filePath); err == nil && fi.Size() > 0 {
+		_ = media.TouchMediaFile(filePath)
 		return filePath, nil
 	}
 	if matches, err := filepath.Glob(filepath.Join(cacheDir, safeID+"*")); err == nil {
 		for _, m := range matches {
 			if fi, err := os.Stat(m); err == nil && fi.Size() > 0 {
+				_ = media.TouchMediaFile(m)
 				return m, nil
 			}
 		}
@@ -2777,6 +2775,7 @@ func (a *Adapter) DownloadMedia(ctx context.Context, msg domain.Message) (string
 	if err := os.WriteFile(filePath, data, 0644); err != nil {
 		return "", fmt.Errorf("failed to write media file to disk: %w", err)
 	}
+	_ = media.TouchMediaFile(filePath)
 
 	return filePath, nil
 }
