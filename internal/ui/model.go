@@ -3016,11 +3016,28 @@ func (m *Model) renderChatView() []string {
 		wrapStyle := lipgloss.NewStyle().Width(msgWrapWidth)
 
 		mediaIndices := m.getChatMediaIndices()
+		var lastDayKey string
 		for i, msg := range m.activeMsgs {
 			if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
 				continue
 			}
-			timeStr := msg.Timestamp.Format("02/01/2006 15:04")
+
+			if !msg.Timestamp.IsZero() {
+				dayKey := msg.Timestamp.Local().Format("2006-01-02")
+				if dayKey != lastDayKey {
+					lastDayKey = dayKey
+					if len(msgLines) > 0 && msgLines[len(msgLines)-1] != "" {
+						msgLines = append(msgLines, "")
+					}
+					msgLines = append(msgLines, m.renderDateDivider(msg.Timestamp, cw))
+					msgLines = append(msgLines, "")
+				}
+			}
+
+			timeStr := ""
+			if !msg.Timestamp.IsZero() {
+				timeStr = msg.Timestamp.Format("15:04")
+			}
 			var header string
 			mediaBadge := ""
 			isHovered := (i == m.selectedMsgIdx)
@@ -3327,6 +3344,44 @@ func (m *Model) renderChatView() []string {
 	return lines
 }
 
+func (m *Model) renderDateDivider(t time.Time, width int) string {
+	dateStr := t.Format("02/01/2006")
+	label := dateStr
+	now := time.Now()
+	tLoc := t.Local()
+	nowLoc := now.Local()
+	if tLoc.Year() == nowLoc.Year() && tLoc.YearDay() == nowLoc.YearDay() {
+		if width >= 34 {
+			label = "Today · " + dateStr
+		}
+	} else {
+		yesterday := nowLoc.AddDate(0, 0, -1)
+		if tLoc.Year() == yesterday.Year() && tLoc.YearDay() == yesterday.YearDay() {
+			if width >= 38 {
+				label = "Yesterday · " + dateStr
+			}
+		}
+	}
+
+	text := " " + label + " "
+	textW := lipgloss.Width(text)
+	availW := max(textW+4, width-4)
+	if availW <= textW+4 {
+		leftPad := max(0, (width-textW)/2)
+		return strings.Repeat(" ", leftPad) + statusStyle.Render(text)
+	}
+
+	lineW := (availW - textW) / 2
+	leftRule := strings.Repeat("─", max(2, lineW))
+	rightRule := strings.Repeat("─", max(2, availW-textW-len([]rune(leftRule))))
+
+	styledText := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6ADC8")).Render(text)
+	line := dividerStyle.Render(leftRule) + styledText + dividerStyle.Render(rightRule)
+	totalW := lipgloss.Width(line)
+	leftPad := max(0, (width-totalW)/2)
+	return strings.Repeat(" ", leftPad) + line
+}
+
 func (m *Model) renderContactPickerView() []string {
 	cw := m.contentWidth()
 	var lines []string
@@ -3475,9 +3530,17 @@ func (m *Model) scrollToMessage(msgIdx int) {
 	}
 	spans := make([]msgSpan, len(m.activeMsgs))
 	currentLine := 0
+	var lastDayKey string
 	for i, msg := range m.activeMsgs {
 		if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
 			continue
+		}
+		if !msg.Timestamp.IsZero() {
+			dayKey := msg.Timestamp.Local().Format("2006-01-02")
+			if dayKey != lastDayKey {
+				lastDayKey = dayKey
+				currentLine += 2
+			}
 		}
 		start := currentLine
 		currentLine += 1 // header
