@@ -88,13 +88,27 @@ func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archiv
 func (m *mockAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
 	return "/tmp/mock_media.jpg", nil
 }
-func (m *mockAdapter) SendFileMessage(ctx context.Context, c, filePath, caption string) (domain.Message, error) {
+func (m *mockAdapter) SendFileMessage(ctx context.Context, c, filePath, caption string, quotedMsg ...string) (domain.Message, error) {
+	var quotedID, quotedBody, quotedSender string
+	if len(quotedMsg) > 0 {
+		quotedID = quotedMsg[0]
+	}
+	if len(quotedMsg) > 1 {
+		quotedBody = quotedMsg[1]
+	}
+	if len(quotedMsg) > 2 {
+		quotedSender = quotedMsg[2]
+	}
+	m.lastQuotedID = quotedID
 	return domain.Message{
-		ID:       "FILESENT1",
-		ChatID:   c,
-		IsFromMe: true,
-		Type:     domain.MessageTypeDocument,
-		Body:     fmt.Sprintf("[Document: %s] %s", filepath.Base(filePath), caption),
+		ID:           "FILESENT1",
+		ChatID:       c,
+		IsFromMe:     true,
+		Type:         domain.MessageTypeDocument,
+		Body:         fmt.Sprintf("[Document: %s] %s", filepath.Base(filePath), caption),
+		QuotedID:     quotedID,
+		QuotedText:   quotedBody,
+		QuotedSender: quotedSender,
 	}, nil
 }
 func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
@@ -3350,5 +3364,75 @@ func TestChatMessageTimestampFormat(t *testing.T) {
 	}
 	if !strings.Contains(viewOutput, "10:00") {
 		t.Errorf("renderChatView() expected to contain sender time '10:00', but output was:\n%s", viewOutput)
+	}
+}
+
+func TestReplyWithFileAttachment(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	// 1. Initial message to reply to
+	targetMsg := domain.Message{
+		ID:         "target-msg-789",
+		ChatID:     model.activeChatID,
+		Sender:     model.activeChatID,
+		SenderName: "Alice",
+		Timestamp:  time.Now(),
+		Body:       "Please find attached report",
+	}
+	model.activeMsgs = []domain.Message{targetMsg}
+
+	// 2. Set reply target (e.g. by pressing 'r' while hovering)
+	model.replyToMsg = &model.activeMsgs[0]
+
+	// 3. Attach file via file:// URI (e.g. from file picker or clipboard paste)
+	filePath := "/tmp/mock_report.pdf"
+	model.input.SetValue("file://" + filePath + " Here is my review")
+
+	// 4. Press Enter to send
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd on Enter")
+	}
+
+	// 5. Verify replyToMsg is cleared from model state after initiating send
+	if model.replyToMsg != nil {
+		t.Errorf("Expected model.replyToMsg to be cleared after sending, got %+v", model.replyToMsg)
+	}
+
+	// 6. Execute send command
+	sentResult := cmd()
+	sentMsg, ok := sentResult.(messageSentMsg)
+	if !ok {
+		t.Fatalf("Expected messageSentMsg result, got %T", sentResult)
+	}
+
+	// 7. Verify adapter received quoting information
+	if adapter.lastQuotedID != "target-msg-789" {
+		t.Errorf("Expected adapter.lastQuotedID to be 'target-msg-789', got %q", adapter.lastQuotedID)
+	}
+	if sentMsg.QuotedID != "target-msg-789" {
+		t.Errorf("Expected sentMsg.QuotedID to be 'target-msg-789', got %q", sentMsg.QuotedID)
+	}
+	if sentMsg.QuotedText != "Please find attached report" {
+		t.Errorf("Expected sentMsg.QuotedText to be 'Please find attached report', got %q", sentMsg.QuotedText)
+	}
+	if sentMsg.QuotedSender != model.activeChatID {
+		t.Errorf("Expected sentMsg.QuotedSender to be %q, got %q", model.activeChatID, sentMsg.QuotedSender)
+	}
+
+	// 8. Update model with sent message and verify it renders quoted preview in chat view
+	model.Update(sentMsg)
+	if len(model.activeMsgs) != 2 {
+		t.Fatalf("Expected 2 active messages, got %d", len(model.activeMsgs))
+	}
+	chatView := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(chatView, "Please find attached report") {
+		t.Errorf("Expected chatView to render quoted text preview 'Please find attached report', got:\n%s", chatView)
 	}
 }

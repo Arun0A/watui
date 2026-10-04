@@ -39,9 +39,12 @@ type SendTextParams struct {
 }
 
 type SendFileParams struct {
-	ChatID   string `json:"chat_id"`
-	FilePath string `json:"file_path"`
-	Caption  string `json:"caption"`
+	ChatID       string `json:"chat_id"`
+	FilePath     string `json:"file_path"`
+	Caption      string `json:"caption"`
+	QuotedID     string `json:"quoted_id,omitempty"`
+	QuotedBody   string `json:"quoted_body,omitempty"`
+	QuotedSender string `json:"quoted_sender,omitempty"`
 }
 
 type MarkReadParams struct {

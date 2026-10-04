@@ -339,9 +339,26 @@ func (r *RemoteAdapter) SendTextMessage(ctx context.Context, chatID string, text
 	return msg, err
 }
 
-func (r *RemoteAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
+func (r *RemoteAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string, quotedMsg ...string) (domain.Message, error) {
+	var quotedID, quotedBody, quotedSender string
+	if len(quotedMsg) > 0 {
+		quotedID = quotedMsg[0]
+	}
+	if len(quotedMsg) > 1 {
+		quotedBody = quotedMsg[1]
+	}
+	if len(quotedMsg) > 2 {
+		quotedSender = quotedMsg[2]
+	}
 	var msg domain.Message
-	err := r.call(ctx, "send_file", SendFileParams{ChatID: chatID, FilePath: filePath, Caption: caption}, &msg)
+	err := r.call(ctx, "send_file", SendFileParams{
+		ChatID:       chatID,
+		FilePath:     filePath,
+		Caption:      caption,
+		QuotedID:     quotedID,
+		QuotedBody:   quotedBody,
+		QuotedSender: quotedSender,
+	}, &msg)
 	return msg, err
 }
 

@@ -263,7 +263,13 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			resp.Error = err.Error()
 		} else {
-			msg, err := s.adapter.SendFileMessage(reqCtx, p.ChatID, p.FilePath, p.Caption)
+			var msg domain.Message
+			var err error
+			if p.QuotedID != "" || p.QuotedBody != "" || p.QuotedSender != "" {
+				msg, err = s.adapter.SendFileMessage(reqCtx, p.ChatID, p.FilePath, p.Caption, p.QuotedID, p.QuotedBody, p.QuotedSender)
+			} else {
+				msg, err = s.adapter.SendFileMessage(reqCtx, p.ChatID, p.FilePath, p.Caption)
+			}
 			if err != nil {
 				resp.Error = err.Error()
 			} else {
