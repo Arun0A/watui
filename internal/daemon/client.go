@@ -468,6 +468,19 @@ func (r *RemoteAdapter) SetChatArchived(ctx context.Context, chatID string, arch
 	return r.call(ctx, "set_chat_archived", SetChatArchivedParams{ChatID: chatID, Archived: archived}, nil)
 }
 
+func (r *RemoteAdapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
+	var s string
+	if len(sender) > 0 {
+		s = sender[0]
+	}
+	return r.call(ctx, "delete_message", DeleteMessageParams{
+		ChatID:            chatID,
+		MessageID:         messageID,
+		DeleteForEveryone: deleteForEveryone,
+		Sender:            s,
+	}, nil)
+}
+
 func (r *RemoteAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
 	var msgs []domain.Message
 	err := r.call(ctx, "get_chat_history", GetChatHistoryParams{

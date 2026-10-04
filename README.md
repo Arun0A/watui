@@ -154,6 +154,8 @@ nix develop github:Arun0A/watui
 | <kbd>y</kbd> *(while hovering)* | Copy message text to clipboard |
 | <kbd>l</kbd> *(while hovering)* | Open link(s) in default browser |
 | <kbd>p</kbd> *(while hovering)* | Preview selected media or open document prompt |
+| <kbd>d</kbd> *(while hovering)* | Delete hovered message for you (confirms y/N) |
+| <kbd>Shift</kbd> + <kbd>d</kbd> *(while hovering)* | Delete hovered message for everyone (if sender or group admin, confirms y/N) |
 | <kbd>Esc</kbd> *(while hovering)* | Defocus message hover mode and return to message box |
 | <kbd>Alt</kbd> + <kbd>p</kbd> | Preview most recent media attachment (or preview highlighted chat in inbox) |
 | <kbd>Alt</kbd> + <kbd>x</kbd> | Stop media / audio playback immediately |

@@ -658,6 +658,47 @@ func (a *Adapter) SetChatArchived(ctx context.Context, chatID string, archived b
 	return a.client.SendAppState(ctx, patch)
 }
 
+// DeleteMessage deletes a message locally ("delete for me") or revokes it on WhatsApp servers for everyone ("delete for all").
+func (a *Adapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
+	if deleteForEveryone {
+		if a.client == nil {
+			return errors.New("whatsapp client not initialized")
+		}
+		if !a.client.IsConnected() {
+			if !a.client.WaitForConnection(4 * time.Second) {
+				go func() { _ = a.client.Connect() }()
+				return errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+			}
+		}
+
+		chatJID, err := NormalizeJID(chatID)
+		if err != nil {
+			return fmt.Errorf("invalid recipient %q: %w", chatID, err)
+		}
+
+		var senderJID types.JID
+		if len(sender) > 0 && sender[0] != "" {
+			sJID, err := NormalizeJID(sender[0])
+			if err == nil {
+				senderJID = sJID
+			}
+		}
+
+		revokeMsg := a.client.BuildRevoke(chatJID, senderJID, types.MessageID(messageID))
+		_, err = a.client.SendMessage(ctx, chatJID, revokeMsg)
+		if err != nil {
+			return fmt.Errorf("failed to delete for everyone: %w", err)
+		}
+	}
+
+	if a.localDB != nil {
+		_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", messageID)
+		_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", messageID)
+	}
+
+	return nil
+}
+
 // SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number, optionally quoting a message.
 func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (domain.Message, error) {
 	recipientJID, err := NormalizeJID(chatID)
@@ -2249,6 +2290,20 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		}
 
 	case *events.Message:
+		if evt.Message != nil {
+			unwrapped := unwrapMessage(evt.Message)
+			if unwrapped != nil && unwrapped.ProtocolMessage != nil && unwrapped.ProtocolMessage.GetType() == waE2E.ProtocolMessage_REVOKE {
+				if key := unwrapped.ProtocolMessage.GetKey(); key != nil && key.GetID() != "" {
+					revokedID := key.GetID()
+					if a.localDB != nil {
+						_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", revokedID)
+						_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", revokedID)
+					}
+				}
+				return
+			}
+		}
+
 		domainMsg, ok := a.extractDomainMessage(evt)
 		if !ok {
 			// Internal protocol, sender-key-distribution, or empty control message; do not leak to UI
@@ -2265,6 +2320,12 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		a.saveHistoryMessage(domainMsg, evt.Message)
 
 		a.notifyMessage(domainMsg)
+
+	case *events.DeleteForMe:
+		if evt.MessageID != "" && a.localDB != nil {
+			_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", evt.MessageID)
+			_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", evt.MessageID)
+		}
 
 	case *events.GroupInfo:
 		if evt.Name != nil && evt.Name.Name != "" {

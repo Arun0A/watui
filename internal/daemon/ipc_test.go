@@ -59,6 +59,9 @@ func (m *mockAdapter) GetArchivedChats() map[string]bool {
 func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
 	return nil
 }
+func (m *mockAdapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
+	return nil
+}
 func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
 	return []domain.Message{{ID: "HIST1", ChatID: chatID, Body: "History message"}}, nil
 }

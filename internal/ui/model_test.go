@@ -18,14 +18,17 @@ import (
 )
 
 type mockAdapter struct {
-	msgHandler      domain.MessageHandler
-	statusHandler   domain.StatusHandler
-	archivedChats   map[string]bool
-	lastSentText    string
-	lastQuotedID    string
-	dismissedChats  []string
-	historyMessages map[string][]domain.Message
-	participants    []domain.Contact
+	msgHandler            domain.MessageHandler
+	statusHandler         domain.StatusHandler
+	archivedChats         map[string]bool
+	lastSentText          string
+	lastQuotedID          string
+	lastDeletedID         string
+	lastDeleteForEveryone bool
+	deleteErr             error
+	dismissedChats        []string
+	historyMessages       map[string][]domain.Message
+	participants          []domain.Contact
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -133,6 +136,15 @@ func (m *mockAdapter) GetGroupParticipants(ctx context.Context, groupJID string)
 		return m.participants, nil
 	}
 	return nil, nil
+}
+
+func (m *mockAdapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
+	m.lastDeletedID = messageID
+	m.lastDeleteForEveryone = deleteForEveryone
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	return nil
 }
 
 func TestUnreadModelLifecycle(t *testing.T) {
@@ -3434,5 +3446,275 @@ func TestReplyWithFileAttachment(t *testing.T) {
 	chatView := strings.Join(model.renderChatView(), "\n")
 	if !strings.Contains(chatView, "Please find attached report") {
 		t.Errorf("Expected chatView to render quoted text preview 'Please find attached report', got:\n%s", chatView)
+	}
+}
+
+func TestDeleteMessageForMe(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "123456789@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-1", ChatID: model.activeChatID, Body: "First message", Timestamp: time.Now()}
+	m2 := domain.Message{ID: "msg-2", ChatID: model.activeChatID, Body: "Second message to delete", Timestamp: time.Now()}
+	m3 := domain.Message{ID: "msg-3", ChatID: model.activeChatID, Body: "Third message", Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1, m2, m3}
+
+	model.unreadChats[model.activeChatID] = &UnreadChat{
+		ChatID:   model.activeChatID,
+		Messages: []domain.Message{m1, m2, m3},
+	}
+
+	// Hover over second message (idx 1)
+	model.selectedMsgIdx = 1
+
+	// 1. Press 'd' to initiate delete for me -> triggers y/N confirmation prompt
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatalf("Expected nil command while awaiting y/N confirmation, got %v", cmd)
+	}
+	if !model.confirmDelete {
+		t.Fatalf("Expected confirmDelete to be true after pressing 'd'")
+	}
+	if model.pendingDeleteForEveryone {
+		t.Errorf("Expected pendingDeleteForEveryone to be false for 'd'")
+	}
+	chatView := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(chatView, "Delete message for you? (y/N)") {
+		t.Errorf("Expected chatView to render 'Delete message for you? (y/N)', got:\n%s", chatView)
+	}
+
+	// 2. Press 'y' to confirm deletion
+	confirmCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if confirmCmd == nil {
+		t.Fatalf("Expected non-nil command after confirming with 'y'")
+	}
+	if model.confirmDelete {
+		t.Errorf("Expected confirmDelete to be false after confirmation")
+	}
+
+	// Message should be removed locally immediately
+	if len(model.activeMsgs) != 2 {
+		t.Fatalf("Expected 2 active messages after deletion, got %d", len(model.activeMsgs))
+	}
+	if model.activeMsgs[0].ID != "msg-1" || model.activeMsgs[1].ID != "msg-3" {
+		t.Errorf("Unexpected active messages remaining: %+v", model.activeMsgs)
+	}
+	unreadMsgs := model.unreadChats[model.activeChatID].Messages
+	if len(unreadMsgs) != 2 || unreadMsgs[0].ID != "msg-1" || unreadMsgs[1].ID != "msg-3" {
+		t.Errorf("Unexpected unread chat messages remaining: %+v", unreadMsgs)
+	}
+
+	// Execute deletion command
+	res := confirmCmd()
+	delMsg, ok := res.(messageDeletedMsg)
+	if !ok {
+		t.Fatalf("Expected messageDeletedMsg result, got %T", res)
+	}
+	if delMsg.DeleteForEveryone {
+		t.Errorf("Expected DeleteForEveryone to be false for 'd'")
+	}
+	if adapter.lastDeletedID != "msg-2" {
+		t.Errorf("Expected adapter.lastDeletedID to be 'msg-2', got %q", adapter.lastDeletedID)
+	}
+	if adapter.lastDeleteForEveryone {
+		t.Errorf("Expected adapter.lastDeleteForEveryone to be false")
+	}
+
+	// Pass message to Update
+	model.Update(delMsg)
+	if model.previewStatus != "Deleted message for you" {
+		t.Errorf("Expected previewStatus 'Deleted message for you', got %q", model.previewStatus)
+	}
+}
+
+func TestDeleteMessageForEveryone_OwnMessage(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "123456789@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-own", ChatID: model.activeChatID, Body: "My message", IsFromMe: true, Timestamp: time.Now()}
+	m2 := domain.Message{ID: "msg-other", ChatID: model.activeChatID, Body: "Their message", IsFromMe: false, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1, m2}
+
+	// Hover over own message
+	model.selectedMsgIdx = 0
+
+	// 1. Press 'D' (Shift+D) -> triggers y/N confirmation prompt
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Fatalf("Expected nil cmd awaiting confirmation for Shift+D on own message")
+	}
+	if !model.confirmDelete {
+		t.Fatalf("Expected confirmDelete to be true after pressing 'D'")
+	}
+	if !model.pendingDeleteForEveryone {
+		t.Errorf("Expected pendingDeleteForEveryone to be true for 'D'")
+	}
+	chatView := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(chatView, "Delete message for everyone? (y/N)") {
+		t.Errorf("Expected chatView to render 'Delete message for everyone? (y/N)', got:\n%s", chatView)
+	}
+
+	// 2. Press 'y' to confirm
+	confirmCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if confirmCmd == nil {
+		t.Fatalf("Expected non-nil cmd after confirming 'y'")
+	}
+
+	if len(model.activeMsgs) != 1 || model.activeMsgs[0].ID != "msg-other" {
+		t.Errorf("Expected own message to be removed from activeMsgs, got: %+v", model.activeMsgs)
+	}
+
+	res := confirmCmd()
+	delMsg, ok := res.(messageDeletedMsg)
+	if !ok {
+		t.Fatalf("Expected messageDeletedMsg result, got %T", res)
+	}
+	if !delMsg.DeleteForEveryone {
+		t.Errorf("Expected DeleteForEveryone to be true for 'D'")
+	}
+	if adapter.lastDeletedID != "msg-own" {
+		t.Errorf("Expected adapter.lastDeletedID to be 'msg-own', got %q", adapter.lastDeletedID)
+	}
+	if !adapter.lastDeleteForEveryone {
+		t.Errorf("Expected adapter.lastDeleteForEveryone to be true")
+	}
+
+	model.Update(delMsg)
+	if model.previewStatus != "Deleted message for everyone" {
+		t.Errorf("Expected previewStatus 'Deleted message for everyone', got %q", model.previewStatus)
+	}
+}
+
+func TestDeleteMessageForEveryone_GroupAdmin(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "123456789@g.us" // Group chat
+
+	m1 := domain.Message{ID: "msg-member", ChatID: model.activeChatID, Sender: "member@s.whatsapp.net", Body: "Member message", IsFromMe: false, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+
+	// Hover over message in group
+	model.selectedMsgIdx = 0
+
+	// 1. Press Shift+d (emits rune 'D') -> prompts confirmation
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Fatalf("Expected nil cmd awaiting confirmation in group chat")
+	}
+	if !model.confirmDelete || !model.pendingDeleteForEveryone {
+		t.Fatalf("Expected confirmDelete=true, pendingDeleteForEveryone=true")
+	}
+
+	// 2. Press 'Y' to confirm
+	confirmCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	if confirmCmd == nil {
+		t.Fatalf("Expected non-nil cmd after confirming 'Y' in group chat")
+	}
+
+	res := confirmCmd()
+	delMsg, ok := res.(messageDeletedMsg)
+	if !ok {
+		t.Fatalf("Expected messageDeletedMsg result, got %T", res)
+	}
+	if !delMsg.DeleteForEveryone {
+		t.Errorf("Expected DeleteForEveryone to be true for Shift+d in group chat")
+	}
+	if adapter.lastDeletedID != "msg-member" {
+		t.Errorf("Expected adapter.lastDeletedID to be 'msg-member', got %q", adapter.lastDeletedID)
+	}
+	if !adapter.lastDeleteForEveryone {
+		t.Errorf("Expected adapter.lastDeleteForEveryone to be true")
+	}
+}
+
+func TestDeleteMessageForEveryone_DirectChatBlocked(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net" // 1-on-1 direct chat
+
+	m1 := domain.Message{ID: "msg-friend", ChatID: model.activeChatID, Body: "Friend's message", IsFromMe: false, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+
+	// Hover over someone else's message in 1-on-1 chat
+	model.selectedMsgIdx = 0
+
+	// Press 'D' (Shift+D)
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Fatalf("Expected nil cmd when trying to delete someone else's message for everyone in direct chat")
+	}
+
+	// Message should NOT be removed and confirmDelete should NOT be set
+	if model.confirmDelete {
+		t.Errorf("Expected confirmDelete to be false when delete for all is not permitted")
+	}
+	if len(model.activeMsgs) != 1 {
+		t.Errorf("Expected message to remain in activeMsgs, got %d", len(model.activeMsgs))
+	}
+
+	// Status notice explaining why
+	if !strings.Contains(model.previewStatus, "Cannot delete for all") {
+		t.Errorf("Expected warning status 'Cannot delete for all...', got %q", model.previewStatus)
+	}
+	if adapter.lastDeletedID != "" {
+		t.Errorf("Expected no deletion performed on adapter, got %q", adapter.lastDeletedID)
+	}
+}
+
+func TestDeleteMessage_Cancel(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "123456789@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-1", ChatID: model.activeChatID, Body: "First message", Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+	model.selectedMsgIdx = 0
+
+	// 1. Press 'd' -> prompts
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if !model.confirmDelete {
+		t.Fatalf("Expected confirmDelete to be true")
+	}
+
+	// 2. Press 'n' -> cancels
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if cmd != nil {
+		t.Errorf("Expected nil command on cancel")
+	}
+	if model.confirmDelete {
+		t.Errorf("Expected confirmDelete to be false after cancel")
+	}
+	if len(model.activeMsgs) != 1 {
+		t.Errorf("Expected message to remain in activeMsgs after cancel")
+	}
+	if model.previewStatus != "Deletion cancelled" {
+		t.Errorf("Expected previewStatus 'Deletion cancelled', got %q", model.previewStatus)
+	}
+	if adapter.lastDeletedID != "" {
+		t.Errorf("Expected no adapter deletion, got %q", adapter.lastDeletedID)
+	}
+
+	// 3. Test cancel with 'esc'
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if !model.confirmDelete {
+		t.Fatalf("Expected confirmDelete to be true")
+	}
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.confirmDelete {
+		t.Errorf("Expected confirmDelete to be false after Esc")
+	}
+	if model.previewStatus != "Deletion cancelled" {
+		t.Errorf("Expected previewStatus 'Deletion cancelled', got %q", model.previewStatus)
 	}
 }

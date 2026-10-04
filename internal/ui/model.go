@@ -81,13 +81,16 @@ type Model struct {
 	replyToMsg       *domain.Message // message being replied to (nil if none)
 
 	// Media navigation & saving
-	selectedMediaIdx int             // targeted media index within activeChat (0-based)
-	confirmSave      bool            // true when prompting "save? (y/N)"
-	pendingSavePath  string          // path of the media file awaiting save confirmation
-	confirmDocAction bool            // true when prompting "Document: Open [o], Open with [w], or Save [s]?"
-	promptOpenWith   bool            // true when typing custom viewer in "Open with: "
-	openWithInput    textinput.Model // textinput for custom application name
-	pendingDocMsg    *domain.Message // message awaiting document action choice
+	selectedMediaIdx         int             // targeted media index within activeChat (0-based)
+	confirmSave              bool            // true when prompting "save? (y/N)"
+	pendingSavePath          string          // path of the media file awaiting save confirmation
+	confirmDocAction         bool            // true when prompting "Document: Open [o], Open with [w], or Save [s]?"
+	promptOpenWith           bool            // true when typing custom viewer in "Open with: "
+	openWithInput            textinput.Model // textinput for custom application name
+	pendingDocMsg            *domain.Message // message awaiting document action choice
+	confirmDelete            bool            // true when prompting "Delete message for you? (y/N)" or "Delete message for everyone? (y/N)"
+	pendingDeleteForEveryone bool            // true if confirming delete for everyone, false if for me
+	pendingDeleteMsg         *domain.Message // message awaiting delete confirmation
 
 	// Group mention completion
 	groupParticipants []domain.Contact // participants of active group chat
@@ -132,6 +135,13 @@ type sendErrMsg struct {
 	Text   string
 	Err    error
 }
+type messageDeletedMsg struct {
+	ChatID            string
+	MessageID         string
+	DeleteForEveryone bool
+	Err               error
+}
+
 type mediaPreviewErrMsg struct {
 	Err error
 }
@@ -321,6 +331,81 @@ func (m *Model) fetchGroupParticipantsCmd(chatID string) tea.Cmd {
 			ChatID:       chatID,
 			Participants: participants,
 		}
+	}
+}
+
+func (m *Model) deleteMessageCmd(chatID string, target domain.Message, forEveryone bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx := m.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		delCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		sender := target.Sender
+		err := m.adapter.DeleteMessage(delCtx, chatID, target.ID, forEveryone, sender)
+		return messageDeletedMsg{
+			ChatID:            chatID,
+			MessageID:         target.ID,
+			DeleteForEveryone: forEveryone,
+			Err:               err,
+		}
+	}
+}
+
+func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if !m.confirmDelete {
+		return false, nil
+	}
+	if msg.Type == tea.KeyCtrlC || msg.String() == "ctrl+c" {
+		return false, nil
+	}
+	if msg.Type == tea.KeyCtrlH || msg.Type == tea.KeyF1 || msg.String() == "ctrl+h" || msg.String() == "ctrl+/" || msg.String() == "ctrl+_" {
+		return false, nil
+	}
+	switch msg.String() {
+	case "y", "Y":
+		m.confirmDelete = false
+		if m.pendingDeleteMsg != nil {
+			target := *m.pendingDeleteMsg
+			m.pendingDeleteMsg = nil
+			forEveryone := m.pendingDeleteForEveryone
+			m.stopActiveViewer()
+			if m.replyToMsg != nil && m.replyToMsg.ID == target.ID {
+				m.replyToMsg = nil
+			}
+			m.removeMessageFromActive(target.ID)
+			m.removeMessageFromUnread(m.activeChatID, target.ID)
+			if len(m.activeMsgs) == 0 {
+				m.selectedMsgIdx = -1
+				m.input.Focus()
+			} else {
+				if m.selectedMsgIdx >= len(m.activeMsgs) {
+					m.selectedMsgIdx = len(m.activeMsgs) - 1
+				}
+				m.scrollToMessage(m.selectedMsgIdx)
+				m.syncSelectedMediaIdx()
+			}
+			if forEveryone {
+				m.previewStatus = "Deleting message for everyone..."
+			} else {
+				m.previewStatus = "Deleted message for you"
+			}
+			return true, m.deleteMessageCmd(m.activeChatID, target, forEveryone)
+		}
+		return true, nil
+
+	case "n", "N", "esc":
+		m.confirmDelete = false
+		m.pendingDeleteMsg = nil
+		m.previewStatus = "Deletion cancelled"
+		return true, nil
+
+	default:
+		m.confirmDelete = false
+		m.pendingDeleteMsg = nil
+		m.previewStatus = "Deletion cancelled"
+		return true, nil
 	}
 }
 
@@ -550,6 +635,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case messageDeletedMsg:
+		if msg.Err != nil {
+			m.previewStatus = fmt.Sprintf("Error deleting message: %v", msg.Err)
+			return m, nil
+		}
+		if msg.DeleteForEveryone {
+			m.previewStatus = "Deleted message for everyone"
+		}
+		return m, nil
+
 	case mediaPreviewErrMsg:
 		m.confirmSave = false
 		m.confirmDocAction = false
@@ -742,6 +837,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmSave = false
 				m.pendingSavePath = ""
 				m.previewStatus = ""
+			}
+		}
+
+		if m.confirmDelete {
+			handled, cmd := m.handleConfirmDelete(msg)
+			if handled {
+				return m, cmd
 			}
 		}
 
@@ -1698,6 +1800,52 @@ func (m *Model) dismissUnread(chatID string) {
 	}
 }
 
+func (m *Model) removeMessageFromActive(msgID string) {
+	if msgID == "" || len(m.activeMsgs) == 0 {
+		return
+	}
+	idx := -1
+	for i, msg := range m.activeMsgs {
+		if msg.ID == msgID {
+			idx = i
+			break
+		}
+	}
+	if idx != -1 {
+		m.activeMsgs = append(m.activeMsgs[:idx], m.activeMsgs[idx+1:]...)
+	}
+}
+
+func (m *Model) removeMessageFromUnread(chatID, msgID string) {
+	if chatID == "" || msgID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	chat, exists := m.unreadChats[chatID]
+	if !exists {
+		return
+	}
+	idx := -1
+	for i, msg := range chat.Messages {
+		if msg.ID == msgID {
+			idx = i
+			break
+		}
+	}
+	if idx != -1 {
+		chat.Messages = append(chat.Messages[:idx], chat.Messages[idx+1:]...)
+		if len(chat.Messages) > 0 {
+			last := chat.Messages[len(chat.Messages)-1]
+			chat.LastReceived = last.Timestamp
+			chat.Sender = last.Sender
+		}
+		if chat.UnreadCount > 0 {
+			chat.UnreadCount--
+		}
+	}
+}
+
 // CleanupOnExit dismisses all read chats from persistent storage when the TUI quits.
 func (m *Model) CleanupOnExit() {
 	m.mu.Lock()
@@ -1917,6 +2065,13 @@ func (m *Model) jumpToPrevMedia() bool {
 }
 
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
+	if m.confirmDelete {
+		handled, cmd := m.handleConfirmDelete(msg)
+		if handled {
+			return cmd
+		}
+	}
+
 	// Global hotkeys in chat view
 	switch msg.String() {
 	case "ctrl+c":
@@ -2017,6 +2172,36 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 					return nil
 				}
 				return m.previewMediaCmd(target)
+			}
+			return nil
+
+		case "d":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				m.confirmDelete = true
+				m.pendingDeleteForEveryone = false
+				m.pendingDeleteMsg = &target
+				m.confirmSave = false
+				m.confirmDocAction = false
+				m.promptOpenWith = false
+				m.previewStatus = ""
+			}
+			return nil
+
+		case "shift+d", "D":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				if !target.IsFromMe && !strings.Contains(m.activeChatID, "@g.us") {
+					m.previewStatus = "Cannot delete for all: only sender can delete for everyone in direct chats (press 'd' to delete for you)"
+					return nil
+				}
+				m.confirmDelete = true
+				m.pendingDeleteForEveryone = true
+				m.pendingDeleteMsg = &target
+				m.confirmSave = false
+				m.confirmDocAction = false
+				m.promptOpenWith = false
+				m.previewStatus = ""
 			}
 			return nil
 
@@ -3305,7 +3490,7 @@ func (m *Model) renderChatView() []string {
 	var dynamicHelp string
 
 	if m.selectedMsgIdx >= 0 {
-		dynamicHelp = "[j/k] Msg · [J/K] Media · [p] Preview · [r] Reply · [y] Copy · [Esc] Input"
+		dynamicHelp = "[j/k] Msg · [J/K] Media · [p] Preview · [r] Reply · [y] Copy · [d/D] Delete · [Esc] Input"
 	} else {
 		mediaHelp := ""
 		if len(mediaIndices) > 1 {
@@ -3329,6 +3514,12 @@ func (m *Model) renderChatView() []string {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], or Save [s]? (Esc to cancel)")
 	} else if m.confirmSave {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
+	} else if m.confirmDelete {
+		promptText := "Delete message for you? (y/N)"
+		if m.pendingDeleteForEveryone {
+			promptText = "Delete message for everyone? (y/N)"
+		}
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F38BA8")).Render(promptText)
 	} else if m.previewStatus != "" {
 		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
 	}

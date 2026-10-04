@@ -91,6 +91,28 @@ func (m *mockCLIAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Messag
 	return nil, nil
 }
 
+func (m *mockCLIAdapter) DismissUnread(ctx context.Context, chatID string) error { return nil }
+func (m *mockCLIAdapter) Sync(ctx context.Context) error                         { return nil }
+func (m *mockCLIAdapter) OnChatDismissed(handler func(string))                   {}
+func (m *mockCLIAdapter) DownloadMedia(ctx context.Context, msg domain.Message) (string, error) {
+	return "", nil
+}
+func (m *mockCLIAdapter) EnsureGroupNames(ctx context.Context, jids []string) {}
+func (m *mockCLIAdapter) IsChatArchived(chatID string) bool                   { return false }
+func (m *mockCLIAdapter) GetArchivedChats() map[string]bool                   { return nil }
+func (m *mockCLIAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
+	return nil
+}
+func (m *mockCLIAdapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
+	return nil
+}
+func (m *mockCLIAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
+	return nil, nil
+}
+func (m *mockCLIAdapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]domain.Contact, error) {
+	return nil, nil
+}
+
 func TestNormalizeJID(t *testing.T) {
 	tests := []struct {
 		input    string

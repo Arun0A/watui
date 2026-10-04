@@ -75,6 +75,8 @@ var allKeybindGroups = []keybindGroup{
 			{key: "Ctrl+V / Alt+V", desc: "Paste from clipboard into input (focuses input)"},
 			{key: "l", desc: "Open link(s) from hovered message in OS default browser"},
 			{key: "p", desc: "Preview hovered media or document in viewer"},
+			{key: "d", desc: "Delete hovered message for you (confirms y/N)"},
+			{key: "Shift+D", desc: "Delete hovered message for everyone (if sender/admin, confirms y/N)"},
 			{key: "PgUp / Ctrl+Y", desc: "Scroll chat history up 5 lines"},
 			{key: "PgDn / Ctrl+D / Ctrl+E", desc: "Scroll chat history down 5 lines"},
 			{key: "Ctrl+U", desc: "Fetch 5 older messages from history"},

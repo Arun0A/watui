@@ -57,6 +57,13 @@ type DismissParams struct {
 	ChatID string `json:"chat_id"`
 }
 
+type DeleteMessageParams struct {
+	ChatID            string `json:"chat_id"`
+	MessageID         string `json:"message_id"`
+	DeleteForEveryone bool   `json:"delete_for_everyone"`
+	Sender            string `json:"sender,omitempty"`
+}
+
 type DownloadMediaParams struct {
 	Message domain.Message `json:"message"`
 }

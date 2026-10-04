@@ -323,6 +323,29 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			}
 		}
 
+	case "delete_message":
+		var p DeleteMessageParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			err := s.adapter.DeleteMessage(reqCtx, p.ChatID, p.MessageID, p.DeleteForEveryone, p.Sender)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				s.unreadsMu.Lock()
+				if s.cachedUnreads != nil {
+					var filtered []domain.Message
+					for _, m := range s.cachedUnreads {
+						if m.ID != p.MessageID {
+							filtered = append(filtered, m)
+						}
+					}
+					s.cachedUnreads = filtered
+				}
+				s.unreadsMu.Unlock()
+			}
+		}
+
 	case "download_media":
 		var p DownloadMediaParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
