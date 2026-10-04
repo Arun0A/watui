@@ -28,8 +28,12 @@ func (m *mockAdapter) OnChatDismissed(h func(string)) { m.dismissHandler = h }
 func (m *mockAdapter) SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (domain.Message, error) {
 	return domain.Message{ID: "TEST1", ChatID: chatID, Body: text}, nil
 }
-func (m *mockAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
-	return domain.Message{ID: "FILE1", ChatID: chatID, Body: caption}, nil
+func (m *mockAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string, quotedMsg ...string) (domain.Message, error) {
+	var qID string
+	if len(quotedMsg) > 0 {
+		qID = quotedMsg[0]
+	}
+	return domain.Message{ID: "FILE1", ChatID: chatID, Body: caption, QuotedID: qID}, nil
 }
 func (m *mockAdapter) GetContacts(ctx context.Context) ([]domain.Contact, error) {
 	return []domain.Contact{{JID: "friend@s.whatsapp.net", Name: "My Friend"}}, nil

@@ -2303,7 +2303,13 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		if strings.HasPrefix(text, "file://") {
 			filePath, caption := parseFileURI(text)
 			return func() tea.Msg {
-				sentMsg, err := m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption)
+				var sentMsg domain.Message
+				var err error
+				if replyTarget != nil {
+					sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption, replyTarget.ID, replyTarget.Body, replyTarget.Sender)
+				} else {
+					sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption)
+				}
 				if err != nil {
 					return sendErrMsg{ChatID: chatID, Text: text, Err: err}
 				}

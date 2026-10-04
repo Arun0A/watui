@@ -61,7 +61,7 @@ func (m *mockCLIAdapter) SendTextMessage(ctx context.Context, chatID string, tex
 	}, nil
 }
 
-func (m *mockCLIAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
+func (m *mockCLIAdapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string, quotedMsg ...string) (domain.Message, error) {
 	m.sentChatID = chatID
 	m.sentFilePath = filePath
 	m.sentCaption = caption

@@ -850,8 +850,8 @@ func convertGifToMp4(ctx context.Context, gifData []byte) ([]byte, error) {
 	return os.ReadFile(outputPath)
 }
 
-// SendFileMessage uploads and sends a file attachment to a WhatsApp chat JID or raw phone number.
-func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string) (domain.Message, error) {
+// SendFileMessage uploads and sends a file attachment to a WhatsApp chat JID or raw phone number, optionally quoting a message.
+func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string, quotedMsg ...string) (domain.Message, error) {
 	if a.client == nil {
 		return domain.Message{}, fmt.Errorf("client not connected")
 	}
@@ -866,6 +866,17 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 	recipientJID, err := NormalizeJID(chatID)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("invalid recipient %q: %w", chatID, err)
+	}
+
+	var quotedID, quotedBody, quotedSender string
+	if len(quotedMsg) > 0 {
+		quotedID = quotedMsg[0]
+	}
+	if len(quotedMsg) > 1 {
+		quotedBody = quotedMsg[1]
+	}
+	if len(quotedMsg) > 2 {
+		quotedSender = quotedMsg[2]
 	}
 
 	// Expand ~ to user home directory if present
@@ -953,6 +964,86 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		return domain.Message{}, fmt.Errorf("failed to upload media: %w", err)
 	}
 
+	wireCaption := caption
+	var mentionedJIDs []string
+	if caption != "" && strings.Contains(chatID, "@g.us") {
+		participants, _ := a.GetGroupParticipants(ctx, chatID)
+		sort.Slice(participants, func(i, j int) bool {
+			return len(participants[i].Name) > len(participants[j].Name)
+		})
+		seenJID := make(map[string]bool)
+		for _, p := range participants {
+			if p.Name == "" || p.Name == "You" {
+				continue
+			}
+			tag := "@" + p.Name
+			if strings.Contains(wireCaption, tag) {
+				pJID, err := types.ParseJID(p.JID)
+				if err == nil {
+					user := pJID.User
+					if idx := strings.Index(user, ":"); idx != -1 {
+						user = user[:idx]
+					}
+					if pJID.Server == "lid" {
+						if pn := a.ResolveLIDToPhone(user); pn != "" {
+							pJID = types.NewJID(pn, types.DefaultUserServer)
+							user = pn
+						}
+					}
+					cleanJID := pJID.ToNonAD().String()
+					if !seenJID[cleanJID] {
+						seenJID[cleanJID] = true
+						mentionedJIDs = append(mentionedJIDs, cleanJID)
+					}
+					wireCaption = strings.ReplaceAll(wireCaption, tag, "@"+user)
+				}
+			}
+		}
+
+		matches := mentionRegex.FindAllStringSubmatchIndex(wireCaption, -1)
+		for _, sub := range matches {
+			startDigit, endDigit := sub[2], sub[3]
+			digitStr := wireCaption[startDigit:endDigit]
+			pJID := types.NewJID(digitStr, types.DefaultUserServer)
+			cleanJID := pJID.String()
+			if !seenJID[cleanJID] {
+				seenJID[cleanJID] = true
+				mentionedJIDs = append(mentionedJIDs, cleanJID)
+			}
+		}
+	}
+
+	var ctxInfo *waE2E.ContextInfo
+	if quotedID != "" || len(mentionedJIDs) > 0 {
+		ctxInfo = &waE2E.ContextInfo{}
+		if quotedID != "" {
+			if (quotedSender == "" || quotedBody == "") && a.localDB != nil {
+				var s, b string
+				if err := a.localDB.QueryRow("SELECT sender, body FROM watui_messages WHERE id = ?", quotedID).Scan(&s, &b); err == nil {
+					if quotedSender == "" {
+						quotedSender = s
+					}
+					if quotedBody == "" {
+						quotedBody = b
+					}
+				}
+			}
+
+			ctxInfo.StanzaID = proto.String(quotedID)
+			if quotedSender != "" {
+				ctxInfo.Participant = proto.String(quotedSender)
+			}
+			if quotedBody != "" {
+				ctxInfo.QuotedMessage = &waE2E.Message{
+					Conversation: proto.String(quotedBody),
+				}
+			}
+		}
+		if len(mentionedJIDs) > 0 {
+			ctxInfo.MentionedJID = mentionedJIDs
+		}
+	}
+
 	var waMsg *waE2E.Message
 	var label string
 	if isGif {
@@ -985,8 +1076,11 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 			FileSHA256:    resp.FileSHA256,
 			FileLength:    &resp.FileLength,
 		}
-		if caption != "" {
-			imgMsg.Caption = proto.String(caption)
+		if wireCaption != "" {
+			imgMsg.Caption = proto.String(wireCaption)
+		}
+		if ctxInfo != nil {
+			imgMsg.ContextInfo = ctxInfo
 		}
 		waMsg = &waE2E.Message{ImageMessage: imgMsg}
 
@@ -1013,8 +1107,11 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 				vidMsg.Seconds = proto.Uint32(gifSeconds)
 			}
 		}
-		if caption != "" {
-			vidMsg.Caption = proto.String(caption)
+		if wireCaption != "" {
+			vidMsg.Caption = proto.String(wireCaption)
+		}
+		if ctxInfo != nil {
+			vidMsg.ContextInfo = ctxInfo
 		}
 		waMsg = &waE2E.Message{VideoMessage: vidMsg}
 
@@ -1027,6 +1124,9 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 			FileEncSHA256: resp.FileEncSHA256,
 			FileSHA256:    resp.FileSHA256,
 			FileLength:    &resp.FileLength,
+		}
+		if ctxInfo != nil {
+			audioMsg.ContextInfo = ctxInfo
 		}
 		waMsg = &waE2E.Message{AudioMessage: audioMsg}
 
@@ -1042,8 +1142,11 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 			FileSHA256:    resp.FileSHA256,
 			FileLength:    &resp.FileLength,
 		}
-		if caption != "" {
-			docMsg.Caption = proto.String(caption)
+		if wireCaption != "" {
+			docMsg.Caption = proto.String(wireCaption)
+		}
+		if ctxInfo != nil {
+			docMsg.ContextInfo = ctxInfo
 		}
 		waMsg = &waE2E.Message{DocumentMessage: docMsg}
 	}
@@ -1060,16 +1163,24 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		senderID = a.client.Store.ID.ToNonAD().String()
 	}
 
+	var quotedSenderName string
+	if quotedSender != "" {
+		quotedSenderName = a.resolveParticipantName(quotedSender)
+	}
+
 	domainMsg := domain.Message{
-		ID:         sendResp.ID,
-		ChatID:     recipientJID.String(),
-		Sender:     senderID,
-		SenderName: "Me",
-		Timestamp:  sendResp.Timestamp,
-		IsFromMe:   true,
-		Type:       msgType,
-		Body:       bodyText,
-		Status:     domain.MessageStatusSent,
+		ID:           sendResp.ID,
+		ChatID:       recipientJID.String(),
+		Sender:       senderID,
+		SenderName:   "Me",
+		Timestamp:    sendResp.Timestamp,
+		IsFromMe:     true,
+		Type:         msgType,
+		Body:         bodyText,
+		Status:       domain.MessageStatusSent,
+		QuotedID:     quotedID,
+		QuotedText:   quotedBody,
+		QuotedSender: quotedSenderName,
 	}
 	a.saveHistoryMessage(domainMsg, waMsg)
 	return domainMsg, nil
