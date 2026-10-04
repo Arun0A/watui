@@ -3281,3 +3281,74 @@ func TestUnreadListNavigationKeybinds(t *testing.T) {
 		t.Errorf("Expected non-nil rightCmd after 'Right'")
 	}
 }
+
+func TestChatMessageTimestampFormat(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	// Create messages with specific dates
+	ts1 := time.Date(2025, time.February, 9, 14, 5, 0, 0, time.Local)
+	ts2 := time.Date(2026, time.October, 4, 9, 45, 0, 0, time.Local)
+	ts3 := time.Date(2026, time.October, 4, 10, 0, 0, 0, time.Local)
+
+	model.activeMsgs = []domain.Message{
+		{
+			ID:         "msg1",
+			ChatID:     model.activeChatID,
+			Sender:     model.activeChatID,
+			SenderName: "Alice",
+			Timestamp:  ts1,
+			Body:       "Old message from earlier date",
+		},
+		{
+			ID:        "msg2",
+			ChatID:    model.activeChatID,
+			IsFromMe:  true,
+			Timestamp: ts2,
+			Body:      "Recent response",
+		},
+		{
+			ID:         "msg3",
+			ChatID:     model.activeChatID,
+			Sender:     model.activeChatID,
+			SenderName: "Alice",
+			Timestamp:  ts3,
+			Body:       "Followup on same day",
+		},
+	}
+
+	viewOutput := strings.Join(model.renderChatView(), "\n")
+
+	// 1. Verify date divider line breaks with DD/MM/YYYY
+	if !strings.Contains(viewOutput, "09/02/2025") {
+		t.Errorf("renderChatView() expected to contain date divider with '09/02/2025', but output was:\n%s", viewOutput)
+	}
+	if !strings.Contains(viewOutput, "04/10/2026") {
+		t.Errorf("renderChatView() expected to contain date divider with '04/10/2026', but output was:\n%s", viewOutput)
+	}
+	// Verify date divider has divider rules
+	if !strings.Contains(viewOutput, "─") {
+		t.Errorf("renderChatView() expected to contain divider rule '─', but output was:\n%s", viewOutput)
+	}
+
+	// 2. Verify date for 04/10/2026 appears only once even with 2 messages on that day
+	if strings.Count(viewOutput, "04/10/2026") != 1 {
+		t.Errorf("Expected date '04/10/2026' to appear exactly once for the day, appeared %d times", strings.Count(viewOutput, "04/10/2026"))
+	}
+
+	// 3. Verify message headers beside sender have compact HH:MM
+	if !strings.Contains(viewOutput, "14:05") {
+		t.Errorf("renderChatView() expected to contain sender time '14:05', but output was:\n%s", viewOutput)
+	}
+	if !strings.Contains(viewOutput, "09:45") {
+		t.Errorf("renderChatView() expected to contain sender time '09:45', but output was:\n%s", viewOutput)
+	}
+	if !strings.Contains(viewOutput, "10:00") {
+		t.Errorf("renderChatView() expected to contain sender time '10:00', but output was:\n%s", viewOutput)
+	}
+}
