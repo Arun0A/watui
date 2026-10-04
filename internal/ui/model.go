@@ -3020,7 +3020,7 @@ func (m *Model) renderChatView() []string {
 			if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
 				continue
 			}
-			timeStr := msg.Timestamp.Format("15:04")
+			timeStr := msg.Timestamp.Format("02/01/2006 15:04")
 			var header string
 			mediaBadge := ""
 			isHovered := (i == m.selectedMsgIdx)

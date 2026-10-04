@@ -3281,3 +3281,48 @@ func TestUnreadListNavigationKeybinds(t *testing.T) {
 		t.Errorf("Expected non-nil rightCmd after 'Right'")
 	}
 }
+
+func TestChatMessageTimestampFormat(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	// Create messages with specific dates
+	ts1 := time.Date(2025, time.February, 9, 14, 5, 0, 0, time.Local)
+	ts2 := time.Date(2026, time.October, 4, 9, 45, 0, 0, time.Local)
+
+	model.activeMsgs = []domain.Message{
+		{
+			ID:         "msg1",
+			ChatID:     model.activeChatID,
+			Sender:     model.activeChatID,
+			SenderName: "Alice",
+			Timestamp:  ts1,
+			Body:       "Old message from earlier date",
+		},
+		{
+			ID:        "msg2",
+			ChatID:    model.activeChatID,
+			IsFromMe:  true,
+			Timestamp: ts2,
+			Body:      "Recent response",
+		},
+	}
+
+	viewOutput := strings.Join(model.renderChatView(), "\n")
+
+	// Verify formatted dates DD/MM/YYYY HH:MM
+	expected1 := "09/02/2025 14:05"
+	expected2 := "04/10/2026 09:45"
+
+	if !strings.Contains(viewOutput, expected1) {
+		t.Errorf("renderChatView() expected to contain %q, but output was:\n%s", expected1, viewOutput)
+	}
+	if !strings.Contains(viewOutput, expected2) {
+		t.Errorf("renderChatView() expected to contain %q, but output was:\n%s", expected2, viewOutput)
+	}
+}
