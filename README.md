@@ -151,6 +151,7 @@ nix develop github:Arun0A/watui
 | <kbd>J</kbd> / <kbd>K</kbd> *(while hovering)* | Jump to next / previous media message |
 | <kbd>Alt</kbd> + <kbd>m</kbd> | Jump to media messages from message box |
 | <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |
+| <kbd>e</kbd> *(while hovering)* | Edit hovered sent message in message box |
 | <kbd>y</kbd> *(while hovering)* | Copy message text to clipboard |
 | <kbd>l</kbd> *(while hovering)* | Open link(s) in default browser |
 | <kbd>p</kbd> *(while hovering)* | Preview selected media or open document prompt |

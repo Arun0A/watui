@@ -699,6 +699,50 @@ func (a *Adapter) DeleteMessage(ctx context.Context, chatID string, messageID st
 	return nil
 }
 
+// EditMessage edits an already sent message on WhatsApp servers and updates local cache.
+func (a *Adapter) EditMessage(ctx context.Context, chatID string, messageID string, newText string) error {
+	if a.client == nil {
+		return errors.New("whatsapp client not initialized")
+	}
+	if !a.client.IsConnected() {
+		if !a.client.WaitForConnection(4 * time.Second) {
+			go func() { _ = a.client.Connect() }()
+			return errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+		}
+	}
+
+	if strings.HasPrefix(strings.TrimSpace(newText), "file://") {
+		return errors.New("cannot attach files while editing a message")
+	}
+	if a.localDB != nil {
+		var msgType string
+		err := a.localDB.QueryRowContext(ctx, "SELECT type FROM watui_messages WHERE id = ?", messageID).Scan(&msgType)
+		if err == nil && msgType != "" && msgType != string(domain.MessageTypeText) {
+			return errors.New("cannot edit media or attachment messages")
+		}
+	}
+
+	chatJID, err := NormalizeJID(chatID)
+	if err != nil {
+		return fmt.Errorf("invalid recipient %q: %w", chatID, err)
+	}
+
+	editMsg := a.client.BuildEdit(chatJID, types.MessageID(messageID), &waE2E.Message{
+		Conversation: proto.String(newText),
+	})
+	_, err = a.client.SendMessage(ctx, chatJID, editMsg)
+	if err != nil {
+		return fmt.Errorf("failed to send edited message: %w", err)
+	}
+
+	if a.localDB != nil {
+		_, _ = a.localDB.ExecContext(ctx, "UPDATE watui_messages SET body = ? WHERE id = ?", newText, messageID)
+		_, _ = a.localDB.ExecContext(ctx, "UPDATE watui_unread_messages SET body = ? WHERE id = ?", newText, messageID)
+	}
+
+	return nil
+}
+
 // SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number, optionally quoting a message.
 func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (domain.Message, error) {
 	recipientJID, err := NormalizeJID(chatID)
@@ -2298,6 +2342,32 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 					if a.localDB != nil {
 						_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", revokedID)
 						_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", revokedID)
+					}
+				}
+				return
+			}
+			if unwrapped != nil && unwrapped.ProtocolMessage != nil && unwrapped.ProtocolMessage.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
+				if key := unwrapped.ProtocolMessage.GetKey(); key != nil && key.GetID() != "" {
+					editedID := key.GetID()
+					var newBody string
+					if em := unwrapped.ProtocolMessage.GetEditedMessage(); em != nil {
+						newBody, _, _ = extractMessageContent(em)
+					}
+					if newBody != "" {
+						if a.localDB != nil {
+							_, _ = a.localDB.Exec("UPDATE watui_messages SET body = ? WHERE id = ?", newBody, editedID)
+							_, _ = a.localDB.Exec("UPDATE watui_unread_messages SET body = ? WHERE id = ?", newBody, editedID)
+						}
+						editDMsg := domain.Message{
+							ID:        editedID,
+							ChatID:    evt.Info.Chat.ToNonAD().String(),
+							Sender:    evt.Info.Sender.ToNonAD().String(),
+							Body:      newBody,
+							Timestamp: evt.Info.Timestamp,
+							IsFromMe:  evt.Info.IsFromMe,
+							Type:      domain.MessageTypeText,
+						}
+						a.notifyMessage(editDMsg)
 					}
 				}
 				return

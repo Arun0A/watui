@@ -26,6 +26,9 @@ type mockAdapter struct {
 	lastDeletedID         string
 	lastDeleteForEveryone bool
 	deleteErr             error
+	lastEditedID          string
+	lastEditedText        string
+	editErr               error
 	dismissedChats        []string
 	historyMessages       map[string][]domain.Message
 	participants          []domain.Contact
@@ -143,6 +146,15 @@ func (m *mockAdapter) DeleteMessage(ctx context.Context, chatID string, messageI
 	m.lastDeleteForEveryone = deleteForEveryone
 	if m.deleteErr != nil {
 		return m.deleteErr
+	}
+	return nil
+}
+
+func (m *mockAdapter) EditMessage(ctx context.Context, chatID string, messageID string, newText string) error {
+	m.lastEditedID = messageID
+	m.lastEditedText = newText
+	if m.editErr != nil {
+		return m.editErr
 	}
 	return nil
 }
@@ -3716,5 +3728,303 @@ func TestDeleteMessage_Cancel(t *testing.T) {
 	}
 	if model.previewStatus != "Deletion cancelled" {
 		t.Errorf("Expected previewStatus 'Deletion cancelled', got %q", model.previewStatus)
+	}
+}
+
+func TestEditMessage_Success(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-edit-1", ChatID: model.activeChatID, Body: "Original message text", IsFromMe: true, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+
+	// 1. Hover over sent message
+	model.selectedMsgIdx = 0
+
+	// 2. Press 'e' to edit message
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd (textinput.Blink) when pressing 'e'")
+	}
+	if model.selectedMsgIdx != -1 {
+		t.Errorf("Expected hover mode to exit, got %d", model.selectedMsgIdx)
+	}
+	if !model.input.Focused() {
+		t.Errorf("Expected input to be focused")
+	}
+	if model.input.Value() != "Original message text" {
+		t.Errorf("Expected input to have message text, got %q", model.input.Value())
+	}
+	if model.editTargetMsg == nil || model.editTargetMsg.ID != "msg-edit-1" {
+		t.Fatalf("Expected editTargetMsg to be msg-edit-1, got %+v", model.editTargetMsg)
+	}
+
+	// Verify edit bar rendered in chat view
+	chatView := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(chatView, "Editing: ") {
+		t.Errorf("Expected chatView to render 'Editing: ' bar, got:\n%s", chatView)
+	}
+
+	// 3. Edit input value and press Enter
+	model.input.SetValue("Updated message text")
+	saveCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if saveCmd == nil {
+		t.Fatalf("Expected non-nil saveCmd on Enter")
+	}
+	if model.editTargetMsg != nil {
+		t.Errorf("Expected editTargetMsg to be cleared after initiating save")
+	}
+	if model.previewStatus != "Editing message..." {
+		t.Errorf("Expected previewStatus 'Editing message...', got %q", model.previewStatus)
+	}
+
+	// 4. Execute edit command and update model
+	res := saveCmd()
+	editMsg, ok := res.(messageEditedMsg)
+	if !ok {
+		t.Fatalf("Expected messageEditedMsg result, got %T", res)
+	}
+	if adapter.lastEditedID != "msg-edit-1" {
+		t.Errorf("Expected adapter.lastEditedID to be 'msg-edit-1', got %q", adapter.lastEditedID)
+	}
+	if adapter.lastEditedText != "Updated message text" {
+		t.Errorf("Expected adapter.lastEditedText to be 'Updated message text', got %q", adapter.lastEditedText)
+	}
+
+	model.Update(editMsg)
+	if model.activeMsgs[0].Body != "Updated message text" {
+		t.Errorf("Expected activeMsgs[0].Body to be updated to 'Updated message text', got %q", model.activeMsgs[0].Body)
+	}
+	if model.previewStatus != "Message edited" {
+		t.Errorf("Expected previewStatus 'Message edited', got %q", model.previewStatus)
+	}
+}
+
+func TestEditMessage_BlockedOthersMessage(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-other", ChatID: model.activeChatID, Body: "Someone else's message", IsFromMe: false, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+
+	// Hover over someone else's message
+	model.selectedMsgIdx = 0
+
+	// Press 'e'
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if cmd != nil {
+		t.Errorf("Expected nil command when trying to edit someone else's message")
+	}
+	if model.editTargetMsg != nil {
+		t.Errorf("Expected editTargetMsg to remain nil")
+	}
+	if !strings.Contains(model.previewStatus, "only your own sent messages can be edited") {
+		t.Errorf("Expected warning status about editing others' messages, got %q", model.previewStatus)
+	}
+	if model.selectedMsgIdx != 0 {
+		t.Errorf("Expected to stay in hover mode")
+	}
+}
+
+func TestEditMessage_Cancel(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-1", ChatID: model.activeChatID, Body: "Draft message", IsFromMe: true, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+
+	// 1. Enter edit mode
+	model.selectedMsgIdx = 0
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if model.editTargetMsg == nil {
+		t.Fatalf("Expected editTargetMsg to be set")
+	}
+
+	// 2. Press Esc to cancel
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.editTargetMsg != nil {
+		t.Errorf("Expected editTargetMsg to be nil after Esc")
+	}
+	if model.input.Value() != "" {
+		t.Errorf("Expected input to be cleared after Esc, got %q", model.input.Value())
+	}
+	if model.previewStatus != "Edit cancelled" {
+		t.Errorf("Expected previewStatus 'Edit cancelled', got %q", model.previewStatus)
+	}
+}
+
+func TestEditMessage_Unchanged(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-1", ChatID: model.activeChatID, Body: "No changes needed", IsFromMe: true, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+
+	// 1. Enter edit mode
+	model.selectedMsgIdx = 0
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+
+	// 2. Press Enter without changing text
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("Expected nil command when text is unchanged")
+	}
+	if model.editTargetMsg != nil {
+		t.Errorf("Expected editTargetMsg to be cleared")
+	}
+	if model.previewStatus != "Message unchanged" {
+		t.Errorf("Expected previewStatus 'Message unchanged', got %q", model.previewStatus)
+	}
+	if adapter.lastEditedID != "" {
+		t.Errorf("Expected no edit called on adapter")
+	}
+}
+
+func TestEditMessage_BlockedMediaMessage(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	testCases := []struct {
+		name string
+		msg  domain.Message
+	}{
+		{
+			name: "Image message",
+			msg:  domain.Message{ID: "msg-img", ChatID: model.activeChatID, Body: "[Image]", Type: domain.MessageTypeImage, IsFromMe: true, Timestamp: time.Now()},
+		},
+		{
+			name: "Document message",
+			msg:  domain.Message{ID: "msg-doc", ChatID: model.activeChatID, Body: "[Document: invoice.pdf]", Type: domain.MessageTypeDocument, IsFromMe: true, Timestamp: time.Now()},
+		},
+		{
+			name: "Video message",
+			msg:  domain.Message{ID: "msg-vid", ChatID: model.activeChatID, Body: "[Video]", Type: domain.MessageTypeVideo, IsFromMe: true, Timestamp: time.Now()},
+		},
+		{
+			name: "Text body with document placeholder",
+			msg:  domain.Message{ID: "msg-doc-txt", ChatID: model.activeChatID, Body: "[Document: report.docx]", Type: domain.MessageTypeText, IsFromMe: true, Timestamp: time.Now()},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			model.activeMsgs = []domain.Message{tc.msg}
+			model.selectedMsgIdx = 0
+			model.editTargetMsg = nil
+			model.previewStatus = ""
+
+			cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+			if cmd != nil {
+				t.Errorf("Expected nil command when pressing 'e' on media/attachment message")
+			}
+			if model.editTargetMsg != nil {
+				t.Errorf("Expected editTargetMsg to remain nil")
+			}
+			if model.previewStatus != "Cannot edit media or attachment messages" {
+				t.Errorf("Expected 'Cannot edit media or attachment messages', got %q", model.previewStatus)
+			}
+			if model.selectedMsgIdx != 0 {
+				t.Errorf("Expected to remain in hover mode")
+			}
+		})
+	}
+}
+
+func TestEditMessage_BlockedFileAttachment(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "msg-edit-txt", ChatID: model.activeChatID, Body: "Original draft", IsFromMe: true, Type: domain.MessageTypeText, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1}
+
+	// 1. Enter edit mode
+	model.selectedMsgIdx = 0
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if model.editTargetMsg == nil {
+		t.Fatalf("Expected editTargetMsg to be set")
+	}
+
+	// 2. Alt+F should be blocked
+	altFCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}, Alt: true})
+	if altFCmd != nil {
+		t.Errorf("Expected nil command for alt+f during edit")
+	}
+	if model.previewStatus != "Cannot attach files while editing a message" {
+		t.Errorf("Expected 'Cannot attach files while editing a message', got %q", model.previewStatus)
+	}
+	if model.editTargetMsg == nil {
+		t.Errorf("Expected editTargetMsg to remain active")
+	}
+
+	// 3. filePickedMsg should be blocked
+	_, _ = model.Update(filePickedMsg{Path: "/tmp/sample.png"})
+	if model.previewStatus != "Cannot attach files while editing a message" {
+		t.Errorf("Expected 'Cannot attach files while editing a message', got %q", model.previewStatus)
+	}
+	if strings.Contains(model.input.Value(), "file://") {
+		t.Errorf("Expected input to not contain file URI, got %q", model.input.Value())
+	}
+	if model.editTargetMsg == nil {
+		t.Errorf("Expected editTargetMsg to remain active")
+	}
+
+	// 4. clipboardPasteMsg with media should be blocked
+	_, _ = model.Update(clipboardPasteMsg{
+		Item: &ClipboardItem{
+			IsMedia:  true,
+			FilePath: "/tmp/clipboard.png",
+		},
+	})
+	if model.previewStatus != "Cannot attach files while editing a message" {
+		t.Errorf("Expected 'Cannot attach files while editing a message', got %q", model.previewStatus)
+	}
+	if strings.Contains(model.input.Value(), "file://") {
+		t.Errorf("Expected input to not contain file URI, got %q", model.input.Value())
+	}
+	if model.editTargetMsg == nil {
+		t.Errorf("Expected editTargetMsg to remain active")
+	}
+
+	// 5. clipboardPasteMsg with text should NOT be blocked
+	_, _ = model.Update(clipboardPasteMsg{
+		Item: &ClipboardItem{
+			IsMedia: false,
+			Text:    " plus text",
+		},
+	})
+	if !strings.Contains(model.input.Value(), "plus text") {
+		t.Errorf("Expected text paste to be accepted, input is %q", model.input.Value())
+	}
+
+	// 6. Enter with file:// URI should be blocked
+	model.input.SetValue("file:///tmp/attached_file.pdf")
+	enterCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if enterCmd != nil {
+		t.Errorf("Expected nil command on Enter with file:// URI during edit")
+	}
+	if model.previewStatus != "Cannot attach files while editing a message" {
+		t.Errorf("Expected 'Cannot attach files while editing a message', got %q", model.previewStatus)
+	}
+	if model.editTargetMsg == nil {
+		t.Errorf("Expected editTargetMsg to remain active after blocked Enter")
+	}
+	if model.input.Value() != "file:///tmp/attached_file.pdf" {
+		t.Errorf("Expected input to be preserved for user correction, got %q", model.input.Value())
 	}
 }

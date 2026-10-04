@@ -79,6 +79,7 @@ type Model struct {
 	input            textarea.Model
 	selectedMsgIdx   int             // targeted message index within activeChat (-1 when unfocused)
 	replyToMsg       *domain.Message // message being replied to (nil if none)
+	editTargetMsg    *domain.Message // message currently being edited (nil if none)
 
 	// Media navigation & saving
 	selectedMediaIdx         int             // targeted media index within activeChat (0-based)
@@ -140,6 +141,12 @@ type messageDeletedMsg struct {
 	MessageID         string
 	DeleteForEveryone bool
 	Err               error
+}
+type messageEditedMsg struct {
+	ChatID    string
+	MessageID string
+	NewText   string
+	Err       error
 }
 
 type mediaPreviewErrMsg struct {
@@ -351,6 +358,55 @@ func (m *Model) deleteMessageCmd(chatID string, target domain.Message, forEveryo
 			Err:               err,
 		}
 	}
+}
+
+func (m *Model) editMessageCmd(chatID, messageID, newText string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := m.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		editCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		err := m.adapter.EditMessage(editCtx, chatID, messageID, newText)
+		return messageEditedMsg{
+			ChatID:    chatID,
+			MessageID: messageID,
+			NewText:   newText,
+			Err:       err,
+		}
+	}
+}
+
+func (m *Model) updateMessageBody(chatID, messageID, newText string) {
+	if m.activeChatID == chatID {
+		for i := range m.activeMsgs {
+			if m.activeMsgs[i].ID == messageID {
+				m.activeMsgs[i].Body = newText
+				break
+			}
+		}
+		for i := range m.activeMsgs {
+			if m.activeMsgs[i].QuotedID == messageID {
+				m.activeMsgs[i].QuotedText = newText
+			}
+		}
+	}
+	m.mu.Lock()
+	if chat, exists := m.unreadChats[chatID]; exists {
+		for i := range chat.Messages {
+			if chat.Messages[i].ID == messageID {
+				chat.Messages[i].Body = newText
+				break
+			}
+		}
+		for i := range chat.Messages {
+			if chat.Messages[i].QuotedID == messageID {
+				chat.Messages[i].QuotedText = newText
+			}
+		}
+	}
+	m.mu.Unlock()
 }
 
 func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (bool, tea.Cmd) {
@@ -645,6 +701,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case messageEditedMsg:
+		if msg.Err != nil {
+			m.previewStatus = fmt.Sprintf("Error editing message: %v", msg.Err)
+			return m, nil
+		}
+		m.updateMessageBody(msg.ChatID, msg.MessageID, msg.NewText)
+		m.previewStatus = "Message edited"
+		return m, nil
+
 	case mediaPreviewErrMsg:
 		m.confirmSave = false
 		m.confirmDocAction = false
@@ -696,6 +761,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case filePickedMsg:
+		if m.editTargetMsg != nil {
+			m.previewStatus = "Cannot attach files while editing a message"
+			return m, tea.ClearScreen
+		}
 		if msg.Path != "" {
 			cleanPath := strings.TrimSpace(msg.Path)
 			m.input.SetValue("file://" + cleanPath + " ")
@@ -723,6 +792,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Item.IsMedia && msg.Item.FilePath != "" {
+			if m.editTargetMsg != nil {
+				m.previewStatus = "Cannot attach files while editing a message"
+				return m, nil
+			}
 			cleanPath := strings.TrimSpace(msg.Item.FilePath)
 			formatted := "file://" + cleanPath + " "
 			if strings.Contains(cleanPath, " ") {
@@ -1398,9 +1471,10 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 			m.unreadChats[msg.ChatID] = chat
 		} else {
 			alreadyPresent := false
-			for _, existing := range chat.Messages {
+			for i, existing := range chat.Messages {
 				if existing.ID == msg.ID {
 					alreadyPresent = true
+					chat.Messages[i].Body = msg.Body
 					break
 				}
 			}
@@ -1470,21 +1544,41 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		return
 	}
 
-	// 2. If currently viewing this chat, append directly
+	// 2. If currently viewing this chat, update if already present or append directly
 	if m.view == ViewChat && m.activeChatID == msg.ChatID {
-		m.activeMsgs = append(m.activeMsgs, msg)
-		m.chatScrollOffset = 0
+		foundInActive := false
+		for i := range m.activeMsgs {
+			if m.activeMsgs[i].ID == msg.ID {
+				m.activeMsgs[i].Body = msg.Body
+				foundInActive = true
+				break
+			}
+		}
+		if !foundInActive {
+			m.activeMsgs = append(m.activeMsgs, msg)
+			m.chatScrollOffset = 0
+		}
 		go func() {
 			_ = m.adapter.MarkRead(m.ctx, msg.ChatID, msg.Sender, []string{msg.ID})
 		}()
 		if chat, exists := m.unreadChats[msg.ChatID]; exists {
-			if len(chat.Messages) < 50 {
-				chat.Messages = append(chat.Messages, msg)
-			} else {
-				copy(chat.Messages, chat.Messages[1:])
-				chat.Messages[len(chat.Messages)-1] = msg
+			foundInChat := false
+			for i := range chat.Messages {
+				if chat.Messages[i].ID == msg.ID {
+					chat.Messages[i].Body = msg.Body
+					foundInChat = true
+					break
+				}
 			}
-			chat.LastReceived = msg.Timestamp
+			if !foundInChat {
+				if len(chat.Messages) < 50 {
+					chat.Messages = append(chat.Messages, msg)
+				} else {
+					copy(chat.Messages, chat.Messages[1:])
+					chat.Messages[len(chat.Messages)-1] = msg
+				}
+				chat.LastReceived = msg.Timestamp
+			}
 			chat.UnreadCount = 0
 		}
 		return
@@ -2099,10 +2193,44 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 				target := m.activeMsgs[m.selectedMsgIdx]
 				m.replyToMsg = &target
 			}
+			m.editTargetMsg = nil
 			m.selectedMsgIdx = -1
 			m.input.Focus()
 			m.previewStatus = ""
 			return textinput.Blink
+
+		case "e":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				if !target.IsFromMe {
+					m.previewStatus = "Cannot edit: only your own sent messages can be edited"
+					return nil
+				}
+				if target.IsMedia() || (target.Type != "" && target.Type != domain.MessageTypeText) ||
+					strings.HasPrefix(target.Body, "[Document") ||
+					strings.HasPrefix(target.Body, "[Image") ||
+					strings.HasPrefix(target.Body, "[Video") ||
+					strings.HasPrefix(target.Body, "[Audio") ||
+					strings.HasPrefix(target.Body, "[GIF") ||
+					strings.HasPrefix(target.Body, "[Sticker") {
+					m.previewStatus = "Cannot edit media or attachment messages"
+					return nil
+				}
+				if target.Body == "" {
+					m.previewStatus = "Cannot edit empty message"
+					return nil
+				}
+				m.editTargetMsg = &target
+				m.replyToMsg = nil
+				m.input.SetValue(target.Body)
+				m.input.CursorEnd()
+				m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+				m.selectedMsgIdx = -1
+				m.input.Focus()
+				m.previewStatus = ""
+				return textinput.Blink
+			}
+			return nil
 
 		case "ctrl+v", "alt+v":
 			if !m.cfg.IsClipboardPasteEnabled() {
@@ -2309,6 +2437,13 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.mentionCursor = 0
 			return nil
 		}
+		if m.editTargetMsg != nil {
+			m.editTargetMsg = nil
+			m.input.SetValue("")
+			m.input.SetHeight(1)
+			m.previewStatus = "Edit cancelled"
+			return nil
+		}
 		if m.replyToMsg != nil {
 			m.replyToMsg = nil
 			m.previewStatus = "Reply cancelled"
@@ -2402,6 +2537,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case "alt+f":
+		if m.editTargetMsg != nil {
+			m.previewStatus = "Cannot attach files while editing a message"
+			return nil
+		}
 		m.previewStatus = "Opening file selector..."
 		return m.pickFileCmd()
 
@@ -2471,6 +2610,29 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		if len(m.mentionHints) > 0 {
 			m.applyMentionHint()
 			return nil
+		}
+		if m.editTargetMsg != nil {
+			text := strings.TrimSpace(m.input.Value())
+			if strings.HasPrefix(text, "file://") {
+				m.previewStatus = "Cannot attach files while editing a message"
+				return nil
+			}
+			target := *m.editTargetMsg
+			m.editTargetMsg = nil
+			m.input.Reset()
+			m.input.SetHeight(1)
+			m.mentionHints = nil
+			m.mentionCursor = 0
+			if text == "" {
+				m.previewStatus = "Cannot send empty message"
+				return nil
+			}
+			if text == target.Body {
+				m.previewStatus = "Message unchanged"
+				return nil
+			}
+			m.previewStatus = "Editing message..."
+			return m.editMessageCmd(m.activeChatID, target.ID, text)
 		}
 		text := strings.TrimSpace(m.input.Value())
 		if text == "" {
@@ -3380,6 +3542,20 @@ func (m *Model) renderChatView() []string {
 		replyBarLines = 1
 	}
 
+	editBarLines := 0
+	var editBarStr string
+	if m.editTargetMsg != nil {
+		origSnippet := strings.ReplaceAll(m.formatMentions(m.editTargetMsg.Body), "\n", " ")
+		maxSnippetW := max(15, cw-35)
+		if len(origSnippet) > maxSnippetW {
+			origSnippet = origSnippet[:maxSnippetW-3] + "..."
+		}
+		editBarStr = "  " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("✎ Editing: ") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8")).Render(origSnippet) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render("  (Enter to save, Esc to cancel)")
+		editBarLines = 1
+	}
+
 	var mentionHintLines []string
 	if len(m.mentionHints) > 0 {
 		header := "  " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89DCEB")).Render("@ Mention") +
@@ -3447,7 +3623,7 @@ func (m *Model) renderChatView() []string {
 
 	m.input.SetWidth(max(20, cw-6))
 	inputLines := strings.Split(m.input.View(), "\n")
-	inputH := len(inputLines) + replyBarLines + len(mentionHintLines)
+	inputH := len(inputLines) + replyBarLines + editBarLines + len(mentionHintLines)
 	availH := max(1, m.maxCanvasHeight()-5-inputH)
 	scrollInfo := ""
 
@@ -3476,10 +3652,12 @@ func (m *Model) renderChatView() []string {
 		lines = append(lines, "")
 	}
 
-	// One line padding on top of the message box / reply bar
+	// One line padding on top of the message box / reply bar / edit bar
 	lines = append(lines, "")
 	if replyBarStr != "" {
 		lines = append(lines, replyBarStr)
+	} else if editBarStr != "" {
+		lines = append(lines, editBarStr)
 	}
 	lines = append(lines, inputLines...)
 	if len(mentionHintLines) > 0 {
@@ -3490,7 +3668,9 @@ func (m *Model) renderChatView() []string {
 	var dynamicHelp string
 
 	if m.selectedMsgIdx >= 0 {
-		dynamicHelp = "[j/k] Msg · [J/K] Media · [p] Preview · [r] Reply · [y] Copy · [d/D] Delete · [Esc] Input"
+		dynamicHelp = "[j/k] Msg · [J/K] Media · [p] Preview · [r] Reply · [e] Edit · [y] Copy · [d/D] Delete · [Esc] Input"
+	} else if m.editTargetMsg != nil {
+		dynamicHelp = "[Enter] Save Edit · [Esc] Cancel Edit"
 	} else {
 		mediaHelp := ""
 		if len(mediaIndices) > 1 {

@@ -481,6 +481,14 @@ func (r *RemoteAdapter) DeleteMessage(ctx context.Context, chatID string, messag
 	}, nil)
 }
 
+func (r *RemoteAdapter) EditMessage(ctx context.Context, chatID string, messageID string, newText string) error {
+	return r.call(ctx, "edit_message", EditMessageParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		NewText:   newText,
+	}, nil)
+}
+
 func (r *RemoteAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
 	var msgs []domain.Message
 	err := r.call(ctx, "get_chat_history", GetChatHistoryParams{

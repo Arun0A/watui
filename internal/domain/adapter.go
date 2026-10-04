@@ -86,6 +86,9 @@ type WhatsAppAdapter interface {
 	// DeleteMessage deletes a message locally ("delete for me") or revokes it on WhatsApp servers for everyone ("delete for all").
 	DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error
 
+	// EditMessage edits an already sent message on WhatsApp servers and updates local cache.
+	EditMessage(ctx context.Context, chatID string, messageID string, newText string) error
+
 	// GetChatHistory fetches up to limit historical messages for the given chat from local storage,
 	// returning messages strictly older than beforeTimestamp (if non-zero) or the latest if beforeTimestamp is zero.
 	GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]Message, error)

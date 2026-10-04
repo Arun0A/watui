@@ -346,6 +346,28 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			}
 		}
 
+	case "edit_message":
+		var p EditMessageParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			err := s.adapter.EditMessage(reqCtx, p.ChatID, p.MessageID, p.NewText)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				s.unreadsMu.Lock()
+				if s.cachedUnreads != nil {
+					for i, m := range s.cachedUnreads {
+						if m.ID == p.MessageID {
+							s.cachedUnreads[i].Body = p.NewText
+							break
+						}
+					}
+				}
+				s.unreadsMu.Unlock()
+			}
+		}
+
 	case "download_media":
 		var p DownloadMediaParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {

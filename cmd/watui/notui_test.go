@@ -106,6 +106,9 @@ func (m *mockCLIAdapter) SetChatArchived(ctx context.Context, chatID string, arc
 func (m *mockCLIAdapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
 	return nil
 }
+func (m *mockCLIAdapter) EditMessage(ctx context.Context, chatID string, messageID string, newText string) error {
+	return nil
+}
 func (m *mockCLIAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
 	return nil, nil
 }

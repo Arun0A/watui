@@ -64,6 +64,12 @@ type DeleteMessageParams struct {
 	Sender            string `json:"sender,omitempty"`
 }
 
+type EditMessageParams struct {
+	ChatID    string `json:"chat_id"`
+	MessageID string `json:"message_id"`
+	NewText   string `json:"new_text"`
+}
+
 type DownloadMediaParams struct {
 	Message domain.Message `json:"message"`
 }
