@@ -1555,6 +1555,3 @@ func (c *Config) RemovePinChat(chatID string, chatNames ...string) error {
 	out := strings.Join(newLines, "\n")
 	return os.WriteFile(targetPath, []byte(out), 0644)
 }
-
-
-

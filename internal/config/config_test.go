@@ -925,5 +925,3 @@ func TestAddAndRemovePinChat(t *testing.T) {
 		t.Errorf("Expected chat to be unpinned on disk")
 	}
 }
-
-

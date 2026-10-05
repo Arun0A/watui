@@ -955,5 +955,3 @@ func TestAdapterMuteLifecycle(t *testing.T) {
 		t.Errorf("Expected mutedMap to contain active mutes, got: %v", mutedMap)
 	}
 }
-
-

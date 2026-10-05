@@ -4749,4 +4749,3 @@ theme: dark
 		t.Errorf("Expected yaml on disk to not contain %s, got:\n%s", testChatID, string(diskContent))
 	}
 }
-
