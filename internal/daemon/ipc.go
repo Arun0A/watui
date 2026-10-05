@@ -28,6 +28,7 @@ type InitialSnapshot struct {
 	UnreadMessages []domain.Message        `json:"unread_messages"`
 	Contacts       []domain.Contact        `json:"contacts"`
 	ArchivedChats  map[string]bool         `json:"archived_chats"`
+	MutedChats     map[string]bool         `json:"muted_chats,omitempty"`
 }
 
 type SendTextParams struct {
@@ -81,6 +82,12 @@ type EnsureGroupsParams struct {
 type SetChatArchivedParams struct {
 	ChatID   string `json:"chat_id"`
 	Archived bool   `json:"archived"`
+}
+
+type SetChatMutedParams struct {
+	ChatID   string        `json:"chat_id"`
+	Muted    bool          `json:"muted"`
+	Duration time.Duration `json:"duration"`
 }
 
 type GetChatHistoryParams struct {

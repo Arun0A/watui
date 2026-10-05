@@ -368,8 +368,12 @@ func main() {
 	if uiModel != nil {
 		uiModel.CleanupOnExit()
 	}
+	toggledLocalMute := false
 	if finalM, ok := finalModel.(*ui.Model); ok && finalM != nil {
 		finalM.CleanupOnExit()
+		toggledLocalMute = finalM.LocalMuteToggled()
+	} else if uiModel != nil {
+		toggledLocalMute = uiModel.LocalMuteToggled()
 	}
 
 	if err != nil {
@@ -379,6 +383,14 @@ func main() {
 
 	cancel()
 	adapter.Disconnect()
+
+	// If local mute was toggled during this session, refresh background daemon if running
+	if toggledLocalMute {
+		pidFile := daemon.PIDFilePath(finalDBPath)
+		if running, _ := daemon.IsRunning(pidFile); running {
+			_ = restartDaemon(finalDBPath, appCfg, *configFile, *logFile)
+		}
+	}
 }
 
 func startDaemon(dbPath string, appCfg *config.Config, configFile, customLog string) error {
@@ -581,6 +593,9 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 	}
 
 	adapter.OnMessage(func(msg domain.Message) {
+		if adapter.IsChatMuted(msg.ChatID) {
+			return
+		}
 		if appCfg.IsHidden(msg.ChatID, msg.ChatName, msg.SenderName) || appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
 			return
 		}

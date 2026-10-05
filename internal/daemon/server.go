@@ -162,11 +162,13 @@ func (s *Server) handleClient(conn net.Conn) {
 	s.statusMu.RUnlock()
 
 	archivedMap := s.adapter.GetArchivedChats()
+	mutedMap := s.adapter.GetMutedChats()
 
 	snapshot := InitialSnapshot{
 		Status:         currentStatus,
 		UnreadMessages: unreads,
 		ArchivedChats:  archivedMap,
+		MutedChats:     mutedMap,
 	}
 
 	snapData, _ := json.Marshal(snapshot)
@@ -404,6 +406,26 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 				resp.Error = err.Error()
 			} else {
 				s.BroadcastEvent("archived", p)
+			}
+		}
+
+	case "is_chat_muted":
+		var p DismissParams
+		if err := json.Unmarshal(req.Params, &p); err == nil {
+			muted := s.adapter.IsChatMuted(p.ChatID)
+			resp.Result, _ = json.Marshal(muted)
+		}
+
+	case "set_chat_muted":
+		var p SetChatMutedParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			err := s.adapter.SetChatMuted(reqCtx, p.ChatID, p.Muted, p.Duration)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				s.BroadcastEvent("muted", p)
 			}
 		}
 

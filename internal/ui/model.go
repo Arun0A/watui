@@ -96,6 +96,12 @@ type Model struct {
 	pendingDeleteMultiMsgs   []domain.Message    // messages awaiting batch deletion confirmation
 	multiSelectedMsgs        map[string]struct{} // set of message IDs selected in hover mode
 
+	// Global mute prompt
+	promptGlobalMute   bool
+	globalMuteChatID   string
+	globalMuteChatName string
+	localMuteToggled   bool
+
 	// Group mention completion
 	groupParticipants []domain.Contact // participants of active group chat
 	mentionHints      []domain.Contact // filtered hints currently visible
@@ -922,6 +928,73 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.promptGlobalMute {
+			switch msg.String() {
+			case "1":
+				m.promptGlobalMute = false
+				chatID := m.globalMuteChatID
+				name := m.globalMuteChatName
+				m.globalMuteChatID = ""
+				m.globalMuteChatName = ""
+				m.mu.Lock()
+				if chat := m.unreadChats[chatID]; chat != nil {
+					chat.IsMuted = true
+				}
+				m.mu.Unlock()
+				if m.adapter != nil {
+					go func() {
+						_ = m.adapter.SetChatMuted(m.ctx, chatID, true, 1*time.Hour)
+					}()
+				}
+				m.previewStatus = fmt.Sprintf("Muted %s for 1 hour globally", name)
+				return m, nil
+			case "2":
+				m.promptGlobalMute = false
+				chatID := m.globalMuteChatID
+				name := m.globalMuteChatName
+				m.globalMuteChatID = ""
+				m.globalMuteChatName = ""
+				m.mu.Lock()
+				if chat := m.unreadChats[chatID]; chat != nil {
+					chat.IsMuted = true
+				}
+				m.mu.Unlock()
+				if m.adapter != nil {
+					go func() {
+						_ = m.adapter.SetChatMuted(m.ctx, chatID, true, 8*time.Hour)
+					}()
+				}
+				m.previewStatus = fmt.Sprintf("Muted %s for 8 hours globally", name)
+				return m, nil
+			case "3":
+				m.promptGlobalMute = false
+				chatID := m.globalMuteChatID
+				name := m.globalMuteChatName
+				m.globalMuteChatID = ""
+				m.globalMuteChatName = ""
+				m.mu.Lock()
+				if chat := m.unreadChats[chatID]; chat != nil {
+					chat.IsMuted = true
+				}
+				m.mu.Unlock()
+				if m.adapter != nil {
+					go func() {
+						_ = m.adapter.SetChatMuted(m.ctx, chatID, true, 0)
+					}()
+				}
+				m.previewStatus = fmt.Sprintf("Muted %s permanently globally", name)
+				return m, nil
+			case "esc", "ctrl+c", "q":
+				m.promptGlobalMute = false
+				m.globalMuteChatID = ""
+				m.globalMuteChatName = ""
+				m.previewStatus = ""
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
+
 		if m.confirmDocAction {
 			switch msg.String() {
 			case "o", "O":
@@ -1279,6 +1352,9 @@ func (m *Model) isHidden(chatID string, chatNames ...string) bool {
 }
 
 func (m *Model) isMuted(chatID string, chatNames ...string) bool {
+	if m.adapter != nil && m.adapter.IsChatMuted(chatID) {
+		return true
+	}
 	if m.cfg == nil {
 		return false
 	}
@@ -1860,11 +1936,77 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 
+	case "M", "shift+m": // toggle global WhatsApp mute
+		m.previewStatus = ""
+		m.confirmSave = false
+		m.confirmDocAction = false
+		m.promptOpenWith = false
+		m.pendingDocMsg = nil
+		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
+			chatID := m.chatOrder[m.cursor]
+			chat := m.unreadChats[chatID]
+			if chat != nil {
+				isGloballyMuted := false
+				if m.adapter != nil {
+					isGloballyMuted = m.adapter.IsChatMuted(chatID)
+				}
+				if isGloballyMuted {
+					// Toggle off (unmute)
+					if m.adapter != nil {
+						go func() {
+							_ = m.adapter.SetChatMuted(m.ctx, chatID, false, 0)
+						}()
+					}
+					chat.IsMuted = m.cfg != nil && m.cfg.IsMuted(chatID, m.getChatMatchNames(chatID, chat.Name)...)
+					m.previewStatus = fmt.Sprintf("Unmuted %s globally", chat.Name)
+				} else {
+					// Prompt options: 1: 1 hour, 2: 8 hours, 3: Always
+					m.promptGlobalMute = true
+					m.globalMuteChatID = chatID
+					m.globalMuteChatName = chat.Name
+				}
+			}
+		}
+		return nil
+
+	case "m": // toggle local watui.yaml mute
+		m.previewStatus = ""
+		m.confirmSave = false
+		m.confirmDocAction = false
+		m.promptOpenWith = false
+		m.pendingDocMsg = nil
+		m.promptGlobalMute = false
+		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
+			chatID := m.chatOrder[m.cursor]
+			chat := m.unreadChats[chatID]
+			if chat != nil && m.cfg != nil {
+				m.localMuteToggled = true
+				allNames := m.getChatMatchNames(chatID, chat.Name)
+				if m.cfg.IsMuted(chatID, allNames...) {
+					if err := m.cfg.RemoveMuteChat(chatID, allNames...); err != nil {
+						m.previewStatus = fmt.Sprintf("Error unmuting in config: %v", err)
+					} else {
+						chat.IsMuted = m.isMuted(chatID, chat.Name)
+						m.previewStatus = fmt.Sprintf("Unmuted %s in watui.yaml", chat.Name)
+					}
+				} else {
+					if err := m.cfg.AddMuteChat(chatID); err != nil {
+						m.previewStatus = fmt.Sprintf("Error muting in config: %v", err)
+					} else {
+						chat.IsMuted = true
+						m.previewStatus = fmt.Sprintf("Muted %s in watui.yaml", chat.Name)
+					}
+				}
+			}
+		}
+		return nil
+
 	case "enter", "l", "right": // open chat
 		m.previewStatus = ""
 		m.confirmSave = false
 		m.confirmDocAction = false
 		m.promptOpenWith = false
+		m.promptGlobalMute = false
 		m.pendingDocMsg = nil
 		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
 			chatID := m.chatOrder[m.cursor]
@@ -2083,6 +2225,13 @@ func (m *Model) removeMessageFromUnread(chatID, msgID string) {
 			chat.UnreadCount--
 		}
 	}
+}
+
+// LocalMuteToggled returns true if a chat was locally muted or unmuted during this session.
+func (m *Model) LocalMuteToggled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.localMuteToggled
 }
 
 // CleanupOnExit dismisses all read chats from persistent storage when the TUI quits.
@@ -3538,7 +3687,9 @@ func (m *Model) renderUnreadListView() []string {
 	}
 
 	statusNotice := ""
-	if m.promptOpenWith {
+	if m.promptGlobalMute {
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render(fmt.Sprintf("Mute %s globally: 1: 1 hour, 2: 8 hours, 3: Always (Esc to cancel)", m.globalMuteChatName))
+	} else if m.promptOpenWith {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Open with: ") + m.openWithInput.View() + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" (Enter to open, Esc to cancel)")
 	} else if m.confirmDocAction {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], or Save [s]? (Esc to cancel)")
