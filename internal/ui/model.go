@@ -2339,6 +2339,33 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			return m.pasteClipboardCmd()
 
 		case "y":
+			if len(m.multiSelectedMsgs) > 0 {
+				selectedMsgs := m.getSelectedMsgsInOrder()
+				var texts []string
+				for _, msg := range selectedMsgs {
+					body := strings.TrimSpace(m.formatMentions(msg.Body))
+					if body == "" {
+						continue
+					}
+					if strings.HasPrefix(body, "[Document") ||
+						strings.HasPrefix(body, "[Image") ||
+						strings.HasPrefix(body, "[Video") ||
+						strings.HasPrefix(body, "[Audio") ||
+						strings.HasPrefix(body, "[GIF") ||
+						strings.HasPrefix(body, "[Sticker") {
+						continue
+					}
+					texts = append(texts, body)
+				}
+				if len(texts) == 0 {
+					m.previewStatus = "No text messages selected to copy"
+					return nil
+				}
+				joined := strings.Join(texts, "\n")
+				_ = copyToClipboard(joined)
+				m.previewStatus = fmt.Sprintf("Copied %d message(s) to clipboard", len(texts))
+				return nil
+			}
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
 				textToCopy := m.formatMentions(target.Body)
@@ -2422,37 +2449,6 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 					m.previewStatus = "Selection cleared"
 				}
 			}
-			return nil
-
-		case "c":
-			if len(m.multiSelectedMsgs) > 0 {
-				selectedMsgs := m.getSelectedMsgsInOrder()
-				var texts []string
-				for _, msg := range selectedMsgs {
-					body := strings.TrimSpace(m.formatMentions(msg.Body))
-					if body == "" {
-						continue
-					}
-					if strings.HasPrefix(body, "[Document") ||
-						strings.HasPrefix(body, "[Image") ||
-						strings.HasPrefix(body, "[Video") ||
-						strings.HasPrefix(body, "[Audio") ||
-						strings.HasPrefix(body, "[GIF") ||
-						strings.HasPrefix(body, "[Sticker") {
-						continue
-					}
-					texts = append(texts, body)
-				}
-				if len(texts) == 0 {
-					m.previewStatus = "No text messages selected to copy"
-					return nil
-				}
-				joined := strings.Join(texts, "\n")
-				_ = copyToClipboard(joined)
-				m.previewStatus = fmt.Sprintf("Copied %d message(s) to clipboard", len(texts))
-				return nil
-			}
-			m.previewStatus = "No messages selected (press Space to select messages)"
 			return nil
 
 		case "s":
@@ -3883,7 +3879,7 @@ func (m *Model) renderChatView() []string {
 
 	if m.selectedMsgIdx >= 0 {
 		if len(m.multiSelectedMsgs) > 0 {
-			dynamicHelp = fmt.Sprintf("[%d selected] [Space] Toggle · [c] Copy · [d/D] Delete · [s] Save · [Esc] Clear", len(m.multiSelectedMsgs))
+			dynamicHelp = fmt.Sprintf("[%d selected] [Space] Toggle · [y] Copy · [d/D] Delete · [s] Save · [Esc] Clear", len(m.multiSelectedMsgs))
 		} else {
 			dynamicHelp = "[j/k] Msg · [Space] Select · [J/K] Media · [p] Preview · [r] Reply · [e] Edit · [y] Copy · [d/D] Delete · [Esc] Input"
 		}

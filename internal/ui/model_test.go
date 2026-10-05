@@ -4218,7 +4218,7 @@ func TestMultiSelect_CopyTextOnly(t *testing.T) {
 		"m3": {},
 	}
 
-	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if !strings.Contains(model.previewStatus, "Copied 2 message(s)") {
 		t.Errorf("Expected previewStatus to indicate 2 messages copied, got %q", model.previewStatus)
 	}

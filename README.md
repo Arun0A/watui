@@ -152,11 +152,10 @@ nix develop github:Arun0A/watui
 | <kbd>Alt</kbd> + <kbd>m</kbd> | Jump to media messages from message box |
 | <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |
 | <kbd>e</kbd> *(while hovering)* | Edit hovered sent message in message box |
-| <kbd>y</kbd> *(while hovering)* | Copy message text to clipboard |
+| <kbd>y</kbd> *(while hovering / multi-select)* | Copy hovered or selected messages (text only) to clipboard |
 | <kbd>l</kbd> *(while hovering)* | Open link(s) in default browser |
 | <kbd>p</kbd> *(while hovering)* | Preview selected media or open document prompt |
 | <kbd>Space</kbd> *(while hovering)* | Toggle select message and focus next |
-| <kbd>c</kbd> *(multi-select)* | Copy all selected messages (text only) to clipboard |
 | <kbd>s</kbd> *(multi-select)* | Save selected attachments and/or text messages to Downloads |
 | <kbd>d</kbd> *(while hovering / multi-select)* | Delete hovered or selected messages for you (confirms y/N) |
 | <kbd>Shift</kbd> + <kbd>d</kbd> *(while hovering / multi-select)* | Delete hovered or selected messages for everyone, if possible (confirms y/N) |
@@ -251,21 +250,21 @@ preview:
     txt: "nvim"
     log: "less"
 
-# 4. File Picker Command (Alt+F)
+# 5. File Picker Command (Alt+F)
 # Supported: yazi, ranger, lf, nnn, fzf, zenity, kdialog
 file_picker: "yazi"
 
-# 5. Custom Companion Device Name
+# 6. Custom Companion Device Name
 device_name: "WA-TUI"
 
-# 6. Database Directory or Path (Optional)
+# 7. Database Directory or Path (Optional)
 # db_dir: "~/.local/share/watui"      # Stores watui.db inside this folder
 # db_path: "~/.local/share/watui/watui.db"
 
-# 7. Include / Alternate Config File (Optional)
+# 8. Include / Alternate Config File (Optional)
 # config_file: "~/.config/watui/config.yaml"
 
-# 8. Notifications (Banners & Sound Effects)
+# 9. Notifications (Banners & Sound Effects)
 # Disabled by default. Muted chats never trigger alerts.
 notifications:
   enabled: true          # Master toggle: set to true to enable alerts
@@ -274,15 +273,15 @@ notifications:
   # sound_path: ""          # Custom audio file path (defaults to assets/default.mp3)
   # only_on_mention: true   # Group chats: notify only when mentioned/tagged (@you). Works irrespective of archive status (default: false)
 
-# 9. Chat Reactions Display (Optional)
+# 10. Chat Reactions Display (Optional)
 # Set to true to completely hide reactions in chat view (false by default)
 # disable_reactions: false
 
-# 10. Clipboard Paste Support (Optional)
+# 11. Clipboard Paste Support (Optional)
 # Set to false to disable pasting images/files/text from clipboard (true by default)
 # clipboard_paste: true
 
-# 11. Media Cache Expiration & Cleanup (Optional)
+# 12. Media Cache Expiration & Cleanup (Optional)
 # expire_media: 72       # Cache lifetime in hours (default: 72 hours / 3 days; 0 to disable expiration)
 # clear_on_exit: false   # Set to true to clear all cached media on TUI exit (default: false)
 ```
