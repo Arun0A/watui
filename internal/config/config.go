@@ -103,15 +103,19 @@ type Config struct {
 	ConfigFile string `json:"config_file" yaml:"config_file"`
 	ConfigDir  string `json:"config_dir" yaml:"config_dir"`
 
-	// Muted lists chat JIDs, phone numbers, or group/contact names to hide from unread.
-	Muted []string `json:"muted" yaml:"muted"`
+	// Hidden lists chat JIDs, phone numbers, or group/contact names to hide from unread and contacts.
+	Hidden []string `json:"hidden" yaml:"hidden"`
 
 	// Pinned lists chat JIDs, phone numbers, or group/contact names to keep pinned at top.
 	Pinned []string `json:"pinned" yaml:"pinned"`
 
-	// Aliases for user convenience (mute / pin)
-	Mute []string `json:"mute" yaml:"mute"`
+	// Muted lists chat JIDs, phone numbers, or group/contact names to mute notifications only (still shows in unread).
+	Muted []string `json:"muted" yaml:"muted"`
+
+	// Aliases for user convenience (hide / pin / mute)
+	Hide []string `json:"hide" yaml:"hide"`
 	Pin  []string `json:"pin" yaml:"pin"`
+	Mute []string `json:"mute" yaml:"mute"`
 
 	// History controls local chat history persistence and cyclic retention.
 	PersistChatHistory   *bool         `json:"persist_chat_history" yaml:"persist_chat_history"`
@@ -768,6 +772,12 @@ func mergeConfig(base, overlay *Config) {
 	if len(overlay.Pin) > 0 {
 		base.Pin = overlay.Pin
 	}
+	if len(overlay.Hidden) > 0 {
+		base.Hidden = overlay.Hidden
+	}
+	if len(overlay.Hide) > 0 {
+		base.Hide = overlay.Hide
+	}
 	if len(overlay.Muted) > 0 {
 		base.Muted = overlay.Muted
 	}
@@ -886,6 +896,36 @@ func GetExeDir() string {
 		return filepath.Dir(realExe)
 	}
 	return filepath.Dir(exe)
+}
+
+// GetHidden returns all unique, trimmed hide rules.
+func (c *Config) GetHidden() []string {
+	if c == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var list []string
+	for _, item := range append(append([]string(nil), c.Hidden...), c.Hide...) {
+		trimmed := strings.TrimSpace(item)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			list = append(list, trimmed)
+		}
+	}
+	return list
+}
+
+// IsHidden returns true if the chat matches any configured hide rule.
+func (c *Config) IsHidden(chatID string, chatNames ...string) bool {
+	if c == nil {
+		return false
+	}
+	for _, rule := range c.GetHidden() {
+		if MatchTarget(rule, chatID, chatNames...) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetMuted returns all unique, trimmed mute rules.

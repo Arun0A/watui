@@ -18,23 +18,32 @@
 #   - "+1234567890"
 #   - "120363311130744191@g.us"
 
-# 2. Muted chats / groups
-# Muted chats are completely excluded from the unread inbox and contact picker.
+# 2. Hidden chats / groups
+# Hidden chats are completely excluded from the unread inbox and contact picker.
 # Useful for spammy groups, broadcast channels, and status updates.
 # Supports:
 #   - Wildcard globs (e.g. "*@newsletter" to hide all channels, "*@broadcast", "status@*")
 #   - Regular expressions (e.g. ".*@newsletter", "^status@broadcast$")
 #   - Phone numbers, JIDs, or contact/group names (case-insensitive)
 #
-# mute:
-#   - "*@newsletter"         # Mute all WhatsApp Channels
-#   - "status@broadcast"     # Mute WhatsApp Status updates
+# hide:
+#   - "*@newsletter"         # Hide all WhatsApp Channels
+#   - "status@broadcast"     # Hide WhatsApp Status updates
 #   - "Announcements"
 #   - "Deals & Offers"
 #   - "+18005550199"
 #   - "120363000000000000@g.us"
 
-# 3. Media Preview (Images, Videos, Audio, Stickers, Documents)
+# 3. Muted chats / groups
+# Muted chats silence desktop notifications and audio sound chimes only.
+# New messages still appear in the unread inbox (with a [Muted] prefix badge)
+# and increment unread message counters.
+#
+# mute:
+#   - "High Volume Group"
+#   - "+1234567890"
+
+# 4. Media Preview (Images, Videos, Audio, Stickers, Documents)
 # Command used to preview media attachments on demand.
 # Defaults to your operating system's native / MIME default viewer:
 #   - Windows: rundll32 url.dll,FileProtocolHandler (Photos, Media Player, Acrobat, etc.)
@@ -57,7 +66,7 @@
 #     csv: "vd"               # VisiData
 #     md: "glow -p"           # Markdown pager
 
-# 4. File Picker Command (Alt+F)
+# 5. File Picker Command (Alt+F)
 # Custom command executed when pressing Alt+F to pick a file to attach.
 # Terminal file pickers (yazi, ranger, lf, nnn, fzf) and GUI pickers (zenity, kdialog)
 # are supported out-of-the-box.
@@ -70,14 +79,14 @@
 # file_picker: "zenity --file-selection"
 # file_picker: "kdialog --getopenfilename"
 
-# 5. Companion Device Name
+# 6. Companion Device Name
 # Name registered and displayed in WhatsApp mobile under Settings -> Linked Devices.
 # Sent during first-time QR pairing registration.
 # Default: "WA-TUI"
 #
 # device_name: "WA-TUI"
 
-# 6. Database Directory or Path
+# 7. Database Directory or Path
 # Explicitly set the directory containing watui.db (or the full database file path).
 # If a directory is specified, watui.db will be placed and managed inside that folder.
 #
@@ -86,17 +95,17 @@
 # db_path: "~/.local/share/watui/watui.db" # Explicit file path
 # db: "./data"                             # Relative directory or database file path
 
-# 7. Include / Alternate Config File
+# 8. Include / Alternate Config File
 # Optionally load, inherit, or chain settings from another config file or directory.
 #
 # Examples:
 # config_file: "~/.config/watui/config.yaml"
 # config_dir:  "~/.config/watui"
 
-# 8. Notifications (Banners & Sound Effects)
+# 9. Notifications (Banners & Sound Effects)
 # Complete control over desktop alerts and audio chimes for incoming messages.
 # All notifications are completely disabled by default.
-# Muted chats and self-sent messages never trigger notifications.
+# Hidden and muted chats and self-sent messages never trigger notifications.
 #
 # notifications:
 #   enabled: false          # Master toggle: set to true to enable alerts (false by default)
@@ -105,7 +114,7 @@
 #   sound_path: ""          # Custom audio file path (defaults to assets/default.mp3 next to binary/config)
 #   only_on_mention: true   # Group chats: notify only when mentioned/tagged (@you). Works irrespective of archive status (default: false)
 
-# 9. Background Notification Daemon Settings
+# 10. Background Notification Daemon Settings
 # Options for running watui headlessly in the background (watui -d).
 # Daemon logging is completely optional and disabled by default.
 #
@@ -113,7 +122,7 @@
 #   log: false              # Enable file logging for daemon background process (false by default)
 #   log_path: ""           # Optional custom log file path (defaults to watui-daemon.log next to watui.db)
 
-# 10. Chat History Persistence (Cyclic Bounded Retention)
+# 11. Chat History Persistence (Cyclic Bounded Retention)
 # Control local message history caching and on-demand loading.
 # By default, watui remains completely ephemeral with 0 storage bloat.
 # When enabled, older messages beyond cycle-msg-count-per-chat are automatically pruned per chat.
@@ -122,24 +131,24 @@
 # cycle_msg_count_per_chat: 30         # Maximum number of messages to cyclically retain per chat (default: 30)
 # always_load_history: false           # If false, loads clean and lets you fetch 5 messages on-demand with Ctrl+U
 
-# 11. Chat Reactions Display
+# 12. Chat Reactions Display
 # Option to completely disable reactions ([Reaction: ...]) from being displayed in chat (false by default).
 #
 # disable_reactions: false
 
-# 12. Clipboard Paste Support
+# 13. Clipboard Paste Support
 # Option to enable/disable pasting images/files/text from system clipboard using Ctrl+V or Alt+V (true by default).
 #
 # clipboard_paste: true
 
-# 13. Media Cache Expiration
+# 14. Media Cache Expiration
 # Control automatic expiration and cleanup of locally cached media files (images, videos, audio, documents).
 # Files in the media cache directory are pruned when their last access time exceeds expire_media hours (default: 72 hours / 3 days).
 # Set to 0 to disable automatic expiration.
 #
 # expire_media: 72
 
-# 14. Clear Media Cache On Exit
+# 15. Clear Media Cache On Exit
 # Option to clear the entire media cache folder as soon as the TUI session is closed.
 # When set to true, all cached media files are removed when quitting the TUI. It can always be fetched as long as it is in history.
 #

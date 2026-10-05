@@ -321,7 +321,7 @@ func main() {
 		}
 
 		adapter.OnMessage(func(msg domain.Message) {
-			if appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) || adapter.IsChatArchived(msg.ChatID) {
+			if appCfg.IsHidden(msg.ChatID, msg.ChatName, msg.SenderName) || adapter.IsChatArchived(msg.ChatID) {
 				return
 			}
 			fmt.Println("\n================ [ NEW MESSAGE RECEIVED ] ================")
@@ -581,7 +581,7 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 	}
 
 	adapter.OnMessage(func(msg domain.Message) {
-		if appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+		if appCfg.IsHidden(msg.ChatID, msg.ChatName, msg.SenderName) || appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
 			return
 		}
 		if adapter.IsChatArchived(msg.ChatID) && !msg.MentionsMe() {

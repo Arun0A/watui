@@ -80,7 +80,8 @@ func TestDispatchRules(t *testing.T) {
 			Banner:  true,
 			Sound:   true,
 		},
-		Muted: []string{"Spam Group", "annoying@s.whatsapp.net"},
+		Hidden: []string{"Hidden Channel", "hidden@newsletter"},
+		Muted:  []string{"Spam Group", "annoying@s.whatsapp.net"},
 	}
 
 	// When disabled, Dispatch returns immediately
@@ -99,6 +100,14 @@ func TestDispatchRules(t *testing.T) {
 		SenderName: "Me",
 		IsFromMe:   true,
 		Body:       "My own message",
+	})
+
+	// Hidden chat should be ignored
+	Dispatch(cfg, domain.Message{
+		ChatID:     "hidden@newsletter",
+		ChatName:   "Hidden Channel",
+		SenderName: "Admin",
+		Body:       "Newsletter update",
 	})
 
 	// Muted chat should be ignored

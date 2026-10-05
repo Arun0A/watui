@@ -225,6 +225,9 @@ func TestExampleConfigIsUnconfigured(t *testing.T) {
 	if len(cfg.GetPinned()) != 0 {
 		t.Errorf("watui.example.yaml must have 0 pinned items by default, got %v", cfg.GetPinned())
 	}
+	if len(cfg.GetHidden()) != 0 {
+		t.Errorf("watui.example.yaml must have 0 hidden items by default, got %v", cfg.GetHidden())
+	}
 	if len(cfg.GetMuted()) != 0 {
 		t.Errorf("watui.example.yaml must have 0 muted items by default, got %v", cfg.GetMuted())
 	}
@@ -740,5 +743,61 @@ func TestClearOnExitConfig(t *testing.T) {
 	mergeConfig(base, overlay)
 	if !base.IsClearOnExitEnabled() {
 		t.Errorf("Expected mergeConfig to apply ClearOnExit")
+	}
+}
+
+func TestConfigHideAndMuteSeparation(t *testing.T) {
+	yamlContent := `
+hide:
+  - "*@newsletter"
+  - "status@broadcast"
+  - "Spam Group"
+mute:
+  - "Noisy Group"
+  - "+1-800-555-0199"
+`
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "watui.yaml")
+	if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write temp config: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	if len(cfg.GetHidden()) != 3 {
+		t.Errorf("Expected 3 hidden items, got %d: %v", len(cfg.GetHidden()), cfg.GetHidden())
+	}
+	if len(cfg.GetMuted()) != 2 {
+		t.Errorf("Expected 2 muted items, got %d: %v", len(cfg.GetMuted()), cfg.GetMuted())
+	}
+
+	// Verify hidden chats
+	if !cfg.IsHidden("120363123456@newsletter", "Channel 1") {
+		t.Errorf("Expected newsletter to be hidden")
+	}
+	if cfg.IsMuted("120363123456@newsletter", "Channel 1") {
+		t.Errorf("Newsletter should be hidden, not muted")
+	}
+
+	// Verify muted chats
+	if !cfg.IsMuted("noisy@g.us", "Noisy Group") {
+		t.Errorf("Expected Noisy Group to be muted")
+	}
+	if cfg.IsHidden("noisy@g.us", "Noisy Group") {
+		t.Errorf("Noisy Group should be muted, not hidden")
+	}
+	if !cfg.IsMuted("18005550199@s.whatsapp.net", "Customer Support") {
+		t.Errorf("Expected phone number to be muted")
+	}
+	if cfg.IsHidden("18005550199@s.whatsapp.net", "Customer Support") {
+		t.Errorf("Phone number should be muted, not hidden")
+	}
+
+	// Verify unaffected chat
+	if cfg.IsHidden("normal@s.whatsapp.net", "Alice") || cfg.IsMuted("normal@s.whatsapp.net", "Alice") {
+		t.Errorf("Alice should be neither hidden nor muted")
 	}
 }

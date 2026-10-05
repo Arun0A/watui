@@ -603,10 +603,10 @@ func TestContactCacheUpdatesUnreadChatNames(t *testing.T) {
 	}
 }
 
-func TestMutedChatsIgnored(t *testing.T) {
+func TestHiddenChatsIgnored(t *testing.T) {
 	adapter := &mockAdapter{}
 	cfg := &config.Config{
-		Mute: []string{
+		Hide: []string{
 			"Spam Group",
 			"9998887777",
 			"120363000000000000@g.us",
@@ -614,7 +614,7 @@ func TestMutedChatsIgnored(t *testing.T) {
 	}
 	model := NewModel(context.Background(), adapter, cfg)
 
-	// 1. Message to muted group by name
+	// 1. Message to hidden group by name
 	model.handleIncomingMessage(domain.Message{
 		ID:         "M1",
 		ChatID:     "120363111111111111@g.us",
@@ -626,10 +626,10 @@ func TestMutedChatsIgnored(t *testing.T) {
 	})
 
 	if len(model.chatOrder) != 0 {
-		t.Errorf("Expected 0 unread chats for muted group by name, got %d", len(model.chatOrder))
+		t.Errorf("Expected 0 unread chats for hidden group by name, got %d", len(model.chatOrder))
 	}
 
-	// 2. Message to muted contact by phone
+	// 2. Message to hidden contact by phone
 	model.handleIncomingMessage(domain.Message{
 		ID:         "M2",
 		ChatID:     "9998887777@s.whatsapp.net",
@@ -641,10 +641,10 @@ func TestMutedChatsIgnored(t *testing.T) {
 	})
 
 	if len(model.chatOrder) != 0 {
-		t.Errorf("Expected 0 unread chats for muted phone, got %d", len(model.chatOrder))
+		t.Errorf("Expected 0 unread chats for hidden phone, got %d", len(model.chatOrder))
 	}
 
-	// 3. Message to muted JID
+	// 3. Message to hidden JID
 	model.handleIncomingMessage(domain.Message{
 		ID:         "M3",
 		ChatID:     "120363000000000000@g.us",
@@ -656,10 +656,10 @@ func TestMutedChatsIgnored(t *testing.T) {
 	})
 
 	if len(model.chatOrder) != 0 {
-		t.Errorf("Expected 0 unread chats for muted JID, got %d", len(model.chatOrder))
+		t.Errorf("Expected 0 unread chats for hidden JID, got %d", len(model.chatOrder))
 	}
 
-	// 4. Message to legitimate unmuted contact
+	// 4. Message to legitimate unhidden contact
 	model.handleIncomingMessage(domain.Message{
 		ID:         "M4",
 		ChatID:     "1112223333@s.whatsapp.net",
@@ -672,6 +672,73 @@ func TestMutedChatsIgnored(t *testing.T) {
 
 	if len(model.chatOrder) != 1 {
 		t.Fatalf("Expected 1 unread chat for regular message, got %d", len(model.chatOrder))
+	}
+}
+
+func TestMutedChatsDisplayAndCount(t *testing.T) {
+	adapter := &mockAdapter{}
+	cfg := &config.Config{
+		Mute: []string{
+			"High Volume Group",
+			"+1 555-0123",
+		},
+	}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.width = 100
+	model.height = 30
+
+	// 1. Message to muted group
+	model.handleIncomingMessage(domain.Message{
+		ID:         "M1",
+		ChatID:     "120363555555555555@g.us",
+		ChatName:   "High Volume Group",
+		Sender:     "123@s.whatsapp.net",
+		SenderName: "Member",
+		Timestamp:  time.Now(),
+		Body:       "Lots of chatter here",
+	})
+
+	// Muted chat MUST appear in unread inbox
+	if len(model.chatOrder) != 1 {
+		t.Fatalf("Expected 1 unread chat for muted group, got %d", len(model.chatOrder))
+	}
+
+	chat := model.unreadChats["120363555555555555@g.us"]
+	if chat == nil {
+		t.Fatalf("Expected unread chat to exist in model")
+	}
+	if !chat.IsMuted {
+		t.Errorf("Expected chat.IsMuted to be true")
+	}
+	if chat.UnreadCount != 1 {
+		t.Errorf("Expected unread count 1, got %d", chat.UnreadCount)
+	}
+
+	// Rendered view must show [Muted] badge
+	view := model.renderUnreadListView()
+	joinedView := strings.Join(view, "\n")
+	if !strings.Contains(joinedView, "[Muted] [Group] High Volume Group") {
+		t.Errorf("Expected view to show '[Muted] [Group] High Volume Group', got:\n%s", joinedView)
+	}
+
+	// 2. Message to muted phone contact
+	model.handleIncomingMessage(domain.Message{
+		ID:         "M2",
+		ChatID:     "15550123@s.whatsapp.net",
+		ChatName:   "Bob Support",
+		Sender:     "15550123@s.whatsapp.net",
+		SenderName: "Bob",
+		Timestamp:  time.Now(),
+		Body:       "Automated alert",
+	})
+
+	if len(model.chatOrder) != 2 {
+		t.Fatalf("Expected 2 unread chats, got %d", len(model.chatOrder))
+	}
+
+	chat2 := model.unreadChats["15550123@s.whatsapp.net"]
+	if chat2 == nil || !chat2.IsMuted {
+		t.Errorf("Expected second chat to be muted")
 	}
 }
 
@@ -766,14 +833,14 @@ func TestPinnedChatsLifecycle(t *testing.T) {
 	}
 }
 
-func TestPinnedAndMutedByJID(t *testing.T) {
+func TestPinnedAndHiddenByJID(t *testing.T) {
 	adapter := &mockAdapter{}
 	cfg := &config.Config{
 		Pin: []string{
 			"120363311130744191@g.us",
 			"919635706699@s.whatsapp.net",
 		},
-		Mute: []string{
+		Hide: []string{
 			"120363999999999999@g.us",
 			"+91 98765 43210",
 		},
@@ -837,9 +904,9 @@ func TestPinnedAndMutedByJID(t *testing.T) {
 		t.Errorf("Expected 1 message in devChat, got %d", len(devChat.Messages))
 	}
 
-	// Incoming message to muted JID
+	// Incoming message to hidden JID
 	model.handleIncomingMessage(domain.Message{
-		ID:         "MUTED_1",
+		ID:         "HIDDEN_1",
 		ChatID:     "120363999999999999@g.us",
 		ChatName:   "Spam Group",
 		Sender:     "spammer@s.whatsapp.net",
@@ -848,12 +915,12 @@ func TestPinnedAndMutedByJID(t *testing.T) {
 		Body:       "Spam notification",
 	})
 	if len(model.chatOrder) != 2 {
-		t.Errorf("Expected muted group JID to be ignored, got %d chats", len(model.chatOrder))
+		t.Errorf("Expected hidden group JID to be ignored, got %d chats", len(model.chatOrder))
 	}
 
-	// Incoming message to muted phone number formatted with country code
+	// Incoming message to hidden phone number formatted with country code
 	model.handleIncomingMessage(domain.Message{
-		ID:         "MUTED_2",
+		ID:         "HIDDEN_2",
 		ChatID:     "919876543210@s.whatsapp.net",
 		ChatName:   "Promotions",
 		Sender:     "919876543210@s.whatsapp.net",
@@ -862,7 +929,47 @@ func TestPinnedAndMutedByJID(t *testing.T) {
 		Body:       "Claim discount",
 	})
 	if len(model.chatOrder) != 2 {
-		t.Errorf("Expected muted phone to be ignored, got %d chats", len(model.chatOrder))
+		t.Errorf("Expected hidden phone to be ignored, got %d chats", len(model.chatOrder))
+	}
+}
+
+func TestPinnedAndMutedChat(t *testing.T) {
+	adapter := &mockAdapter{}
+	cfg := &config.Config{
+		Pin: []string{
+			"Work Chat",
+		},
+		Mute: []string{
+			"Work Chat",
+		},
+	}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.width = 100
+	model.height = 30
+
+	contacts := []domain.Contact{
+		{
+			JID:  "work123@s.whatsapp.net",
+			Name: "Work Chat",
+		},
+	}
+	model.Update(contactsLoadedMsg(contacts))
+
+	chat := model.unreadChats["work123@s.whatsapp.net"]
+	if chat == nil {
+		t.Fatalf("Expected pinned Work Chat to exist")
+	}
+	if !chat.IsPinned {
+		t.Errorf("Expected chat to be pinned")
+	}
+	if !chat.IsMuted {
+		t.Errorf("Expected chat to be muted")
+	}
+
+	view := model.renderUnreadListView()
+	joinedView := strings.Join(view, "\n")
+	if !strings.Contains(joinedView, "* [Muted] Work Chat") {
+		t.Errorf("Expected view to show '* [Muted] Work Chat', got:\n%s", joinedView)
 	}
 }
 

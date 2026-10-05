@@ -232,12 +232,16 @@ See [**`watui.example.yaml`**](watui.example.yaml) for a full documented templat
 pin:
   - "91XXXXXX9-15XXXXXX2@g.us" # JID or name supported
 
-# 2. Muted chats (hidden from unread inbox)
-mute:
-  - "*@newsletter"         # Mute all WhatsApp Channels
-  - "status@broadcast"     # Mute WhatsApp Status updates
+# 2. Hidden chats (completely excluded from unread inbox & contacts)
+hide:
+  - "*@newsletter"         # Hide all WhatsApp Channels
+  - "status@broadcast"     # Hide WhatsApp Status updates
 
-# 3. Media Preview Commands (defaults to OS / MIME default: xdg-open on Linux, open on macOS, default app on Windows)
+# 3. Muted chats (silences notifications only; still shows in unread inbox)
+mute:
+  - "High Volume Group"
+
+# 4. Media Preview Commands (defaults to OS / MIME default: xdg-open on Linux, open on macOS, default app on Windows)
 preview:
   image: "feh -."        # Optional override (e.g. feh, mpv --loop=inf)
   video: "mpv"           # Optional override

@@ -33,8 +33,8 @@ func Dispatch(cfg *config.Config, msg domain.Message) {
 	if msg.Type == domain.MessageTypeReaction {
 		return
 	}
-	// Muted chats never trigger notifications
-	if cfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+	// Hidden and muted chats never trigger notifications
+	if cfg.IsHidden(msg.ChatID, msg.ChatName, msg.SenderName) || cfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
 		return
 	}
 

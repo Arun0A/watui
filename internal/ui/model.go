@@ -45,6 +45,7 @@ type UnreadChat struct {
 	IsGroup      bool
 	IsPinned     bool
 	IsArchived   bool
+	IsMuted      bool
 	HasMention   bool
 	UnreadCount  int
 	Sender       string
@@ -629,6 +630,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Name:         name,
 				IsGroup:      strings.Contains(sent.ChatID, "@g.us"),
 				IsPinned:     m.isPinned(sent.ChatID, name),
+				IsMuted:      m.isMuted(sent.ChatID, name),
 				UnreadCount:  0,
 				Sender:       sent.Sender,
 				Messages:     []domain.Message{sent},
@@ -1265,7 +1267,7 @@ func (m *Model) getChatMatchNames(chatID string, explicitNames ...string) []stri
 	return names
 }
 
-func (m *Model) isMuted(chatID string, chatNames ...string) bool {
+func (m *Model) isHidden(chatID string, chatNames ...string) bool {
 	if m.cfg == nil {
 		return false
 	}
@@ -1273,6 +1275,14 @@ func (m *Model) isMuted(chatID string, chatNames ...string) bool {
 	if m.isPinned(chatID, allNames...) {
 		return false
 	}
+	return m.cfg.IsHidden(chatID, allNames...)
+}
+
+func (m *Model) isMuted(chatID string, chatNames ...string) bool {
+	if m.cfg == nil {
+		return false
+	}
+	allNames := m.getChatMatchNames(chatID, chatNames...)
 	return m.cfg.IsMuted(chatID, allNames...)
 }
 
@@ -1315,6 +1325,7 @@ func (m *Model) initPinnedChats() {
 			IsGroup:    isGroup,
 			IsPinned:   true,
 			IsArchived: isArchived,
+			IsMuted:    m.isMuted(chatID, name),
 		}
 		m.unreadChats[chatID] = chat
 	}
@@ -1338,6 +1349,7 @@ func (m *Model) syncPinnedChatsLocked() {
 			if config.MatchTarget(rule, id, chat.Name) {
 				matchedID = id
 				chat.IsPinned = true
+				chat.IsMuted = m.isMuted(chat.ChatID, chat.Name)
 				break
 			}
 		}
@@ -1366,6 +1378,7 @@ func (m *Model) syncPinnedChatsLocked() {
 				}
 				chat.IsGroup = matchedContact.IsGroup
 				chat.IsPinned = true
+				chat.IsMuted = m.isMuted(chat.ChatID, chat.Name)
 				m.unreadChats[matchedContact.JID] = chat
 			} else if matchedID != "" {
 				chat := m.unreadChats[matchedID]
@@ -1374,6 +1387,7 @@ func (m *Model) syncPinnedChatsLocked() {
 				}
 				chat.IsGroup = matchedContact.IsGroup
 				chat.IsPinned = true
+				chat.IsMuted = m.isMuted(chat.ChatID, chat.Name)
 			} else {
 				chatName := realName
 				if chatName == "" {
@@ -1389,6 +1403,7 @@ func (m *Model) syncPinnedChatsLocked() {
 					IsGroup:    matchedContact.IsGroup,
 					IsPinned:   true,
 					IsArchived: isArchived,
+					IsMuted:    m.isMuted(matchedContact.JID, chatName),
 				}
 			}
 		}
@@ -1478,7 +1493,8 @@ func (m *Model) updateUnreadChatNames() {
 			chat.IsArchived = m.adapter.IsChatArchived(chat.ChatID)
 		}
 
-		if !chat.IsPinned && m.isMuted(chat.ChatID, chat.Name) {
+		chat.IsMuted = m.isMuted(chat.ChatID, chat.Name)
+		if !chat.IsPinned && m.isHidden(chat.ChatID, chat.Name) {
 			delete(m.unreadChats, id)
 		}
 	}
@@ -1502,7 +1518,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 		if m.cfg.IsReactionsDisabled() && msg.Type == domain.MessageTypeReaction {
 			continue
 		}
-		if m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+		if m.isHidden(msg.ChatID, msg.ChatName, msg.SenderName) {
 			continue
 		}
 
@@ -1518,6 +1534,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 		}
 
 		isPinned := m.isPinned(msg.ChatID, msg.ChatName)
+		isMuted := m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName)
 		isArchived := false
 		if m.adapter != nil {
 			isArchived = m.adapter.IsChatArchived(msg.ChatID)
@@ -1530,6 +1547,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 				IsGroup:      isGroup,
 				IsPinned:     isPinned,
 				IsArchived:   isArchived,
+				IsMuted:      isMuted,
 				HasMention:   msg.MentionsMe(),
 				UnreadCount:  1,
 				Sender:       msg.Sender,
@@ -1564,6 +1582,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 			if isPinned {
 				chat.IsPinned = true
 			}
+			chat.IsMuted = isMuted
 			chat.IsArchived = isArchived
 			if !isRealChatName(chat.Name, chat.ChatID) {
 				name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
@@ -1600,8 +1619,8 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		isArchived = m.adapter.IsChatArchived(msg.ChatID)
 	}
 
-	// 1. Check if muted
-	if m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+	// 1. Check if hidden
+	if m.isHidden(msg.ChatID, msg.ChatName, msg.SenderName) {
 		if m.view == ViewChat && m.activeChatID == msg.ChatID {
 			m.activeMsgs = append(m.activeMsgs, msg)
 			m.chatScrollOffset = 0
@@ -1667,6 +1686,7 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 	}
 
 	isPinned := m.isPinned(msg.ChatID, msg.ChatName)
+	isMuted := m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName)
 	if !exists {
 		name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, msg.SenderName)
 		chat = &UnreadChat{
@@ -1675,6 +1695,7 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 			IsGroup:      isGroup,
 			IsPinned:     isPinned,
 			IsArchived:   isArchived,
+			IsMuted:      isMuted,
 			HasMention:   msg.MentionsMe(),
 			UnreadCount:  1,
 			Sender:       msg.Sender,
@@ -1697,6 +1718,7 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		if isPinned {
 			chat.IsPinned = true
 		}
+		chat.IsMuted = isMuted
 		chat.IsArchived = isArchived
 		if !isRealChatName(chat.Name, chat.ChatID) {
 			name, isGroup := m.resolveChatName(msg.ChatID, msg.ChatName, chat.Name)
@@ -3024,7 +3046,7 @@ func (m *Model) filterContacts(query string) {
 			if c.Name == "You" {
 				continue
 			}
-			if !m.isMuted(c.JID, c.Name, c.PushName) {
+			if !m.isHidden(c.JID, c.Name, c.PushName) {
 				list = append(list, c)
 			}
 		}
@@ -3057,7 +3079,7 @@ func (m *Model) filterContacts(query string) {
 		if c.Name == "You" {
 			continue
 		}
-		if m.isMuted(c.JID, c.Name, c.PushName) {
+		if m.isHidden(c.JID, c.Name, c.PushName) {
 			continue
 		}
 
@@ -3382,6 +3404,9 @@ func (m *Model) renderUnreadListView() []string {
 			}
 			if chat.IsArchived && !m.showArchived {
 				name = "[Archived] " + name
+			}
+			if chat.IsMuted || m.isMuted(chat.ChatID, chat.Name) {
+				name = "[Muted] " + name
 			}
 			if chat.IsPinned {
 				name = "* " + name
