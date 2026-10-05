@@ -291,7 +291,7 @@ notifications:
 ## Building from Source
 
 ### Prerequisites
-- **Go 1.26+** (or Go 1.24+)
+- **Go 1.26+** (`go.mod` requires `go 1.26.0`)
 - **GCC / Clang** (CGO is required by the SQLCipher SQLite engine)
 
 ```bash
