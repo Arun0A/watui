@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -1182,3 +1183,191 @@ func DigitsOnly(s string) string {
 func digitsOnly(s string) string {
 	return DigitsOnly(s)
 }
+
+// AddMuteChat adds a chat JID to the in-memory Mute list and updates the config file on disk.
+func (c *Config) AddMuteChat(chatID string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("cannot mute empty chat ID")
+	}
+
+	// Update in-memory list if not already present
+	alreadyPresent := false
+	for _, m := range c.Mute {
+		if m == chatID {
+			alreadyPresent = true
+			break
+		}
+	}
+	if !alreadyPresent {
+		c.Mute = append(c.Mute, chatID)
+	}
+
+	targetPath := c.SourcePath
+	if targetPath == "" {
+		for _, p := range defaultCandidatePaths() {
+			if _, err := os.Stat(p); err == nil {
+				targetPath = p
+				break
+			}
+		}
+		if targetPath == "" {
+			targetPath = "watui.yaml"
+		}
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			content := fmt.Sprintf("mute:\n  - %q\n", chatID)
+			return os.WriteFile(targetPath, []byte(content), 0644)
+		}
+		return fmt.Errorf("failed to read config file %q: %w", targetPath, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	newLines := make([]string, 0, len(lines)+2)
+
+	muteLineRegex := regexp.MustCompile(`^mute:\s*(#.*)?$`)
+	commentedMuteRegex := regexp.MustCompile(`^#\s*mute:\s*$`)
+
+	foundActiveMute := false
+	inserted := false
+
+	// First check if an active "mute:" already exists
+	for i, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if muteLineRegex.MatchString(trimmed) {
+			foundActiveMute = true
+			newLines = append(newLines, line)
+			foundInFile := false
+			for j := i + 1; j < len(lines); j++ {
+				t := strings.TrimSpace(strings.TrimRight(lines[j], "\r"))
+				if strings.HasPrefix(t, "-") {
+					val := strings.TrimSpace(strings.TrimPrefix(t, "-"))
+					val = strings.Trim(val, `"'`)
+					if val == chatID {
+						foundInFile = true
+						break
+					}
+				} else if t != "" && !strings.HasPrefix(t, "#") {
+					break
+				}
+			}
+			if !foundInFile {
+				newLines = append(newLines, fmt.Sprintf("  - %q", chatID))
+			}
+			inserted = true
+			continue
+		}
+		newLines = append(newLines, line)
+	}
+
+	if !foundActiveMute {
+		newLines = make([]string, 0, len(lines)+2)
+		for _, line := range lines {
+			trimmed := strings.TrimRight(line, "\r")
+			if !inserted && commentedMuteRegex.MatchString(trimmed) {
+				newLines = append(newLines, "mute:")
+				newLines = append(newLines, fmt.Sprintf("  - %q", chatID))
+				inserted = true
+				continue
+			}
+			newLines = append(newLines, line)
+		}
+	}
+
+	if !inserted {
+		newLines = append(newLines, "", "mute:", fmt.Sprintf("  - %q", chatID))
+	}
+
+	out := strings.Join(newLines, "\n")
+	return os.WriteFile(targetPath, []byte(out), 0644)
+}
+
+// RemoveMuteChat removes a chat JID (and matching names) from the in-memory Mute list and updates the config file on disk.
+func (c *Config) RemoveMuteChat(chatID string, chatNames ...string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("cannot unmute empty chat ID")
+	}
+
+	// Update in-memory lists
+	var newMute []string
+	for _, m := range c.Mute {
+		trimmed := strings.TrimSpace(m)
+		if trimmed == chatID || MatchTarget(trimmed, chatID, chatNames...) {
+			continue
+		}
+		newMute = append(newMute, m)
+	}
+	c.Mute = newMute
+
+	var newMuted []string
+	for _, m := range c.Muted {
+		trimmed := strings.TrimSpace(m)
+		if trimmed == chatID || MatchTarget(trimmed, chatID, chatNames...) {
+			continue
+		}
+		newMuted = append(newMuted, m)
+	}
+	c.Muted = newMuted
+
+	targetPath := c.SourcePath
+	if targetPath == "" {
+		for _, p := range defaultCandidatePaths() {
+			if _, err := os.Stat(p); err == nil {
+				targetPath = p
+				break
+			}
+		}
+		if targetPath == "" {
+			targetPath = "watui.yaml"
+		}
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read config file %q: %w", targetPath, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	newLines := make([]string, 0, len(lines))
+
+	muteSectionRegex := regexp.MustCompile(`^(mute|muted):\s*(#.*)?$`)
+	inMuteSection := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		trimmedSpace := strings.TrimSpace(trimmed)
+
+		if muteSectionRegex.MatchString(trimmed) {
+			inMuteSection = true
+			newLines = append(newLines, line)
+			continue
+		}
+
+		if inMuteSection {
+			if strings.HasPrefix(trimmedSpace, "-") {
+				val := strings.TrimSpace(strings.TrimPrefix(trimmedSpace, "-"))
+				val = strings.Trim(val, `"'`)
+				if val == chatID || MatchTarget(val, chatID, chatNames...) {
+					// Drop this line
+					continue
+				}
+			} else if trimmedSpace != "" && !strings.HasPrefix(trimmedSpace, "#") {
+				inMuteSection = false
+			}
+		}
+
+		newLines = append(newLines, line)
+	}
+
+	out := strings.Join(newLines, "\n")
+	return os.WriteFile(targetPath, []byte(out), 0644)
+}
+
+

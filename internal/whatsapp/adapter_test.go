@@ -898,3 +898,62 @@ func TestDecryptSecretEditMessageFallback(t *testing.T) {
 	}
 }
 
+func TestAdapterMuteLifecycle(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open err: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE whatsmeow_chat_settings (
+			our_jid TEXT,
+			chat_jid TEXT,
+			muted_until INTEGER,
+			pinned BOOLEAN,
+			archived BOOLEAN,
+			PRIMARY KEY (our_jid, chat_jid)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create table err: %v", err)
+	}
+
+	futureMute := time.Now().Add(1 * time.Hour).Unix()
+	_, err = db.Exec(`
+		INSERT INTO whatsmeow_chat_settings (our_jid, chat_jid, muted_until) VALUES
+		('our@s.whatsapp.net', '120363001@g.us', -1),
+		('our@s.whatsapp.net', '120363002@g.us', ?),
+		('our@s.whatsapp.net', '120363003@g.us', 1000);
+	`, futureMute)
+	if err != nil {
+		t.Fatalf("insert err: %v", err)
+	}
+
+	adapter := &Adapter{
+		localDB: db,
+	}
+
+	if adapter.IsChatMuted("120363001@g.us") {
+		t.Errorf("Before loadMutedChats, chat should not be loaded")
+	}
+
+	adapter.loadMutedChats()
+
+	if !adapter.IsChatMuted("120363001@g.us") {
+		t.Errorf("Expected 120363001@g.us to be muted forever")
+	}
+	if !adapter.IsChatMuted("120363002@g.us") {
+		t.Errorf("Expected 120363002@g.us to be muted for 1 hour")
+	}
+	if adapter.IsChatMuted("120363003@g.us") {
+		t.Errorf("Expected 120363003@g.us to be expired mute (timestamp 1000)")
+	}
+
+	mutedMap := adapter.GetMutedChats()
+	if !mutedMap["120363001@g.us"] || !mutedMap["120363002@g.us"] {
+		t.Errorf("Expected mutedMap to contain active mutes, got: %v", mutedMap)
+	}
+}
+
+

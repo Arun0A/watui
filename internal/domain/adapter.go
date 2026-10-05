@@ -83,6 +83,16 @@ type WhatsAppAdapter interface {
 	// SetChatArchived archives or unarchives the specified chat JID in WhatsApp.
 	SetChatArchived(ctx context.Context, chatID string, archived bool) error
 
+	// IsChatMuted checks whether the specified chat JID is muted globally in WhatsApp.
+	IsChatMuted(chatID string) bool
+
+	// GetMutedChats returns a map of all currently globally muted chat JIDs.
+	GetMutedChats() map[string]bool
+
+	// SetChatMuted mutes or unmutes the specified chat JID globally in WhatsApp with the given duration.
+	// A duration of 0 when muted=true indicates permanent (always) mute.
+	SetChatMuted(ctx context.Context, chatID string, muted bool, duration time.Duration) error
+
 	// DeleteMessage deletes a message locally ("delete for me") or revokes it on WhatsApp servers for everyone ("delete for all").
 	DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error
 

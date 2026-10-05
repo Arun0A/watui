@@ -21,6 +21,8 @@ type mockAdapter struct {
 	msgHandler            domain.MessageHandler
 	statusHandler         domain.StatusHandler
 	archivedChats         map[string]bool
+	mutedChats            map[string]bool
+	lastMuteDuration      time.Duration
 	lastSentText          string
 	lastQuotedID          string
 	lastDeletedID         string
@@ -88,6 +90,31 @@ func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archiv
 		m.archivedChats[chatID] = true
 	} else {
 		delete(m.archivedChats, chatID)
+	}
+	return nil
+}
+func (m *mockAdapter) IsChatMuted(chatID string) bool {
+	if m.mutedChats != nil {
+		return m.mutedChats[chatID]
+	}
+	return false
+}
+func (m *mockAdapter) GetMutedChats() map[string]bool {
+	res := make(map[string]bool)
+	for k, v := range m.mutedChats {
+		res[k] = v
+	}
+	return res
+}
+func (m *mockAdapter) SetChatMuted(ctx context.Context, chatID string, muted bool, duration time.Duration) error {
+	if m.mutedChats == nil {
+		m.mutedChats = make(map[string]bool)
+	}
+	m.lastMuteDuration = duration
+	if muted {
+		m.mutedChats[chatID] = true
+	} else {
+		delete(m.mutedChats, chatID)
 	}
 	return nil
 }
@@ -4480,5 +4507,164 @@ func TestIncomingMessageEditReflectsAsReplyWithEditTag(t *testing.T) {
 	joinedUnread := strings.Join(unreadView, "\n")
 	if !strings.Contains(joinedUnread, "[EDIT]") {
 		t.Errorf("Expected unread inbox view to display '[EDIT]', got:\n%s", joinedUnread)
+	}
+}
+
+func TestUnreadListMuteKeybindings(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "watui.yaml")
+	initialContent := `# Initial config
+theme: dark
+# mute:
+#   - 12345@s.whatsapp.net
+`
+	if err := os.WriteFile(yamlPath, []byte(initialContent), 0644); err != nil {
+		t.Fatalf("Failed to write initial yaml: %v", err)
+	}
+
+	cfg, err := config.Load(yamlPath)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	mock := &mockAdapter{
+		mutedChats: make(map[string]bool),
+	}
+	model := NewModel(context.Background(), mock, cfg)
+	model.view = ViewUnreadList
+	model.width = 100
+	model.height = 30
+
+	testChatID := "alice@s.whatsapp.net"
+	model.handleIncomingMessage(domain.Message{
+		ID:         "M1",
+		ChatID:     testChatID,
+		ChatName:   "Alice",
+		Sender:     testChatID,
+		SenderName: "Alice",
+		Body:       "Hey there",
+		Timestamp:  time.Now(),
+	})
+
+	if len(model.chatOrder) == 0 {
+		t.Fatalf("Expected chatOrder to have 1 chat")
+	}
+
+	// 1. Test 'm' keybind: toggle mute locally in watui.yaml
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+
+	chat := model.unreadChats[testChatID]
+	if chat == nil || !chat.IsMuted {
+		t.Errorf("Expected chat.IsMuted to be true after pressing 'm'")
+	}
+	if !strings.Contains(model.previewStatus, "Muted Alice in watui.yaml") {
+		t.Errorf("Expected status message to mention 'Muted Alice in watui.yaml', got %q", model.previewStatus)
+	}
+
+	// Check file on disk has chatID
+	diskContent, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("Failed to read updated yaml: %v", err)
+	}
+	if !strings.Contains(string(diskContent), testChatID) {
+		t.Errorf("Expected yaml on disk to contain %s, got:\n%s", testChatID, string(diskContent))
+	}
+
+	// Press 'm' again -> should toggle off (unmute locally)
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if chat.IsMuted {
+		t.Errorf("Expected chat.IsMuted to be false after pressing 'm' again to unmute")
+	}
+	if !strings.Contains(model.previewStatus, "Unmuted Alice in watui.yaml") {
+		t.Errorf("Expected status message to mention 'Unmuted Alice in watui.yaml', got %q", model.previewStatus)
+	}
+
+	// Verify file on disk no longer contains chatID
+	diskContent, err = os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("Failed to read updated yaml after unmute: %v", err)
+	}
+	if strings.Contains(string(diskContent), testChatID) {
+		t.Errorf("Expected yaml on disk to no longer contain %s, got:\n%s", testChatID, string(diskContent))
+	}
+
+	// 2. Test 'Shift+M' (or 'M') keybind: global WhatsApp mute prompt
+	mock.mutedChats = make(map[string]bool) // start with unmuted globally
+
+	// Press Shift+M -> triggers prompt
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	if !model.promptGlobalMute {
+		t.Fatalf("Expected promptGlobalMute to be true after pressing Shift+M")
+	}
+
+	// Verify rendering shows prompt
+	rendered := model.renderUnreadListView()
+	joinedRender := strings.Join(rendered, "\n")
+	if !strings.Contains(joinedRender, "1: 1 hour, 2: 8 hours, 3: Always") {
+		t.Errorf("Expected prompt options in view, got:\n%s", joinedRender)
+	}
+
+	// Test Esc cancels prompt
+	model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.promptGlobalMute {
+		t.Errorf("Expected Esc to cancel promptGlobalMute")
+	}
+
+	// Press Shift+M again, then choose '1' (1 hour)
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	time.Sleep(10 * time.Millisecond)
+	if model.promptGlobalMute {
+		t.Errorf("Expected promptGlobalMute to be false after choosing 1")
+	}
+	if !mock.mutedChats[testChatID] {
+		t.Errorf("Expected mock.mutedChats to contain %s", testChatID)
+	}
+	if mock.lastMuteDuration != 1*time.Hour {
+		t.Errorf("Expected lastMuteDuration to be 1h, got %v", mock.lastMuteDuration)
+	}
+	if !strings.Contains(model.previewStatus, "1 hour globally") {
+		t.Errorf("Expected previewStatus to mention '1 hour globally', got %q", model.previewStatus)
+	}
+
+	// Press Shift+M again on globally muted chat -> toggles off (unmutes immediately)
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	time.Sleep(10 * time.Millisecond)
+	if model.promptGlobalMute {
+		t.Errorf("Expected pressing Shift+M on muted chat to toggle off directly without prompt")
+	}
+	if mock.mutedChats[testChatID] {
+		t.Errorf("Expected mock.mutedChats to not contain %s after toggle off", testChatID)
+	}
+	if !strings.Contains(model.previewStatus, "Unmuted Alice globally") {
+		t.Errorf("Expected previewStatus to mention 'Unmuted Alice globally', got %q", model.previewStatus)
+	}
+
+	// Press shift+m -> choose '2' (8 hours)
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}, Alt: false})
+	// Try with string "shift+m"
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	time.Sleep(10 * time.Millisecond)
+	if mock.lastMuteDuration != 8*time.Hour {
+		t.Errorf("Expected lastMuteDuration to be 8h, got %v", mock.lastMuteDuration)
+	}
+	if !strings.Contains(model.previewStatus, "8 hours globally") {
+		t.Errorf("Expected previewStatus to mention '8 hours globally', got %q", model.previewStatus)
+	}
+
+	// Toggle off
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	time.Sleep(10 * time.Millisecond)
+
+	// Press Shift+M -> choose '3' (Always)
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	time.Sleep(10 * time.Millisecond)
+	if mock.lastMuteDuration != 0 {
+		t.Errorf("Expected lastMuteDuration to be 0 (forever), got %v", mock.lastMuteDuration)
+	}
+	if !strings.Contains(model.previewStatus, "permanently globally") {
+		t.Errorf("Expected previewStatus to mention 'permanently globally', got %q", model.previewStatus)
 	}
 }

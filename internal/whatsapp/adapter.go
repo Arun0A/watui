@@ -83,6 +83,9 @@ type Adapter struct {
 	archivedMu    sync.RWMutex
 	archivedChats map[string]bool
 
+	mutedMu    sync.RWMutex
+	mutedChats map[string]time.Time
+
 	lidMapMu       sync.RWMutex
 	lidMapCache    map[string]string
 	lidMapCachedAt time.Time
@@ -731,6 +734,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	// Preload local SQLite contacts, cached groups, and archived chats immediately
 	if adapter.IsLoggedIn() {
 		adapter.loadArchivedChats()
+		adapter.loadMutedChats()
 		initial := adapter.fetchLocalContacts(adapterCtx)
 		if len(initial) > 0 {
 			adapter.contactsMu.Lock()
@@ -1011,6 +1015,156 @@ func (a *Adapter) SetChatArchived(ctx context.Context, chatID string, archived b
 	}
 
 	patch := appstate.BuildArchive(jid, archived, time.Time{}, nil)
+	return a.client.SendAppState(ctx, patch)
+}
+
+func (a *Adapter) loadMutedChats() {
+	if a.localDB == nil {
+		return
+	}
+	rows, err := a.localDB.Query("SELECT chat_jid, muted_until FROM whatsmeow_chat_settings WHERE muted_until < 0 OR muted_until > ?", time.Now().Unix())
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	lidMap := a.getLIDMap()
+	muted := make(map[string]time.Time)
+	for rows.Next() {
+		var jid string
+		var mutedUntil int64
+		if err := rows.Scan(&jid, &mutedUntil); err == nil && jid != "" {
+			var until time.Time
+			if mutedUntil < 0 {
+				until = store.MutedForever
+			} else if mutedUntil > 0 {
+				until = time.Unix(mutedUntil, 0)
+			}
+			muted[jid] = until
+			clean := jid
+			if idx := strings.Index(clean, ":"); idx != -1 {
+				if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+					clean = clean[:idx] + clean[atIdx:]
+				}
+			}
+			muted[clean] = until
+			if strings.HasSuffix(clean, "@lid") {
+				lidUser := strings.TrimSuffix(clean, "@lid")
+				if pn, ok := lidMap[lidUser]; ok && pn != "" {
+					muted[pn+"@s.whatsapp.net"] = until
+				}
+			}
+		}
+	}
+	a.mutedMu.Lock()
+	a.mutedChats = muted
+	a.mutedMu.Unlock()
+}
+
+// IsChatMuted checks whether the specified chat JID is muted globally in WhatsApp.
+func (a *Adapter) IsChatMuted(chatID string) bool {
+	if chatID == "" {
+		return false
+	}
+	a.mutedMu.RLock()
+	defer a.mutedMu.RUnlock()
+	if a.mutedChats == nil {
+		return false
+	}
+	until, exists := a.mutedChats[chatID]
+	if !exists {
+		clean := chatID
+		if idx := strings.Index(clean, ":"); idx != -1 {
+			if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+				clean = clean[:idx] + clean[atIdx:]
+			}
+		}
+		until, exists = a.mutedChats[clean]
+		if !exists && strings.HasSuffix(clean, "@lid") {
+			lidUser := strings.TrimSuffix(clean, "@lid")
+			lidMap := a.getLIDMap()
+			if pn, ok := lidMap[lidUser]; ok && pn != "" {
+				until, exists = a.mutedChats[pn+"@s.whatsapp.net"]
+			}
+		} else if !exists && strings.HasSuffix(clean, "@s.whatsapp.net") {
+			pn := strings.TrimSuffix(clean, "@s.whatsapp.net")
+			if lid := a.ResolvePhoneToLID(pn); lid != "" {
+				until, exists = a.mutedChats[lid+"@lid"]
+			}
+		}
+	}
+	if !exists {
+		if jid, err := NormalizeJID(chatID); err == nil && a.client != nil && a.client.Store.ChatSettings != nil {
+			if settings, err := a.client.Store.ChatSettings.GetChatSettings(context.Background(), jid); err == nil && settings.Found {
+				until = settings.MutedUntil
+				exists = true
+			}
+		}
+	}
+	if !exists {
+		return false
+	}
+	return until.After(time.Now())
+}
+
+// GetMutedChats returns a copy of all currently globally muted chat JIDs.
+func (a *Adapter) GetMutedChats() map[string]bool {
+	a.mutedMu.RLock()
+	defer a.mutedMu.RUnlock()
+	res := make(map[string]bool, len(a.mutedChats))
+	now := time.Now()
+	for k, until := range a.mutedChats {
+		if until.After(now) {
+			res[k] = true
+		}
+	}
+	return res
+}
+
+// SetChatMuted mutes or unmutes the specified chat JID globally in WhatsApp.
+func (a *Adapter) SetChatMuted(ctx context.Context, chatID string, muted bool, duration time.Duration) error {
+	jid, err := NormalizeJID(chatID)
+	if err != nil {
+		return err
+	}
+	clean := jid.String()
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+
+	var until time.Time
+	if muted {
+		if duration <= 0 {
+			until = store.MutedForever
+		} else {
+			until = time.Now().Add(duration)
+		}
+	}
+
+	a.mutedMu.Lock()
+	if a.mutedChats == nil {
+		a.mutedChats = make(map[string]time.Time)
+	}
+	if muted {
+		a.mutedChats[chatID] = until
+		a.mutedChats[clean] = until
+	} else {
+		delete(a.mutedChats, chatID)
+		delete(a.mutedChats, clean)
+	}
+	a.mutedMu.Unlock()
+
+	if a.client != nil && a.client.Store.ChatSettings != nil {
+		_ = a.client.Store.ChatSettings.PutMutedUntil(ctx, jid, until)
+	}
+
+	if a.client == nil {
+		return errors.New("whatsapp client not initialized")
+	}
+
+	patch := appstate.BuildMute(jid, muted, duration)
 	return a.client.SendAppState(ctx, patch)
 }
 
@@ -2598,6 +2752,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularLow, false, false)
 			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularHigh, false, false)
 			a.loadArchivedChats()
+			a.loadMutedChats()
 		}()
 
 	case *events.Disconnected:
@@ -2605,6 +2760,33 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 
 	case *events.AppState:
 		go a.loadArchivedChats()
+		go a.loadMutedChats()
+
+	case *events.Mute:
+		if evt.Action != nil {
+			isMuted := evt.Action.GetMuted()
+			var until time.Time
+			if isMuted {
+				if evt.Action.GetMuteEndTimestamp() < 0 {
+					until = store.MutedForever
+				} else if evt.Action.GetMuteEndTimestamp() > 0 {
+					until = time.UnixMilli(evt.Action.GetMuteEndTimestamp())
+				}
+			}
+			chatID := evt.JID.ToNonAD().String()
+			a.mutedMu.Lock()
+			if a.mutedChats == nil {
+				a.mutedChats = make(map[string]time.Time)
+			}
+			if isMuted {
+				a.mutedChats[chatID] = until
+				a.mutedChats[evt.JID.String()] = until
+			} else {
+				delete(a.mutedChats, chatID)
+				delete(a.mutedChats, evt.JID.String())
+			}
+			a.mutedMu.Unlock()
+		}
 
 	case *events.LoggedOut:
 		a.setStatus(domain.StatusLoggedOut)

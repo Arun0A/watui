@@ -801,3 +801,79 @@ mute:
 		t.Errorf("Alice should be neither hidden nor muted")
 	}
 }
+
+func TestAddMuteChat(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Test uncommenting commented "# mute:"
+	commentedYAML := filepath.Join(tmpDir, "commented.yaml")
+	err := os.WriteFile(commentedYAML, []byte("# 2. Muted chats / groups\n# mute:\n#   - abc\nhide:\n  - xyz\n"), 0644)
+	if err != nil {
+		t.Fatalf("write err: %v", err)
+	}
+
+	cfg1, err := Load(commentedYAML)
+	if err != nil {
+		t.Fatalf("load err: %v", err)
+	}
+
+	err = cfg1.AddMuteChat("120363430194759319@g.us")
+	if err != nil {
+		t.Fatalf("AddMuteChat err: %v", err)
+	}
+
+	if !cfg1.IsMuted("120363430194759319@g.us", "My Group") {
+		t.Errorf("Expected chat to be muted in memory")
+	}
+
+	// Reload from file to verify persistence
+	reloaded1, err := Load(commentedYAML)
+	if err != nil {
+		t.Fatalf("reload err: %v", err)
+	}
+	if !reloaded1.IsMuted("120363430194759319@g.us", "My Group") {
+		t.Errorf("Expected chat to be persisted to file")
+	}
+
+	// 2. Test adding another chat to existing active "mute:"
+	err = reloaded1.AddMuteChat("919876543210@s.whatsapp.net")
+	if err != nil {
+		t.Fatalf("Add second mute err: %v", err)
+	}
+
+	reloaded2, err := Load(commentedYAML)
+	if err != nil {
+		t.Fatalf("reload2 err: %v", err)
+	}
+	if !reloaded2.IsMuted("120363430194759319@g.us", "My Group") {
+		t.Errorf("Expected first chat to remain muted")
+	}
+	if !reloaded2.IsMuted("919876543210@s.whatsapp.net", "Bob") {
+		t.Errorf("Expected second chat to be muted")
+	}
+
+	// 3. Test removing mute chat (toggle off)
+	err = reloaded2.RemoveMuteChat("120363430194759319@g.us", "My Group")
+	if err != nil {
+		t.Fatalf("RemoveMuteChat err: %v", err)
+	}
+
+	if reloaded2.IsMuted("120363430194759319@g.us", "My Group") {
+		t.Errorf("Expected first chat to be unmuted in memory")
+	}
+	if !reloaded2.IsMuted("919876543210@s.whatsapp.net", "Bob") {
+		t.Errorf("Expected second chat to remain muted in memory")
+	}
+
+	reloaded3, err := Load(commentedYAML)
+	if err != nil {
+		t.Fatalf("reload3 err: %v", err)
+	}
+	if reloaded3.IsMuted("120363430194759319@g.us", "My Group") {
+		t.Errorf("Expected first chat to be unmuted on disk")
+	}
+	if !reloaded3.IsMuted("919876543210@s.whatsapp.net", "Bob") {
+		t.Errorf("Expected second chat to remain muted on disk")
+	}
+}
+

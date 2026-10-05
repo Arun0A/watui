@@ -38,6 +38,9 @@ type RemoteAdapter struct {
 	archivedMu    sync.RWMutex
 	archivedChats map[string]bool
 
+	mutedMu    sync.RWMutex
+	mutedChats map[string]bool
+
 	cachedUnread   []domain.Message
 	cachedContacts []domain.Contact
 	cachedMu       sync.RWMutex
@@ -61,6 +64,7 @@ func ConnectRemote(dbPath string) (*RemoteAdapter, error) {
 		dec:           json.NewDecoder(conn),
 		pending:       make(map[uint64]chan RPCResponse),
 		archivedChats: make(map[string]bool),
+		mutedChats:    make(map[string]bool),
 		currentStatus: domain.StatusConnected,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -82,6 +86,9 @@ func ConnectRemote(dbPath string) (*RemoteAdapter, error) {
 			r.cachedUnread = snap.UnreadMessages
 			r.cachedContacts = snap.Contacts
 			r.archivedChats = snap.ArchivedChats
+			if snap.MutedChats != nil {
+				r.mutedChats = snap.MutedChats
+			}
 		}
 	}
 
@@ -195,6 +202,28 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 					delete(r.archivedChats, p.ChatID)
 				}
 				r.archivedMu.Unlock()
+			}
+		}
+
+	case "muted":
+		var m map[string]bool
+		if err := json.Unmarshal(resp.Result, &m); err == nil && len(m) > 0 {
+			r.mutedMu.Lock()
+			r.mutedChats = m
+			r.mutedMu.Unlock()
+		} else {
+			var p SetChatMutedParams
+			if err := json.Unmarshal(resp.Result, &p); err == nil && p.ChatID != "" {
+				r.mutedMu.Lock()
+				if r.mutedChats == nil {
+					r.mutedChats = make(map[string]bool)
+				}
+				if p.Muted {
+					r.mutedChats[p.ChatID] = true
+				} else {
+					delete(r.mutedChats, p.ChatID)
+				}
+				r.mutedMu.Unlock()
 			}
 		}
 	}
@@ -503,4 +532,44 @@ func (r *RemoteAdapter) GetGroupParticipants(ctx context.Context, groupJID strin
 	var participants []domain.Contact
 	err := r.call(ctx, "get_group_participants", groupJID, &participants)
 	return participants, err
+}
+
+func (r *RemoteAdapter) IsChatMuted(chatID string) bool {
+	r.mutedMu.RLock()
+	defer r.mutedMu.RUnlock()
+	clean := chatID
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		if atIdx := strings.Index(clean, "@"); atIdx != -1 && atIdx > idx {
+			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+	if r.mutedChats != nil {
+		return r.mutedChats[chatID] || r.mutedChats[clean]
+	}
+	return false
+}
+
+func (r *RemoteAdapter) GetMutedChats() map[string]bool {
+	r.mutedMu.RLock()
+	defer r.mutedMu.RUnlock()
+	res := make(map[string]bool, len(r.mutedChats))
+	for k, v := range r.mutedChats {
+		res[k] = v
+	}
+	return res
+}
+
+func (r *RemoteAdapter) SetChatMuted(ctx context.Context, chatID string, muted bool, duration time.Duration) error {
+	r.mutedMu.Lock()
+	if r.mutedChats == nil {
+		r.mutedChats = make(map[string]bool)
+	}
+	if muted {
+		r.mutedChats[chatID] = true
+	} else {
+		delete(r.mutedChats, chatID)
+	}
+	r.mutedMu.Unlock()
+
+	return r.call(ctx, "set_chat_muted", SetChatMutedParams{ChatID: chatID, Muted: muted, Duration: duration}, nil)
 }
