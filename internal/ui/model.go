@@ -3384,13 +3384,13 @@ var (
 	badgeStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#11111B")).
-			Background(lipgloss.Color("#FAB387")).
+			Background(lipgloss.Color("#A6E3A1")).
 			Padding(0, 1)
 
 	pinBadgeStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#11111B")).
-			Background(lipgloss.Color("#F9E2AF")).
+			Background(lipgloss.Color("#89B4FA")).
 			Padding(0, 1)
 
 	mentionBadgeStyle = lipgloss.NewStyle().
