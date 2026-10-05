@@ -4028,3 +4028,249 @@ func TestEditMessage_BlockedFileAttachment(t *testing.T) {
 		t.Errorf("Expected input to be preserved for user correction, got %q", model.input.Value())
 	}
 }
+
+func TestMultiSelect_ToggleAndAdvance(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "m1", ChatID: model.activeChatID, Body: "First message", IsFromMe: true, Timestamp: time.Now()}
+	m2 := domain.Message{ID: "m2", ChatID: model.activeChatID, Body: "Second message", IsFromMe: false, Timestamp: time.Now()}
+	m3 := domain.Message{ID: "m3", ChatID: model.activeChatID, Body: "Third message", IsFromMe: true, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1, m2, m3}
+
+	// 1. Enter hover mode at index 0
+	model.selectedMsgIdx = 0
+
+	// 2. Press Space: selects m1, advances to index 1
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeySpace})
+	if !model.isMsgMultiSelected("m1") {
+		t.Errorf("Expected m1 to be selected")
+	}
+	if model.selectedMsgIdx != 1 {
+		t.Errorf("Expected selectedMsgIdx to be 1, got %d", model.selectedMsgIdx)
+	}
+
+	// 3. Press Space: selects m2, advances to index 2
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeySpace})
+	if !model.isMsgMultiSelected("m2") {
+		t.Errorf("Expected m2 to be selected")
+	}
+	if model.selectedMsgIdx != 2 {
+		t.Errorf("Expected selectedMsgIdx to be 2, got %d", model.selectedMsgIdx)
+	}
+	if len(model.multiSelectedMsgs) != 2 {
+		t.Errorf("Expected 2 messages selected, got %d", len(model.multiSelectedMsgs))
+	}
+
+	// 4. Move up to index 1 and toggle off
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if model.selectedMsgIdx != 1 {
+		t.Errorf("Expected selectedMsgIdx to be 1 after 'k', got %d", model.selectedMsgIdx)
+	}
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeySpace})
+	if model.isMsgMultiSelected("m2") {
+		t.Errorf("Expected m2 to be toggled off")
+	}
+	if !model.isMsgMultiSelected("m1") {
+		t.Errorf("Expected m1 to still be selected")
+	}
+
+	// 5. Press Esc: should clear selection while remaining in hover mode
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if len(model.multiSelectedMsgs) != 0 {
+		t.Errorf("Expected selection to be cleared on Esc, got %d", len(model.multiSelectedMsgs))
+	}
+	if model.selectedMsgIdx < 0 {
+		t.Errorf("Expected to remain in hover mode on first Esc")
+	}
+
+	// 6. Press Esc again: returns to input mode
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.selectedMsgIdx != -1 {
+		t.Errorf("Expected to exit hover mode on second Esc, got %d", model.selectedMsgIdx)
+	}
+}
+
+func TestMultiSelect_CopyTextOnly(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "m1", ChatID: model.activeChatID, Body: "Alpha text", Type: domain.MessageTypeText, Timestamp: time.Now()}
+	m2 := domain.Message{ID: "m2", ChatID: model.activeChatID, Body: "[Image]", Type: domain.MessageTypeImage, Timestamp: time.Now()}
+	m3 := domain.Message{ID: "m3", ChatID: model.activeChatID, Body: "Beta text", Type: domain.MessageTypeText, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1, m2, m3}
+
+	model.selectedMsgIdx = 0
+	model.multiSelectedMsgs = map[string]struct{}{
+		"m1": {},
+		"m2": {},
+		"m3": {},
+	}
+
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if !strings.Contains(model.previewStatus, "Copied 2 message(s)") {
+		t.Errorf("Expected previewStatus to indicate 2 messages copied, got %q", model.previewStatus)
+	}
+}
+
+func TestMultiSelect_DeleteForMe(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "m1", ChatID: model.activeChatID, Body: "Msg 1", Timestamp: time.Now()}
+	m2 := domain.Message{ID: "m2", ChatID: model.activeChatID, Body: "Msg 2", Timestamp: time.Now()}
+	m3 := domain.Message{ID: "m3", ChatID: model.activeChatID, Body: "Msg 3", Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1, m2, m3}
+
+	model.selectedMsgIdx = 0
+	model.multiSelectedMsgs = map[string]struct{}{
+		"m1": {},
+		"m3": {},
+	}
+
+	// Press 'd'
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if !model.confirmDelete {
+		t.Fatalf("Expected confirmDelete to be true")
+	}
+	if model.pendingDeleteForEveryone {
+		t.Errorf("Expected pendingDeleteForEveryone to be false")
+	}
+	if len(model.pendingDeleteMultiMsgs) != 2 {
+		t.Fatalf("Expected 2 pending delete multi msgs, got %d", len(model.pendingDeleteMultiMsgs))
+	}
+
+	// Confirm with 'y'
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if model.confirmDelete {
+		t.Errorf("Expected confirmDelete to be false after confirmation")
+	}
+	if len(model.activeMsgs) != 1 || model.activeMsgs[0].ID != "m2" {
+		t.Errorf("Expected only m2 to remain in activeMsgs, got %+v", model.activeMsgs)
+	}
+	if len(model.multiSelectedMsgs) != 0 {
+		t.Errorf("Expected multiSelectedMsgs to be cleared after deletion")
+	}
+}
+
+func TestMultiSelect_DeleteForEveryone(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+
+	m1 := domain.Message{ID: "m1", ChatID: model.activeChatID, Body: "My msg", IsFromMe: true, Timestamp: time.Now()}
+	m2 := domain.Message{ID: "m2", ChatID: model.activeChatID, Body: "Their msg", IsFromMe: false, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1, m2}
+
+	// 1. In direct chat, selecting only others' messages should block Shift+D
+	model.selectedMsgIdx = 0
+	model.multiSelectedMsgs = map[string]struct{}{
+		"m2": {},
+	}
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if model.confirmDelete {
+		t.Errorf("Expected confirmDelete to NOT be set when only others' messages in direct chat")
+	}
+	if !strings.Contains(model.previewStatus, "only your own sent messages can be deleted") {
+		t.Errorf("Expected warning status, got %q", model.previewStatus)
+	}
+
+	// 2. Selecting own message allows Shift+D
+	model.multiSelectedMsgs = map[string]struct{}{
+		"m1": {},
+	}
+	_ = model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if !model.confirmDelete || !model.pendingDeleteForEveryone {
+		t.Fatalf("Expected confirmDelete=true and pendingDeleteForEveryone=true")
+	}
+
+	// Confirm with 'y'
+	confirmCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if confirmCmd != nil {
+		if batch, ok := confirmCmd().(tea.BatchMsg); ok {
+			for _, c := range batch {
+				if c != nil {
+					_ = c()
+				}
+			}
+		}
+	}
+	if len(model.activeMsgs) != 1 || model.activeMsgs[0].ID != "m2" {
+		t.Errorf("Expected m1 deleted and m2 remaining, got %+v", model.activeMsgs)
+	}
+	if !adapter.lastDeleteForEveryone {
+		t.Errorf("Expected adapter to be called with deleteForEveryone=true")
+	}
+}
+
+func TestMultiSelect_SaveAttachmentsAndText(t *testing.T) {
+	tmpDownloads := t.TempDir()
+	t.Setenv("XDG_DOWNLOAD_DIR", tmpDownloads)
+
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	m1 := domain.Message{ID: "m1", ChatID: model.activeChatID, Body: "Please review the attached invoice", IsFromMe: false, Timestamp: time.Now()}
+	m2 := domain.Message{ID: "m2", ChatID: model.activeChatID, Body: "[Document: test_invoice.pdf]", Type: domain.MessageTypeDocument, IsFromMe: false, Timestamp: time.Now()}
+	m3 := domain.Message{ID: "m3", ChatID: model.activeChatID, Body: "Thanks in advance!", IsFromMe: true, Timestamp: time.Now()}
+	model.activeMsgs = []domain.Message{m1, m2, m3}
+
+	model.selectedMsgIdx = 0
+	model.multiSelectedMsgs = map[string]struct{}{
+		"m1": {},
+		"m2": {},
+		"m3": {},
+	}
+
+	_ = os.WriteFile("/tmp/mock_media.jpg", []byte("dummy media"), 0644)
+
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd on 's' for multi-selection")
+	}
+	if len(model.multiSelectedMsgs) != 0 {
+		t.Errorf("Expected multiSelectedMsgs to be cleared after initiating save")
+	}
+
+	res := cmd()
+	savedMsg, ok := res.(multiMessagesSavedMsg)
+	if !ok {
+		t.Fatalf("Expected multiMessagesSavedMsg result, got %T", res)
+	}
+	if savedMsg.MediaCount != 1 {
+		t.Errorf("Expected 1 media attachment saved, got %d", savedMsg.MediaCount)
+	}
+	if savedMsg.TextCount != 2 {
+		t.Errorf("Expected 2 text messages saved, got %d", savedMsg.TextCount)
+	}
+	if savedMsg.TextPath == "" {
+		t.Fatalf("Expected textPath to be set")
+	}
+	content, err := os.ReadFile(savedMsg.TextPath)
+	if err != nil {
+		t.Fatalf("Failed to read saved text file: %v", err)
+	}
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "Please review the attached invoice") || !strings.Contains(contentStr, "Thanks in advance!") {
+		t.Errorf("Saved text file missing message bodies:\n%s", contentStr)
+	}
+	if !strings.Contains(contentStr, "You") {
+		t.Errorf("Saved text file missing 'You' sender:\n%s", contentStr)
+	}
+
+	// Update model with message
+	model.Update(savedMsg)
+	if !strings.Contains(model.previewStatus, "Saved 1 attachment(s) and 2 text message(s) to Downloads") {
+		t.Errorf("Unexpected previewStatus: %q", model.previewStatus)
+	}
+}

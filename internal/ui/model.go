@@ -82,16 +82,18 @@ type Model struct {
 	editTargetMsg    *domain.Message // message currently being edited (nil if none)
 
 	// Media navigation & saving
-	selectedMediaIdx         int             // targeted media index within activeChat (0-based)
-	confirmSave              bool            // true when prompting "save? (y/N)"
-	pendingSavePath          string          // path of the media file awaiting save confirmation
-	confirmDocAction         bool            // true when prompting "Document: Open [o], Open with [w], or Save [s]?"
-	promptOpenWith           bool            // true when typing custom viewer in "Open with: "
-	openWithInput            textinput.Model // textinput for custom application name
-	pendingDocMsg            *domain.Message // message awaiting document action choice
-	confirmDelete            bool            // true when prompting "Delete message for you? (y/N)" or "Delete message for everyone? (y/N)"
-	pendingDeleteForEveryone bool            // true if confirming delete for everyone, false if for me
-	pendingDeleteMsg         *domain.Message // message awaiting delete confirmation
+	selectedMediaIdx         int                 // targeted media index within activeChat (0-based)
+	confirmSave              bool                // true when prompting "save? (y/N)"
+	pendingSavePath          string              // path of the media file awaiting save confirmation
+	confirmDocAction         bool                // true when prompting "Document: Open [o], Open with [w], or Save [s]?"
+	promptOpenWith           bool                // true when typing custom viewer in "Open with: "
+	openWithInput            textinput.Model     // textinput for custom application name
+	pendingDocMsg            *domain.Message     // message awaiting document action choice
+	confirmDelete            bool                // true when prompting "Delete message for you? (y/N)" or "Delete message for everyone? (y/N)"
+	pendingDeleteForEveryone bool                // true if confirming delete for everyone, false if for me
+	pendingDeleteMsg         *domain.Message     // message awaiting delete confirmation
+	pendingDeleteMultiMsgs   []domain.Message    // messages awaiting batch deletion confirmation
+	multiSelectedMsgs        map[string]struct{} // set of message IDs selected in hover mode
 
 	// Group mention completion
 	groupParticipants []domain.Contact // participants of active group chat
@@ -185,6 +187,12 @@ type groupParticipantsMsg struct {
 	ChatID       string
 	Participants []domain.Contact
 }
+type multiMessagesSavedMsg struct {
+	MediaCount int
+	TextCount  int
+	TextPath   string
+	Err        error
+}
 
 // NewModel initializes the TUI model.
 func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*config.Config) *Model {
@@ -235,24 +243,25 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 	}
 
 	m := &Model{
-		adapter:        adapter,
-		ctx:            ctx,
-		cfg:            cfg,
-		view:           ViewUnreadList,
-		unreadChats:    make(map[string]*UnreadChat),
-		readChats:      make(map[string]bool),
-		chatOrder:      make([]string, 0),
-		input:          ti,
-		selectedMsgIdx: -1,
-		contactSearch:  si,
-		openWithInput:  oi,
-		status:         domain.StatusConnecting,
-		msgChan:        make(chan domain.Message, 200),
-		statusChan:     make(chan domain.ConnectionStatus, 10),
-		dismissChan:    make(chan string, 50),
-		contactsChan:   make(chan []domain.Contact, 10),
-		contactsByJID:  make(map[string]*domain.Contact),
-		contactsByUser: make(map[string]*domain.Contact),
+		adapter:           adapter,
+		ctx:               ctx,
+		cfg:               cfg,
+		view:              ViewUnreadList,
+		unreadChats:       make(map[string]*UnreadChat),
+		readChats:         make(map[string]bool),
+		chatOrder:         make([]string, 0),
+		input:             ti,
+		selectedMsgIdx:    -1,
+		contactSearch:     si,
+		openWithInput:     oi,
+		status:            domain.StatusConnecting,
+		msgChan:           make(chan domain.Message, 200),
+		statusChan:        make(chan domain.ConnectionStatus, 10),
+		dismissChan:       make(chan string, 50),
+		contactsChan:      make(chan []domain.Contact, 10),
+		contactsByJID:     make(map[string]*domain.Contact),
+		contactsByUser:    make(map[string]*domain.Contact),
+		multiSelectedMsgs: make(map[string]struct{}),
 	}
 
 	m.initPinnedChats()
@@ -422,6 +431,44 @@ func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (bool, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		m.confirmDelete = false
+		if len(m.pendingDeleteMultiMsgs) > 0 {
+			targets := m.pendingDeleteMultiMsgs
+			m.pendingDeleteMultiMsgs = nil
+			m.pendingDeleteMsg = nil
+			m.multiSelectedMsgs = make(map[string]struct{})
+			forEveryone := m.pendingDeleteForEveryone
+			isGroup := strings.Contains(m.activeChatID, "@g.us")
+			m.stopActiveViewer()
+			var cmds []tea.Cmd
+			for _, target := range targets {
+				if m.replyToMsg != nil && m.replyToMsg.ID == target.ID {
+					m.replyToMsg = nil
+				}
+				m.removeMessageFromActive(target.ID)
+				m.removeMessageFromUnread(m.activeChatID, target.ID)
+				delForEveryone := forEveryone
+				if delForEveryone && !isGroup && !target.IsFromMe {
+					delForEveryone = false
+				}
+				cmds = append(cmds, m.deleteMessageCmd(m.activeChatID, target, delForEveryone))
+			}
+			if len(m.activeMsgs) == 0 {
+				m.selectedMsgIdx = -1
+				m.input.Focus()
+			} else {
+				if m.selectedMsgIdx >= len(m.activeMsgs) {
+					m.selectedMsgIdx = len(m.activeMsgs) - 1
+				}
+				m.scrollToMessage(m.selectedMsgIdx)
+				m.syncSelectedMediaIdx()
+			}
+			if forEveryone {
+				m.previewStatus = fmt.Sprintf("Deleting %d message(s) for everyone...", len(targets))
+			} else {
+				m.previewStatus = fmt.Sprintf("Deleted %d message(s) for you", len(targets))
+			}
+			return true, tea.Batch(cmds...)
+		}
 		if m.pendingDeleteMsg != nil {
 			target := *m.pendingDeleteMsg
 			m.pendingDeleteMsg = nil
@@ -454,12 +501,14 @@ func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case "n", "N", "esc":
 		m.confirmDelete = false
 		m.pendingDeleteMsg = nil
+		m.pendingDeleteMultiMsgs = nil
 		m.previewStatus = "Deletion cancelled"
 		return true, nil
 
 	default:
 		m.confirmDelete = false
 		m.pendingDeleteMsg = nil
+		m.pendingDeleteMultiMsgs = nil
 		m.previewStatus = "Deletion cancelled"
 		return true, nil
 	}
@@ -733,6 +782,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case docFallbackSavedMsg:
 		m.confirmSave = false
 		m.previewStatus = fmt.Sprintf("No default app; saved to %s", msg.DestPath)
+
+	case multiMessagesSavedMsg:
+		if msg.Err != nil && msg.MediaCount == 0 && msg.TextCount == 0 {
+			m.previewStatus = fmt.Sprintf("Failed to save: %v", msg.Err)
+			return m, nil
+		}
+		var parts []string
+		if msg.MediaCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d attachment(s)", msg.MediaCount))
+		}
+		if msg.TextCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d text message(s)", msg.TextCount))
+		}
+		if len(parts) > 0 {
+			m.previewStatus = fmt.Sprintf("Saved %s to Downloads", strings.Join(parts, " and "))
+		} else {
+			m.previewStatus = "Nothing to save"
+		}
+		return m, nil
 
 	case docDownloadedToOpenMsg:
 		m.previewStatus = ""
@@ -2183,12 +2251,18 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	if m.selectedMsgIdx >= 0 {
 		switch msg.String() {
 		case "esc":
+			if len(m.multiSelectedMsgs) > 0 {
+				m.multiSelectedMsgs = make(map[string]struct{})
+				m.previewStatus = "Selection cleared"
+				return nil
+			}
 			m.selectedMsgIdx = -1
 			m.input.Focus()
 			m.previewStatus = ""
 			return textinput.Blink
 
 		case "r":
+			m.multiSelectedMsgs = make(map[string]struct{})
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
 				m.replyToMsg = &target
@@ -2200,6 +2274,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			return textinput.Blink
 
 		case "e":
+			m.multiSelectedMsgs = make(map[string]struct{})
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
 				if !target.IsFromMe {
@@ -2303,12 +2378,87 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			}
 			return nil
 
+		case " ":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				if m.multiSelectedMsgs == nil {
+					m.multiSelectedMsgs = make(map[string]struct{})
+				}
+				if _, ok := m.multiSelectedMsgs[target.ID]; ok {
+					delete(m.multiSelectedMsgs, target.ID)
+				} else {
+					m.multiSelectedMsgs[target.ID] = struct{}{}
+				}
+				if m.selectedMsgIdx < len(m.activeMsgs)-1 {
+					m.selectedMsgIdx++
+				}
+				m.scrollToMessage(m.selectedMsgIdx)
+				m.syncSelectedMediaIdx()
+				if len(m.multiSelectedMsgs) > 0 {
+					m.previewStatus = fmt.Sprintf("%d message(s) selected", len(m.multiSelectedMsgs))
+				} else {
+					m.previewStatus = "Selection cleared"
+				}
+			}
+			return nil
+
+		case "c":
+			if len(m.multiSelectedMsgs) > 0 {
+				selectedMsgs := m.getSelectedMsgsInOrder()
+				var texts []string
+				for _, msg := range selectedMsgs {
+					body := strings.TrimSpace(m.formatMentions(msg.Body))
+					if body == "" {
+						continue
+					}
+					if strings.HasPrefix(body, "[Document") ||
+						strings.HasPrefix(body, "[Image") ||
+						strings.HasPrefix(body, "[Video") ||
+						strings.HasPrefix(body, "[Audio") ||
+						strings.HasPrefix(body, "[GIF") ||
+						strings.HasPrefix(body, "[Sticker") {
+						continue
+					}
+					texts = append(texts, body)
+				}
+				if len(texts) == 0 {
+					m.previewStatus = "No text messages selected to copy"
+					return nil
+				}
+				joined := strings.Join(texts, "\n")
+				_ = copyToClipboard(joined)
+				m.previewStatus = fmt.Sprintf("Copied %d message(s) to clipboard", len(texts))
+				return nil
+			}
+			m.previewStatus = "No messages selected (press Space to select messages)"
+			return nil
+
+		case "s":
+			if len(m.multiSelectedMsgs) > 0 {
+				targets := m.getSelectedMsgsInOrder()
+				m.multiSelectedMsgs = make(map[string]struct{})
+				return m.saveMultiMessagesCmd(targets)
+			}
+			return nil
+
 		case "d":
+			if len(m.multiSelectedMsgs) > 0 {
+				m.confirmDelete = true
+				m.pendingDeleteForEveryone = false
+				m.pendingDeleteMultiMsgs = m.getSelectedMsgsInOrder()
+				m.pendingDeleteMsg = nil
+				m.confirmSave = false
+				m.confirmDocAction = false
+				m.promptOpenWith = false
+				m.previewStatus = ""
+				return nil
+			}
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
 				m.confirmDelete = true
 				m.pendingDeleteForEveryone = false
 				m.pendingDeleteMsg = &target
+				m.pendingDeleteMultiMsgs = nil
 				m.confirmSave = false
 				m.confirmDocAction = false
 				m.promptOpenWith = false
@@ -2317,6 +2467,32 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			return nil
 
 		case "shift+d", "D":
+			if len(m.multiSelectedMsgs) > 0 {
+				selectedMsgs := m.getSelectedMsgsInOrder()
+				isGroup := strings.Contains(m.activeChatID, "@g.us")
+				if !isGroup {
+					hasFromMe := false
+					for _, sm := range selectedMsgs {
+						if sm.IsFromMe {
+							hasFromMe = true
+							break
+						}
+					}
+					if !hasFromMe {
+						m.previewStatus = "Cannot delete for all: only your own sent messages can be deleted for everyone in direct chats (press 'd' to delete for you)"
+						return nil
+					}
+				}
+				m.confirmDelete = true
+				m.pendingDeleteForEveryone = true
+				m.pendingDeleteMultiMsgs = selectedMsgs
+				m.pendingDeleteMsg = nil
+				m.confirmSave = false
+				m.confirmDocAction = false
+				m.promptOpenWith = false
+				m.previewStatus = ""
+				return nil
+			}
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
 				if !target.IsFromMe && !strings.Contains(m.activeChatID, "@g.us") {
@@ -2326,6 +2502,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 				m.confirmDelete = true
 				m.pendingDeleteForEveryone = true
 				m.pendingDeleteMsg = &target
+				m.pendingDeleteMultiMsgs = nil
 				m.confirmSave = false
 				m.confirmDocAction = false
 				m.promptOpenWith = false
@@ -2455,6 +2632,8 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		m.confirmDocAction = false
 		m.promptOpenWith = false
 		m.pendingDocMsg = nil
+		m.multiSelectedMsgs = make(map[string]struct{})
+		m.pendingDeleteMultiMsgs = nil
 		m.mu.Lock()
 		if chat, exists := m.unreadChats[m.activeChatID]; exists {
 			chat.Messages = append([]domain.Message(nil), m.activeMsgs...)
@@ -3423,9 +3602,16 @@ func (m *Model) renderChatView() []string {
 				cursorPrefix = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("▸ ")
 			}
 
+			isSelected := m.isMsgMultiSelected(msg.ID)
+			selectPrefix := ""
+			if isSelected {
+				selectPrefix = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render("[✓] ")
+			}
+
 			if msg.IsFromMe {
-				header = fmt.Sprintf("%s%s %s%s",
+				header = fmt.Sprintf("%s%s%s %s%s",
 					cursorPrefix,
+					selectPrefix,
 					lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render("You"),
 					statusStyle.Render(timeStr),
 					mediaBadge,
@@ -3435,8 +3621,9 @@ func (m *Model) renderChatView() []string {
 				if sender == "" {
 					sender = "Them"
 				}
-				header = fmt.Sprintf("%s%s %s%s",
+				header = fmt.Sprintf("%s%s%s %s%s",
 					cursorPrefix,
+					selectPrefix,
 					selectedTitleStyle.Render(sender),
 					statusStyle.Render(timeStr),
 					mediaBadge,
@@ -3447,6 +3634,8 @@ func (m *Model) renderChatView() []string {
 			bodyPrefix := "    "
 			if isHovered {
 				bodyPrefix = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#FAB387")).Render("┃ ")
+			} else if isSelected {
+				bodyPrefix = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1")).Render("┃ ")
 			}
 
 			if msg.QuotedText != "" || msg.QuotedID != "" {
@@ -3668,7 +3857,11 @@ func (m *Model) renderChatView() []string {
 	var dynamicHelp string
 
 	if m.selectedMsgIdx >= 0 {
-		dynamicHelp = "[j/k] Msg · [J/K] Media · [p] Preview · [r] Reply · [e] Edit · [y] Copy · [d/D] Delete · [Esc] Input"
+		if len(m.multiSelectedMsgs) > 0 {
+			dynamicHelp = fmt.Sprintf("[%d selected] [Space] Toggle · [c] Copy · [d/D] Delete · [s] Save · [Esc] Clear", len(m.multiSelectedMsgs))
+		} else {
+			dynamicHelp = "[j/k] Msg · [Space] Select · [J/K] Media · [p] Preview · [r] Reply · [e] Edit · [y] Copy · [d/D] Delete · [Esc] Input"
+		}
 	} else if m.editTargetMsg != nil {
 		dynamicHelp = "[Enter] Save Edit · [Esc] Cancel Edit"
 	} else {
@@ -3696,7 +3889,12 @@ func (m *Model) renderChatView() []string {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
 	} else if m.confirmDelete {
 		promptText := "Delete message for you? (y/N)"
-		if m.pendingDeleteForEveryone {
+		if len(m.pendingDeleteMultiMsgs) > 0 {
+			promptText = fmt.Sprintf("Delete %d messages for you? (y/N)", len(m.pendingDeleteMultiMsgs))
+			if m.pendingDeleteForEveryone {
+				promptText = fmt.Sprintf("Delete %d messages for everyone? (y/N)", len(m.pendingDeleteMultiMsgs))
+			}
+		} else if m.pendingDeleteForEveryone {
 			promptText = "Delete message for everyone? (y/N)"
 		}
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F38BA8")).Render(promptText)
@@ -3995,6 +4193,133 @@ func (m *Model) downloadAndSaveDocCmd(msg domain.Message) tea.Cmd {
 			return mediaPreviewErrMsg{Err: err}
 		}
 		return docSavedMsg{DestPath: destPath}
+	}
+}
+
+func (m *Model) isMsgMultiSelected(id string) bool {
+	if m.multiSelectedMsgs == nil {
+		return false
+	}
+	_, ok := m.multiSelectedMsgs[id]
+	return ok
+}
+
+func (m *Model) getSelectedMsgsInOrder() []domain.Message {
+	if len(m.multiSelectedMsgs) == 0 {
+		return nil
+	}
+	var res []domain.Message
+	for _, msg := range m.activeMsgs {
+		if _, ok := m.multiSelectedMsgs[msg.ID]; ok {
+			res = append(res, msg)
+		}
+	}
+	return res
+}
+
+func (m *Model) saveMultiMessagesCmd(msgs []domain.Message) tea.Cmd {
+	m.previewStatus = "Saving selected messages to Downloads..."
+	chatName := m.activeName
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func() tea.Msg {
+		var mediaMsgs []domain.Message
+		var textMsgs []domain.Message
+		for _, msg := range msgs {
+			if msg.IsMedia() {
+				mediaMsgs = append(mediaMsgs, msg)
+			} else {
+				textMsgs = append(textMsgs, msg)
+			}
+		}
+
+		savedMediaCount := 0
+		var firstErr error
+		for _, mm := range mediaMsgs {
+			dlPath, err := m.adapter.DownloadMedia(ctx, mm)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			_, err = saveToDownloads(dlPath)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			savedMediaCount++
+		}
+
+		savedTextCount := 0
+		var textFilePath string
+		if len(textMsgs) > 0 {
+			home, err := os.UserHomeDir()
+			downloadsDir := ""
+			if err == nil && home != "" {
+				downloadsDir = filepath.Join(home, "Downloads")
+				if xdg := os.Getenv("XDG_DOWNLOAD_DIR"); xdg != "" {
+					downloadsDir = xdg
+				}
+				_ = os.MkdirAll(downloadsDir, 0755)
+			}
+			if downloadsDir != "" {
+				safeName := ""
+				for _, r := range chatName {
+					if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+						safeName += string(r)
+					}
+				}
+				if len(safeName) > 20 {
+					safeName = safeName[:20]
+				}
+				fileName := fmt.Sprintf("messages_%s_%s.txt", safeName, time.Now().Format("20060102_150405"))
+				if safeName == "" {
+					fileName = fmt.Sprintf("messages_%s.txt", time.Now().Format("20060102_150405"))
+				}
+				textFilePath = filepath.Join(downloadsDir, fileName)
+
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("--- Watui Saved Messages: %s (%s) ---\n\n", chatName, time.Now().Format("02/01/2006 15:04:05")))
+				for _, tm := range textMsgs {
+					timeStr := tm.Timestamp.Format("02/01/2006 15:04:05")
+					sender := "You"
+					if !tm.IsFromMe {
+						name := m.resolveMsgSenderName(tm)
+						if name != "" && tm.Sender != "" && name != tm.Sender {
+							sender = fmt.Sprintf("%s (%s)", name, tm.Sender)
+						} else if name != "" {
+							sender = name
+						} else if tm.Sender != "" {
+							sender = tm.Sender
+						} else {
+							sender = "Them"
+						}
+					}
+					body := m.formatMentions(tm.Body)
+					sb.WriteString(fmt.Sprintf("[%s] %s:\n%s\n\n", timeStr, sender, body))
+				}
+
+				if err := os.WriteFile(textFilePath, []byte(sb.String()), 0644); err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+				} else {
+					savedTextCount = len(textMsgs)
+				}
+			}
+		}
+
+		return multiMessagesSavedMsg{
+			MediaCount: savedMediaCount,
+			TextCount:  savedTextCount,
+			TextPath:   textFilePath,
+			Err:        firstErr,
+		}
 	}
 }
 
