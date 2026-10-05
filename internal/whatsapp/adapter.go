@@ -30,6 +30,8 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"go.mau.fi/whatsmeow/util/gcmutil"
+	"go.mau.fi/whatsmeow/util/hkdfutil"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
@@ -117,9 +119,359 @@ func unwrapMessage(m *waE2E.Message) *waE2E.Message {
 			m = m.DocumentWithCaptionMessage.Message
 			continue
 		}
+		if m.BotInvokeMessage != nil && m.BotInvokeMessage.Message != nil {
+			m = m.BotInvokeMessage.Message
+			continue
+		}
+		if m.DeviceSentMessage != nil && m.DeviceSentMessage.Message != nil {
+			m = m.DeviceSentMessage.Message
+			continue
+		}
+		if m.EditedMessage != nil && m.EditedMessage.Message != nil {
+			m = m.EditedMessage.Message
+			continue
+		}
+		if m.ProtocolMessage != nil && m.ProtocolMessage.EditedMessage != nil {
+			m = m.ProtocolMessage.EditedMessage
+			continue
+		}
 		break
 	}
 	return m
+}
+
+func extractRevokeProtocolInfo(evt *events.Message) (string, bool) {
+	if evt == nil {
+		return "", false
+	}
+	findInMsg := func(m *waE2E.Message) (string, bool) {
+		curr := m
+		for curr != nil {
+			if curr.ProtocolMessage != nil && curr.ProtocolMessage.GetType() == waE2E.ProtocolMessage_REVOKE {
+				if key := curr.ProtocolMessage.GetKey(); key != nil && key.GetID() != "" {
+					return key.GetID(), true
+				}
+			}
+			if curr.EphemeralMessage != nil && curr.EphemeralMessage.GetMessage() != nil {
+				curr = curr.EphemeralMessage.GetMessage()
+				continue
+			}
+			if curr.DeviceSentMessage != nil && curr.DeviceSentMessage.GetMessage() != nil {
+				curr = curr.DeviceSentMessage.GetMessage()
+				continue
+			}
+			break
+		}
+		return "", false
+	}
+	if evt.Message != nil {
+		if id, ok := findInMsg(evt.Message); ok {
+			return id, true
+		}
+	}
+	if evt.RawMessage != nil {
+		if id, ok := findInMsg(evt.RawMessage); ok {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+func extractEditProtocolInfo(evt *events.Message) (targetID string, targetChat string, newMsg *waE2E.Message, isEdit bool) {
+	if evt == nil {
+		return "", "", nil, false
+	}
+
+	findInMsg := func(m *waE2E.Message) (string, string, *waE2E.Message, bool) {
+		if m == nil {
+			return "", "", nil, false
+		}
+		curr := m
+		for curr != nil {
+			if curr.ProtocolMessage != nil && curr.ProtocolMessage.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
+				pm := curr.ProtocolMessage
+				tid := ""
+				tchat := ""
+				if pm.GetKey() != nil {
+					tid = pm.GetKey().GetID()
+					tchat = pm.GetKey().GetRemoteJID()
+				}
+				em := pm.GetEditedMessage()
+				if em == nil && curr.EditedMessage != nil {
+					em = curr.EditedMessage.GetMessage()
+				}
+				return tid, tchat, em, true
+			}
+			if curr.EditedMessage != nil && curr.EditedMessage.GetMessage() != nil {
+				curr = curr.EditedMessage.GetMessage()
+				continue
+			}
+			if curr.DeviceSentMessage != nil && curr.DeviceSentMessage.GetMessage() != nil {
+				curr = curr.DeviceSentMessage.GetMessage()
+				continue
+			}
+			if curr.EphemeralMessage != nil && curr.EphemeralMessage.GetMessage() != nil {
+				curr = curr.EphemeralMessage.GetMessage()
+				continue
+			}
+			if curr.ViewOnceMessage != nil && curr.ViewOnceMessage.GetMessage() != nil {
+				curr = curr.ViewOnceMessage.GetMessage()
+				continue
+			}
+			if curr.ViewOnceMessageV2 != nil && curr.ViewOnceMessageV2.GetMessage() != nil {
+				curr = curr.ViewOnceMessageV2.GetMessage()
+				continue
+			}
+			if curr.ViewOnceMessageV2Extension != nil && curr.ViewOnceMessageV2Extension.GetMessage() != nil {
+				curr = curr.ViewOnceMessageV2Extension.GetMessage()
+				continue
+			}
+			if curr.DocumentWithCaptionMessage != nil && curr.DocumentWithCaptionMessage.GetMessage() != nil {
+				curr = curr.DocumentWithCaptionMessage.GetMessage()
+				continue
+			}
+			if curr.BotInvokeMessage != nil && curr.BotInvokeMessage.GetMessage() != nil {
+				curr = curr.BotInvokeMessage.GetMessage()
+				continue
+			}
+			break
+		}
+		return "", "", nil, false
+	}
+
+	if evt.Message != nil {
+		if tid, tchat, em, ok := findInMsg(evt.Message); ok {
+			return tid, tchat, em, true
+		}
+	}
+	if evt.RawMessage != nil {
+		if tid, tchat, em, ok := findInMsg(evt.RawMessage); ok {
+			return tid, tchat, em, true
+		}
+	}
+	if evt.IsEdit {
+		targetID := string(evt.Info.MsgBotInfo.EditTargetID)
+		if targetID == "" {
+			targetID = evt.Info.ID
+		}
+		tchat := ""
+		if evt.Info.Chat.String() != "" {
+			tchat = evt.Info.Chat.String()
+		}
+		return targetID, tchat, evt.Message, true
+	}
+	return "", "", nil, false
+}
+
+func findSecretEncryptedMessage(m *waE2E.Message) *waE2E.SecretEncryptedMessage {
+	curr := m
+	for curr != nil {
+		if curr.SecretEncryptedMessage != nil {
+			return curr.SecretEncryptedMessage
+		}
+		if curr.EphemeralMessage != nil && curr.EphemeralMessage.GetMessage() != nil {
+			curr = curr.EphemeralMessage.GetMessage()
+			continue
+		}
+		if curr.DeviceSentMessage != nil && curr.DeviceSentMessage.GetMessage() != nil {
+			curr = curr.DeviceSentMessage.GetMessage()
+			continue
+		}
+		if curr.ViewOnceMessage != nil && curr.ViewOnceMessage.GetMessage() != nil {
+			curr = curr.ViewOnceMessage.GetMessage()
+			continue
+		}
+		if curr.ViewOnceMessageV2 != nil && curr.ViewOnceMessageV2.GetMessage() != nil {
+			curr = curr.ViewOnceMessageV2.GetMessage()
+			continue
+		}
+		if curr.ViewOnceMessageV2Extension != nil && curr.ViewOnceMessageV2Extension.GetMessage() != nil {
+			curr = curr.ViewOnceMessageV2Extension.GetMessage()
+			continue
+		}
+		if curr.DocumentWithCaptionMessage != nil && curr.DocumentWithCaptionMessage.GetMessage() != nil {
+			curr = curr.DocumentWithCaptionMessage.GetMessage()
+			continue
+		}
+		if curr.BotInvokeMessage != nil && curr.BotInvokeMessage.GetMessage() != nil {
+			curr = curr.BotInvokeMessage.GetMessage()
+			continue
+		}
+		if curr.EditedMessage != nil && curr.EditedMessage.GetMessage() != nil {
+			curr = curr.EditedMessage.GetMessage()
+			continue
+		}
+		break
+	}
+	return nil
+}
+
+func (a *Adapter) decryptSecretEditMessage(evt *events.Message, secEncMsg *waE2E.SecretEncryptedMessage, targetID string) *waE2E.Message {
+	if secEncMsg == nil {
+		return nil
+	}
+
+	// 1. Try standard whatsmeow client decryption first
+	if a != nil && a.client != nil {
+		origMsg := evt.Message
+		tempMsg := &waE2E.Message{
+			SecretEncryptedMessage: secEncMsg,
+		}
+		if origMsg != nil && origMsg.MessageContextInfo != nil {
+			tempMsg.MessageContextInfo = origMsg.MessageContextInfo
+		}
+		evt.Message = tempMsg
+		decrypted, err := a.client.DecryptSecretEncryptedMessage(a.ctx, evt)
+		evt.Message = origMsg
+		if err == nil && decrypted != nil {
+			return decrypted
+		}
+	}
+
+	// 2. Fallback: Direct decryption from whatsmeow_message_secrets
+	if a == nil || a.localDB == nil || targetID == "" {
+		return nil
+	}
+
+	var baseEncKey []byte
+	var storedSender, storedChat string
+	err := a.localDB.QueryRow("SELECT key, sender_jid, chat_jid FROM whatsmeow_message_secrets WHERE message_id = ? LIMIT 1", targetID).Scan(&baseEncKey, &storedSender, &storedChat)
+	if err != nil || len(baseEncKey) == 0 {
+		return nil
+	}
+
+	iv := secEncMsg.GetEncIV()
+	payload := secEncMsg.GetEncPayload()
+	if len(iv) == 0 || len(payload) == 0 {
+		return nil
+	}
+
+	candidateOrigSenders := []string{storedSender}
+	candidateModSenders := []string{evt.Info.Sender.ToNonAD().String()}
+	if secEncMsg.GetTargetMessageKey() != nil {
+		if p := secEncMsg.GetTargetMessageKey().GetParticipant(); p != "" {
+			candidateOrigSenders = append(candidateOrigSenders, p)
+		}
+		if r := secEncMsg.GetTargetMessageKey().GetRemoteJID(); r != "" && !strings.Contains(r, "@g.us") {
+			candidateOrigSenders = append(candidateOrigSenders, r)
+		}
+	}
+
+	expandJID := func(j string) []string {
+		if j == "" {
+			return nil
+		}
+		res := []string{j}
+		clean := strings.Split(j, ":")[0]
+		if clean != j {
+			res = append(res, clean)
+		}
+		for _, s := range []string{j, clean} {
+			if strings.HasSuffix(s, "@lid") {
+				lid := strings.TrimSuffix(s, "@lid")
+				if pn := a.ResolveLIDToPhone(lid); pn != "" {
+					res = append(res, pn+"@s.whatsapp.net")
+				}
+			} else if strings.HasSuffix(s, "@s.whatsapp.net") {
+				pn := strings.TrimSuffix(s, "@s.whatsapp.net")
+				if lid := a.ResolvePhoneToLID(pn); lid != "" {
+					res = append(res, lid+"@lid")
+				}
+			}
+		}
+		return res
+	}
+
+	var allOrig []string
+	seenOrig := make(map[string]bool)
+	for _, o := range candidateOrigSenders {
+		for _, exp := range expandJID(o) {
+			if !seenOrig[exp] {
+				seenOrig[exp] = true
+				allOrig = append(allOrig, exp)
+			}
+		}
+	}
+
+	var allMod []string
+	seenMod := make(map[string]bool)
+	for _, m := range candidateModSenders {
+		for _, exp := range expandJID(m) {
+			if !seenMod[exp] {
+				seenMod[exp] = true
+				allMod = append(allMod, exp)
+			}
+		}
+	}
+
+	useCases := []string{"Message Edit", ""}
+
+	for _, origSender := range allOrig {
+		for _, modSender := range allMod {
+			for _, uc := range useCases {
+				useCaseSecret := make([]byte, 0, len(targetID)+len(origSender)+len(modSender)+len(uc))
+				useCaseSecret = append(useCaseSecret, targetID...)
+				useCaseSecret = append(useCaseSecret, origSender...)
+				useCaseSecret = append(useCaseSecret, modSender...)
+				useCaseSecret = append(useCaseSecret, uc...)
+
+				secretKey := hkdfutil.SHA256(baseEncKey, nil, useCaseSecret, 32)
+				var additionalData []byte
+				if uc == "" {
+					additionalData = []byte(fmt.Sprintf("%s\x00%s", targetID, modSender))
+				}
+
+				plaintext, err := gcmutil.Decrypt(secretKey, iv, payload, additionalData)
+				if err == nil && len(plaintext) > 0 {
+					var decrypted waE2E.Message
+					if proto.Unmarshal(plaintext, &decrypted) == nil {
+						return &decrypted
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (a *Adapter) extractEditDetails(evt *events.Message) (targetID string, targetChat string, newMsg *waE2E.Message, isEdit bool) {
+	if evt == nil {
+		return "", "", nil, false
+	}
+
+	// 1. Check for ProtocolMessage_MESSAGE_EDIT first (either in Message or RawMessage)
+	tid, tchat, protoMsg, ok := extractEditProtocolInfo(evt)
+	if ok && tid != "" {
+		return tid, tchat, protoMsg, true
+	}
+
+	// 2. Check for SecretEncryptedMessage (1-on-1 or modern groups)
+	var secEncMsg *waE2E.SecretEncryptedMessage
+	if evt.Message != nil {
+		secEncMsg = findSecretEncryptedMessage(evt.Message)
+	}
+	if secEncMsg == nil && evt.RawMessage != nil {
+		secEncMsg = findSecretEncryptedMessage(evt.RawMessage)
+	}
+	if secEncMsg != nil && secEncMsg.GetSecretEncType() == waE2E.SecretEncryptedMessage_MESSAGE_EDIT {
+		targetKey := secEncMsg.GetTargetMessageKey()
+		tid := ""
+		tchat := ""
+		if targetKey != nil {
+			tid = targetKey.GetID()
+			tchat = targetKey.GetRemoteJID()
+		}
+		if tid == "" && evt.Info.MsgBotInfo.EditTargetID != "" {
+			tid = string(evt.Info.MsgBotInfo.EditTargetID)
+		}
+		decrypted := a.decryptSecretEditMessage(evt, secEncMsg, tid)
+		if tid != "" {
+			return tid, tchat, decrypted, true
+		}
+	}
+
+	return "", "", nil, false
 }
 
 func hasMedia(m *waE2E.Message) bool {
@@ -278,6 +630,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			quoted_id TEXT,
 			quoted_text TEXT,
 			quoted_sender TEXT,
+			is_edit BOOLEAN,
 			raw_message BLOB
 		);
 		CREATE INDEX IF NOT EXISTS idx_watui_unread_chat_id ON watui_unread_messages(chat_id);
@@ -302,6 +655,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			quoted_id TEXT,
 			quoted_text TEXT,
 			quoted_sender TEXT,
+			is_edit BOOLEAN,
 			raw_message BLOB
 		);
 		CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);`)
@@ -310,9 +664,11 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_id TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_text TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_sender TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN is_edit BOOLEAN;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_id TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_text TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_sender TEXT;")
+		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN is_edit BOOLEAN;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN raw_message BLOB;")
 
 		// Only run LID migration if there are actually @lid chats present in watui_unread_messages
@@ -1884,9 +2240,9 @@ func (a *Adapter) saveUnreadMessage(msg domain.Message, rawMsg ...*waE2E.Message
 		rawBytes, _ = proto.Marshal(rawMsg[0])
 	}
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_unread_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, raw_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, rawBytes,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, raw_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, rawBytes,
 	)
 
 	// Keep unread messages table lean by pruning older messages beyond 100 per chat
@@ -1918,9 +2274,9 @@ func (a *Adapter) saveHistoryMessage(msg domain.Message, raw ...*waE2E.Message) 
 	}
 
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, raw_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, rawBytes,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, raw_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, rawBytes,
 	)
 
 	// Keep history table strictly bounded per chat according to cyclic limit (default: 30)
@@ -1963,13 +2319,13 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 	var query string
 	var args []interface{}
 	if beforeTimestamp.IsZero() {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit 
 			FROM watui_messages 
 			WHERE chat_id = ? OR chat_id = ? OR chat_id = ? 
 			ORDER BY timestamp DESC LIMIT ?`
 		args = []interface{}{chatID, nonAD, altTarget, limit}
 	} else {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit 
 			FROM watui_messages 
 			WHERE (chat_id = ? OR chat_id = ? OR chat_id = ?) AND timestamp < ? 
 			ORDER BY timestamp DESC LIMIT ?`
@@ -1989,7 +2345,8 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 		var chatName, senderName, body, qID, qText, qSender sql.NullString
 		var msgType string
 		var isFromMe bool
-		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe, &qID, &qText, &qSender); err != nil {
+		var isEdit sql.NullBool
+		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe, &qID, &qText, &qSender, &isEdit); err != nil {
 			continue
 		}
 		m.ChatName = chatName.String
@@ -2006,6 +2363,7 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 		m.QuotedID = qID.String
 		m.QuotedText = qText.String
 		m.QuotedSender = qSender.String
+		m.IsEdit = isEdit.Valid && isEdit.Bool
 		result = append(result, m)
 	}
 	_ = rows.Close()
@@ -2091,16 +2449,16 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 
 	// Use partitioned window query to only pull the latest 50 unreads per chat, avoiding megabytes of stale backlog
 	rows, err := a.localDB.QueryContext(ctx, `
-		SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender
+		SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit
 		FROM (
 			SELECT id, chat_id, COALESCE(chat_name, '') AS chat_name, sender, sender_name, timestamp, body, type, is_from_me,
-			       quoted_id, quoted_text, quoted_sender,
+			       quoted_id, quoted_text, quoted_sender, is_edit,
 			       ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) as rn
 			FROM watui_unread_messages
 		) WHERE rn <= 50
 		ORDER BY timestamp ASC`)
 	if err != nil {
-		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender
+		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit
 			FROM watui_unread_messages ORDER BY timestamp ASC`)
 		if err != nil {
 			return nil, err
@@ -2115,13 +2473,15 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 		var ts int64
 		var tStr string
 		var qID, qText, qSender sql.NullString
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe, &qID, &qText, &qSender); err == nil {
+		var isEdit sql.NullBool
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe, &qID, &qText, &qSender, &isEdit); err == nil {
 			m.Timestamp = time.Unix(ts, 0)
 			m.Type = domain.MessageType(tStr)
 			m.Status = domain.MessageStatusDelivered
 			m.QuotedID = qID.String
 			m.QuotedText = qText.String
 			m.QuotedSender = qSender.String
+			m.IsEdit = isEdit.Valid && isEdit.Bool
 			if strings.HasSuffix(m.ChatID, "@lid") {
 				lidUser := strings.TrimSuffix(m.ChatID, "@lid")
 				if idx := strings.Index(lidUser, ":"); idx != -1 {
@@ -2334,42 +2694,135 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		}
 
 	case *events.Message:
-		if evt.Message != nil {
-			unwrapped := unwrapMessage(evt.Message)
-			if unwrapped != nil && unwrapped.ProtocolMessage != nil && unwrapped.ProtocolMessage.GetType() == waE2E.ProtocolMessage_REVOKE {
-				if key := unwrapped.ProtocolMessage.GetKey(); key != nil && key.GetID() != "" {
-					revokedID := key.GetID()
-					if a.localDB != nil {
-						_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", revokedID)
-						_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", revokedID)
-					}
-				}
-				return
+		if targetID, isRevoke := extractRevokeProtocolInfo(evt); isRevoke && targetID != "" {
+			if a.localDB != nil {
+				_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", targetID)
+				_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", targetID)
 			}
-			if unwrapped != nil && unwrapped.ProtocolMessage != nil && unwrapped.ProtocolMessage.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
-				if key := unwrapped.ProtocolMessage.GetKey(); key != nil && key.GetID() != "" {
-					editedID := key.GetID()
-					var newBody string
-					if em := unwrapped.ProtocolMessage.GetEditedMessage(); em != nil {
-						newBody, _, _ = extractMessageContent(em)
+			return
+		}
+
+		if targetID, targetChat, newMsg, isEdit := a.extractEditDetails(evt); isEdit && targetID != "" {
+			var newBody string
+			if newMsg != nil {
+				newBody, _, _ = extractMessageContent(newMsg)
+			}
+			if newBody == "" && evt.Message != nil {
+				newBody, _, _ = extractMessageContent(evt.Message)
+			}
+			if newBody == "" && evt.RawMessage != nil {
+				newBody, _, _ = extractMessageContent(evt.RawMessage)
+			}
+			if newBody != "" {
+				var origBody, origSender, origSenderName, origChatID, origChatName string
+				if a.localDB != nil {
+					row := a.localDB.QueryRow("SELECT chat_id, chat_name, body, sender, sender_name FROM watui_messages WHERE id = ?", targetID)
+					_ = row.Scan(&origChatID, &origChatName, &origBody, &origSender, &origSenderName)
+					if origBody == "" {
+						row2 := a.localDB.QueryRow("SELECT chat_id, chat_name, body, sender, sender_name FROM watui_unread_messages WHERE id = ?", targetID)
+						_ = row2.Scan(&origChatID, &origChatName, &origBody, &origSender, &origSenderName)
 					}
-					if newBody != "" {
-						if a.localDB != nil {
-							_, _ = a.localDB.Exec("UPDATE watui_messages SET body = ? WHERE id = ?", newBody, editedID)
-							_, _ = a.localDB.Exec("UPDATE watui_unread_messages SET body = ? WHERE id = ?", newBody, editedID)
+					_, _ = a.localDB.Exec("UPDATE watui_messages SET body = ? WHERE id = ?", newBody, targetID)
+					_, _ = a.localDB.Exec("UPDATE watui_unread_messages SET body = ? WHERE id = ?", newBody, targetID)
+				}
+				if origBody == "" {
+					origBody = "[Original message not cached]"
+				}
+
+				editMsgID := evt.Info.ID
+				if editMsgID == "" || editMsgID == targetID {
+					editMsgID = fmt.Sprintf("edit_%s_%d", targetID, evt.Info.Timestamp.Unix())
+				}
+
+				// Resolve target ChatID
+				var finalChatID string
+				if origChatID != "" {
+					finalChatID = origChatID
+				} else if targetChat != "" {
+					if parsed, err := NormalizeJID(targetChat); err == nil {
+						finalChatID = parsed.ToNonAD().String()
+					} else {
+						finalChatID = targetChat
+					}
+				} else if evt.Info.DeviceSentMeta != nil && evt.Info.DeviceSentMeta.DestinationJID != "" {
+					if parsed, err := NormalizeJID(evt.Info.DeviceSentMeta.DestinationJID); err == nil {
+						finalChatID = parsed.ToNonAD().String()
+					}
+				} else {
+					chatJID := evt.Info.Chat.ToNonAD()
+					if chatJID.Server == "lid" {
+						if pn := a.ResolveLIDToPhone(chatJID.User); pn != "" {
+							chatJID = types.NewJID(pn, types.DefaultUserServer)
 						}
-						editDMsg := domain.Message{
-							ID:        editedID,
-							ChatID:    evt.Info.Chat.ToNonAD().String(),
-							Sender:    evt.Info.Sender.ToNonAD().String(),
-							Body:      newBody,
-							Timestamp: evt.Info.Timestamp,
-							IsFromMe:  evt.Info.IsFromMe,
-							Type:      domain.MessageTypeText,
-						}
-						a.notifyMessage(editDMsg)
+					}
+					finalChatID = chatJID.String()
+				}
+				if strings.HasSuffix(finalChatID, "@lid") {
+					lidUser := strings.TrimSuffix(finalChatID, "@lid")
+					if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+						finalChatID = pn + "@s.whatsapp.net"
 					}
 				}
+
+				// Resolve Sender
+				senderJID := evt.Info.Sender.ToNonAD()
+				if senderJID.Server == "lid" {
+					if pn := a.ResolveLIDToPhone(senderJID.User); pn != "" {
+						senderJID = types.NewJID(pn, types.DefaultUserServer)
+					}
+				}
+				sender := senderJID.String()
+				if sender == "" && origSender != "" {
+					sender = origSender
+				}
+				if evt.Info.IsFromMe && (sender == "" || sender == "You") {
+					sender = "You"
+				}
+
+				senderName := a.resolveParticipantName(evt.Info.Sender.String(), evt.Info.PushName)
+				if senderName == "" {
+					if origSenderName != "" {
+						senderName = origSenderName
+					} else if evt.Info.PushName != "" {
+						senderName = evt.Info.PushName
+					} else if evt.Info.IsFromMe {
+						senderName = "You"
+					} else {
+						senderName = senderJID.User
+					}
+				}
+
+				chatJIDParsed, _ := types.ParseJID(finalChatID)
+				chatName := a.resolveChatName(chatJIDParsed)
+				if chatName == "" {
+					if origChatName != "" {
+						chatName = origChatName
+					} else if !evt.Info.IsGroup {
+						chatName = senderName
+					}
+				}
+
+				editDMsg := domain.Message{
+					ID:           editMsgID,
+					ChatID:       finalChatID,
+					ChatName:     chatName,
+					Sender:       sender,
+					SenderName:   senderName,
+					Body:         newBody,
+					Timestamp:    evt.Info.Timestamp,
+					IsFromMe:     evt.Info.IsFromMe,
+					Type:         domain.MessageTypeText,
+					QuotedID:     targetID,
+					QuotedText:   origBody,
+					QuotedSender: sender,
+					IsEdit:       true,
+				}
+
+				if !editDMsg.IsFromMe {
+					a.saveUnreadMessage(editDMsg, newMsg)
+				}
+				a.saveHistoryMessage(editDMsg, newMsg)
+				a.notifyMessage(editDMsg)
 				return
 			}
 		}

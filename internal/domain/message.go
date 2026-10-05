@@ -50,6 +50,7 @@ type Message struct {
 	QuotedSender  string        `json:"quoted_sender,omitempty"`
 	MentionedJIDs []string      `json:"mentioned_jids,omitempty"`
 	IsMentioned   bool          `json:"is_mentioned,omitempty"`
+	IsEdit        bool          `json:"is_edit,omitempty"`
 }
 
 // IsMedia returns true if the message represents a media attachment that can be previewed.

@@ -79,6 +79,9 @@ func FormatNotification(msg domain.Message) (string, string) {
 	if body == "" && msg.IsMedia() {
 		body = fmt.Sprintf("[%s]", msg.Type)
 	}
+	if msg.IsEdit {
+		body = "[EDIT] " + body
+	}
 	// Clean newlines to space for single-line banner preview
 	body = strings.ReplaceAll(body, "\r", "")
 	body = strings.ReplaceAll(body, "\n", " ")

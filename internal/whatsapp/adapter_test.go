@@ -17,6 +17,8 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"go.mau.fi/whatsmeow/util/gcmutil"
+	"go.mau.fi/whatsmeow/util/hkdfutil"
 	"google.golang.org/protobuf/proto"
 
 	"watui/internal/config"
@@ -216,6 +218,7 @@ func TestChatHistoryStorageAndCyclicPruning(t *testing.T) {
 		quoted_id TEXT,
 		quoted_text TEXT,
 		quoted_sender TEXT,
+		is_edit BOOLEAN,
 		raw_message BLOB
 	);
 	CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);
@@ -316,6 +319,7 @@ func TestMediaCachePersistence(t *testing.T) {
 		quoted_id TEXT,
 		quoted_text TEXT,
 		quoted_sender TEXT,
+		is_edit BOOLEAN,
 		raw_message BLOB
 	);
 	CREATE TABLE IF NOT EXISTS watui_unread_messages (
@@ -423,6 +427,7 @@ func TestUnreadReplyRetention(t *testing.T) {
 		quoted_id TEXT,
 		quoted_text TEXT,
 		quoted_sender TEXT,
+		is_edit BOOLEAN,
 		raw_message BLOB
 	);
 	CREATE TABLE IF NOT EXISTS watui_unread_messages (
@@ -438,6 +443,7 @@ func TestUnreadReplyRetention(t *testing.T) {
 		quoted_id TEXT,
 		quoted_text TEXT,
 		quoted_sender TEXT,
+		is_edit BOOLEAN,
 		raw_message BLOB
 	);`)
 	if err != nil {
@@ -644,3 +650,251 @@ func TestConvertGifToMp4(t *testing.T) {
 		t.Errorf("Converted data does not have MP4 ftyp box signature")
 	}
 }
+
+func TestExtractEditProtocolInfo(t *testing.T) {
+	newText := "Edited text content"
+	innerContent := &waE2E.Message{
+		Conversation: proto.String(newText),
+	}
+
+	// 1. Direct ProtocolMessage in evt.Message
+	evt1 := &events.Message{
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Key: &waCommon.MessageKey{
+					ID:        proto.String("ORIG_1"),
+					RemoteJID: proto.String("12345@s.whatsapp.net"),
+				},
+				Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				EditedMessage: innerContent,
+			},
+		},
+	}
+	tid, tchat, newMsg, isEdit := extractEditProtocolInfo(evt1)
+	if !isEdit || tid != "ORIG_1" || tchat != "12345@s.whatsapp.net" || newMsg == nil {
+		t.Fatalf("Direct edit extraction failed: got isEdit=%v, tid=%s, tchat=%s", isEdit, tid, tchat)
+	}
+
+	// 2. Wrapped in EditedMessage inside evt.Message
+	evt2 := &events.Message{
+		Message: &waE2E.Message{
+			EditedMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					ProtocolMessage: &waE2E.ProtocolMessage{
+						Key: &waCommon.MessageKey{
+							ID:        proto.String("ORIG_2"),
+							RemoteJID: proto.String("group1@g.us"),
+						},
+						Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+						EditedMessage: innerContent,
+					},
+				},
+			},
+		},
+	}
+	tid, tchat, newMsg, isEdit = extractEditProtocolInfo(evt2)
+	if !isEdit || tid != "ORIG_2" || tchat != "group1@g.us" || newMsg == nil {
+		t.Fatalf("EditedMessage extraction failed: got isEdit=%v, tid=%s, tchat=%s", isEdit, tid, tchat)
+	}
+
+	// 3. Wrapped in DeviceSentMessage -> EditedMessage in RawMessage
+	evt3 := &events.Message{
+		RawMessage: &waE2E.Message{
+			DeviceSentMessage: &waE2E.DeviceSentMessage{
+				DestinationJID: proto.String("dest@s.whatsapp.net"),
+				Message: &waE2E.Message{
+					EditedMessage: &waE2E.FutureProofMessage{
+						Message: &waE2E.Message{
+							ProtocolMessage: &waE2E.ProtocolMessage{
+								Key: &waCommon.MessageKey{
+									ID:        proto.String("ORIG_3"),
+									RemoteJID: proto.String("dest@s.whatsapp.net"),
+								},
+								Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+								EditedMessage: innerContent,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	tid, tchat, newMsg, isEdit = extractEditProtocolInfo(evt3)
+	if !isEdit || tid != "ORIG_3" || tchat != "dest@s.whatsapp.net" || newMsg == nil {
+		t.Fatalf("DeviceSentMessage edit extraction failed: got isEdit=%v, tid=%s, tchat=%s", isEdit, tid, tchat)
+	}
+
+	// 4. Fallback when whatsmeow already set IsEdit = true and unpacked Message
+	evt4 := &events.Message{
+		Info: types.MessageInfo{
+			ID: "ORIG_4",
+			MessageSource: types.MessageSource{
+				Chat: types.NewJID("user4", "s.whatsapp.net"),
+			},
+		},
+		IsEdit:  true,
+		Message: innerContent,
+	}
+	tid, tchat, newMsg, isEdit = extractEditProtocolInfo(evt4)
+	if !isEdit || tid != "ORIG_4" || newMsg != innerContent {
+		t.Fatalf("IsEdit fallback failed: got isEdit=%v, tid=%s, tchat=%s", isEdit, tid, tchat)
+	}
+}
+
+func TestExtractRevokeProtocolInfo(t *testing.T) {
+	// 1. Direct Revoke
+	evt1 := &events.Message{
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Key: &waCommon.MessageKey{
+					ID: proto.String("REVOKE_1"),
+				},
+				Type: waE2E.ProtocolMessage_REVOKE.Enum(),
+			},
+		},
+	}
+	id, isRevoke := extractRevokeProtocolInfo(evt1)
+	if !isRevoke || id != "REVOKE_1" {
+		t.Fatalf("Direct revoke failed: got isRevoke=%v, id=%s", isRevoke, id)
+	}
+
+	// 2. Wrapped in EphemeralMessage
+	evt2 := &events.Message{
+		Message: &waE2E.Message{
+			EphemeralMessage: &waE2E.FutureProofMessage{
+				Message: &waE2E.Message{
+					ProtocolMessage: &waE2E.ProtocolMessage{
+						Key: &waCommon.MessageKey{
+							ID: proto.String("REVOKE_2"),
+						},
+						Type: waE2E.ProtocolMessage_REVOKE.Enum(),
+					},
+				},
+			},
+		},
+	}
+	id, isRevoke = extractRevokeProtocolInfo(evt2)
+	if !isRevoke || id != "REVOKE_2" {
+		t.Fatalf("Ephemeral revoke failed: got isRevoke=%v, id=%s", isRevoke, id)
+	}
+}
+
+func TestExtractEditDetailsSecretEncryptedMessage(t *testing.T) {
+	adapter := &Adapter{}
+
+	// SecretEncryptedMessage for a 1-on-1 message edit
+	sem := &waE2E.SecretEncryptedMessage{
+		TargetMessageKey: &waCommon.MessageKey{
+			ID:        proto.String("ORIG_1ON1"),
+			RemoteJID: proto.String("123456789@s.whatsapp.net"),
+		},
+		SecretEncType: waE2E.SecretEncryptedMessage_MESSAGE_EDIT.Enum(),
+	}
+
+	evt := &events.Message{
+		Message: &waE2E.Message{
+			SecretEncryptedMessage: sem,
+		},
+	}
+
+	tid, tchat, _, isEdit := adapter.extractEditDetails(evt)
+	if !isEdit {
+		t.Fatalf("Expected isEdit=true for SecretEncryptedMessage")
+	}
+	if tid != "ORIG_1ON1" {
+		t.Fatalf("Expected targetID=ORIG_1ON1, got %s", tid)
+	}
+	if tchat != "123456789@s.whatsapp.net" {
+		t.Fatalf("Expected targetChat=123456789@s.whatsapp.net, got %s", tchat)
+	}
+}
+
+func TestDecryptSecretEditMessageFallback(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open err: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE whatsmeow_message_secrets (
+			our_jid TEXT,
+			chat_jid TEXT,
+			sender_jid TEXT,
+			message_id TEXT,
+			key BLOB,
+			PRIMARY KEY (our_jid, chat_jid, sender_jid, message_id)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create table err: %v", err)
+	}
+
+	targetID := "TARGET_123"
+	chatJID := "120363430194759319@g.us"
+	senderLID := "202808741634244@lid"
+	baseKey := []byte("01234567890123456789012345678901") // 32 bytes
+
+	_, err = db.Exec("INSERT INTO whatsmeow_message_secrets (our_jid, chat_jid, sender_jid, message_id, key) VALUES (?, ?, ?, ?, ?)",
+		"our_device@s.whatsapp.net", chatJID, senderLID, targetID, baseKey)
+	if err != nil {
+		t.Fatalf("insert err: %v", err)
+	}
+
+	// Prepare encrypted payload
+	inner := &waE2E.Message{
+		Conversation: proto.String("Decrypted fallback text!"),
+	}
+	plaintext, _ := proto.Marshal(inner)
+
+	useCaseSecret := make([]byte, 0, len(targetID)+len(senderLID)+len(senderLID)+len("Message Edit"))
+	useCaseSecret = append(useCaseSecret, targetID...)
+	useCaseSecret = append(useCaseSecret, senderLID...)
+	useCaseSecret = append(useCaseSecret, senderLID...)
+	useCaseSecret = append(useCaseSecret, "Message Edit"...)
+	derivedKey := hkdfutil.SHA256(baseKey, nil, useCaseSecret, 32)
+
+	iv := []byte("123456789012") // 12 bytes
+	ciphertext, err := gcmutil.Encrypt(derivedKey, iv, plaintext, nil)
+	if err != nil {
+		t.Fatalf("encrypt err: %v", err)
+	}
+
+	sem := &waE2E.SecretEncryptedMessage{
+		TargetMessageKey: &waCommon.MessageKey{
+			ID:        proto.String(targetID),
+			RemoteJID: proto.String(chatJID),
+		},
+		EncIV:         iv,
+		EncPayload:    ciphertext,
+		SecretEncType: waE2E.SecretEncryptedMessage_MESSAGE_EDIT.Enum(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			ID: "EDIT_STANZA_999",
+			MessageSource: types.MessageSource{
+				Chat:   types.NewJID("120363430194759319", "g.us"),
+				Sender: types.NewJID("202808741634244", "lid"),
+			},
+		},
+		Message: &waE2E.Message{
+			SecretEncryptedMessage: sem,
+		},
+	}
+
+	adapter := &Adapter{
+		localDB: db,
+	}
+
+	decrypted := adapter.decryptSecretEditMessage(evt, sem, targetID)
+	if decrypted == nil {
+		t.Fatalf("Expected decrypted message, got nil")
+	}
+
+	body, _, ok := extractMessageContent(decrypted)
+	if !ok || body != "Decrypted fallback text!" {
+		t.Fatalf("Expected 'Decrypted fallback text!', got %q (ok=%v)", body, ok)
+	}
+}
+

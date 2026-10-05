@@ -1533,6 +1533,18 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 			}
 		}
 
+		if msg.IsEdit && msg.QuotedText == "" && msg.QuotedID != "" && chat != nil {
+			for _, existing := range chat.Messages {
+				if existing.ID == msg.QuotedID {
+					msg.QuotedText = existing.Body
+					if msg.QuotedSender == "" {
+						msg.QuotedSender = existing.Sender
+					}
+					break
+				}
+			}
+		}
+
 		isPinned := m.isPinned(msg.ChatID, msg.ChatName)
 		isMuted := m.isMuted(msg.ChatID, msg.ChatName, msg.SenderName)
 		isArchived := false
@@ -1619,9 +1631,22 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		isArchived = m.adapter.IsChatArchived(msg.ChatID)
 	}
 
+	// Determine if message belongs to the currently active chat
+	userActive := strings.Split(strings.Split(m.activeChatID, "@")[0], ":")[0]
+	userMsg := strings.Split(strings.Split(msg.ChatID, "@")[0], ":")[0]
+	isForActiveChat := (m.activeChatID == msg.ChatID) || (userActive != "" && userActive == userMsg)
+	if !isForActiveChat && m.view == ViewChat && msg.IsEdit && msg.QuotedID != "" {
+		for _, prev := range m.activeMsgs {
+			if prev.ID == msg.QuotedID {
+				isForActiveChat = true
+				break
+			}
+		}
+	}
+
 	// 1. Check if hidden
 	if m.isHidden(msg.ChatID, msg.ChatName, msg.SenderName) {
-		if m.view == ViewChat && m.activeChatID == msg.ChatID {
+		if m.view == ViewChat && isForActiveChat {
 			m.activeMsgs = append(m.activeMsgs, msg)
 			m.chatScrollOffset = 0
 			go func() {
@@ -1631,8 +1656,38 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		return
 	}
 
+	// If message is an edit from an official WhatsApp client, link it as a reply to the original message
+	if msg.IsEdit {
+		for i, prev := range m.activeMsgs {
+			if prev.ID == msg.QuotedID {
+				if msg.QuotedText == "" {
+					msg.QuotedText = prev.Body
+				}
+				if msg.QuotedSender == "" {
+					msg.QuotedSender = prev.Sender
+				}
+				m.activeMsgs[i].Body = msg.Body
+				break
+			}
+		}
+		if chat, ok := m.unreadChats[msg.ChatID]; ok && chat != nil {
+			for i, prev := range chat.Messages {
+				if prev.ID == msg.QuotedID {
+					if msg.QuotedText == "" {
+						msg.QuotedText = prev.Body
+					}
+					if msg.QuotedSender == "" {
+						msg.QuotedSender = prev.Sender
+					}
+					chat.Messages[i].Body = msg.Body
+					break
+				}
+			}
+		}
+	}
+
 	// 2. If currently viewing this chat, update if already present or append directly
-	if m.view == ViewChat && m.activeChatID == msg.ChatID {
+	if m.view == ViewChat && isForActiveChat {
 		foundInActive := false
 		for i := range m.activeMsgs {
 			if m.activeMsgs[i].ID == msg.ID {
@@ -3429,6 +3484,10 @@ func (m *Model) renderUnreadListView() []string {
 					}
 				}
 
+				if last.IsEdit {
+					clean = "[EDIT] " + clean
+				}
+
 				lastMsg = clean
 			} else if chat.IsPinned {
 				lastMsg = "(pinned · press enter to chat)"
@@ -3694,13 +3753,17 @@ func (m *Model) renderChatView() []string {
 				}
 				if quoteContent == "" {
 					if quoteSender != "" {
-						if msg.Type == domain.MessageTypeReaction {
+						if msg.IsEdit {
+							quoteContent = quoteSender
+						} else if msg.Type == domain.MessageTypeReaction {
 							quoteContent = "Reacted to " + quoteSender
 						} else {
 							quoteContent = "Replying to " + quoteSender
 						}
 					} else {
-						if msg.Type == domain.MessageTypeReaction {
+						if msg.IsEdit {
+							quoteContent = "message"
+						} else if msg.Type == domain.MessageTypeReaction {
 							quoteContent = "[Reacted to message]"
 						} else {
 							quoteContent = "[Replying to message]"
@@ -3715,7 +3778,14 @@ func (m *Model) renderChatView() []string {
 				if len(quotePreview) > maxQuoteW {
 					quotePreview = quotePreview[:maxQuoteW-3] + "..."
 				}
-				quoteLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Italic(true).Render("┌─ " + quotePreview)
+				var quoteLine string
+				if msg.IsEdit {
+					cleanText := strings.TrimPrefix(quotePreview, "[EDIT] ")
+					editTag := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("[EDIT] ")
+					quoteLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render("┌─ ") + editTag + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Italic(true).Render(cleanText)
+				} else {
+					quoteLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Italic(true).Render("┌─ " + quotePreview)
+				}
 				msgLines = append(msgLines, bodyPrefix+quoteLine)
 			}
 

@@ -71,6 +71,19 @@ func TestFormatNotification(t *testing.T) {
 	if !strings.HasSuffix(body4, "...") {
 		t.Errorf("Expected truncated body to end with '...', got %q", body4)
 	}
+
+	// 5. Edited message -> should prefix [EDIT]
+	msgEdit := domain.Message{
+		ChatID:     "123@s.whatsapp.net",
+		Sender:     "123@s.whatsapp.net",
+		SenderName: "Alice",
+		Body:       "Corrected text",
+		IsEdit:     true,
+	}
+	_, bodyEdit := FormatNotification(msgEdit)
+	if !strings.HasPrefix(bodyEdit, "[EDIT] ") {
+		t.Errorf("Expected body to start with '[EDIT] ', got %q", bodyEdit)
+	}
 }
 
 func TestDispatchRules(t *testing.T) {

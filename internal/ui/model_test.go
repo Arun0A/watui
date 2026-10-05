@@ -4381,3 +4381,104 @@ func TestMultiSelect_SaveAttachmentsAndText(t *testing.T) {
 		t.Errorf("Unexpected previewStatus: %q", model.previewStatus)
 	}
 }
+
+func TestIncomingMessageEditReflectsAsReplyWithEditTag(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+	model.view = ViewChat
+	model.activeChatID = "alice@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	// 1. Initial message from Alice
+	m1 := domain.Message{
+		ID:         "M1",
+		ChatID:     "alice@s.whatsapp.net",
+		ChatName:   "Alice",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Body:       "See you at 5pm",
+		Timestamp:  time.Now().Add(-5 * time.Minute),
+	}
+	model.handleIncomingMessage(m1)
+
+	if len(model.activeMsgs) != 1 {
+		t.Fatalf("Expected 1 active message, got %d", len(model.activeMsgs))
+	}
+
+	// 2. Incoming edit from official WhatsApp client
+	m1Edit := domain.Message{
+		ID:         "M1_EDIT_001",
+		ChatID:     "alice@s.whatsapp.net",
+		ChatName:   "Alice",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Body:       "See you at 6pm",
+		Timestamp:  time.Now(),
+		QuotedID:   "M1",
+		IsEdit:     true,
+	}
+	model.handleIncomingMessage(m1Edit)
+
+	// 3. Verify that the edit is reflected by appending a reply message to activeMsgs
+	if len(model.activeMsgs) != 2 {
+		t.Fatalf("Expected 2 active messages (original + edit reply), got %d", len(model.activeMsgs))
+	}
+
+	// Original message updated
+	if model.activeMsgs[0].Body != "See you at 6pm" {
+		t.Errorf("Expected original message body updated to 'See you at 6pm', got %q", model.activeMsgs[0].Body)
+	}
+
+	// Edit reply message has quoted text captured
+	editMsg := model.activeMsgs[1]
+	if editMsg.QuotedText != "See you at 5pm" {
+		t.Errorf("Expected edit reply QuotedText to be 'See you at 5pm', got %q", editMsg.QuotedText)
+	}
+	if editMsg.Body != "See you at 6pm" {
+		t.Errorf("Expected edit reply Body to be 'See you at 6pm', got %q", editMsg.Body)
+	}
+
+	// 4. Verify rendered chat view mentions [EDIT] in quote line
+	view := model.renderChatView()
+	joinedView := strings.Join(view, "\n")
+	if !strings.Contains(joinedView, "[EDIT] ") || !strings.Contains(joinedView, "See you at 5pm") {
+		t.Errorf("Expected rendered chat view to show '[EDIT] ... See you at 5pm', got:\n%s", joinedView)
+	}
+	if !strings.Contains(joinedView, "See you at 6pm") {
+		t.Errorf("Expected rendered chat view to show new text 'See you at 6pm', got:\n%s", joinedView)
+	}
+
+	// 5. Test unread list inbox snippet shows [EDIT] when chat is inactive
+	model.view = ViewUnreadList
+	m2 := domain.Message{
+		ID:         "M2",
+		ChatID:     "bob@s.whatsapp.net",
+		ChatName:   "Bob",
+		Sender:     "bob@s.whatsapp.net",
+		SenderName: "Bob",
+		Body:       "Meeting at noon",
+		Timestamp:  time.Now().Add(-2 * time.Minute),
+	}
+	model.handleIncomingMessage(m2)
+
+	m2Edit := domain.Message{
+		ID:         "M2_EDIT_001",
+		ChatID:     "bob@s.whatsapp.net",
+		ChatName:   "Bob",
+		Sender:     "bob@s.whatsapp.net",
+		SenderName: "Bob",
+		Body:       "Meeting at 1pm",
+		Timestamp:  time.Now(),
+		QuotedID:   "M2",
+		IsEdit:     true,
+	}
+	model.handleIncomingMessage(m2Edit)
+
+	unreadView := model.renderUnreadListView()
+	joinedUnread := strings.Join(unreadView, "\n")
+	if !strings.Contains(joinedUnread, "[EDIT]") {
+		t.Errorf("Expected unread inbox view to display '[EDIT]', got:\n%s", joinedUnread)
+	}
+}
