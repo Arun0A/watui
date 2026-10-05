@@ -41,6 +41,7 @@ var allKeybindGroups = []keybindGroup{
 			{key: "Shift+A", desc: "Toggle chat archive status (archive / unarchive)"},
 			{key: "Shift+M", desc: "Toggle official WhatsApp global mute (1h, 8h, always)"},
 			{key: "m", desc: "Toggle local mute in watui.yaml"},
+			{key: "p", desc: "Toggle local pin in watui.yaml"},
 			{key: "Alt+P", desc: "Quick-preview latest media/doc without opening"},
 			{key: "n / c", desc: "Start new chat (open contact & group picker)"},
 			{key: "q", desc: "Quit application"},

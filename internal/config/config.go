@@ -1370,4 +1370,191 @@ func (c *Config) RemoveMuteChat(chatID string, chatNames ...string) error {
 	return os.WriteFile(targetPath, []byte(out), 0644)
 }
 
+// AddPinChat adds a chat JID to the in-memory Pin list and updates the config file on disk.
+func (c *Config) AddPinChat(chatID string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("cannot pin empty chat ID")
+	}
+
+	// Update in-memory list if not already present
+	alreadyPresent := false
+	for _, p := range append(c.Pin, c.Pinned...) {
+		if strings.TrimSpace(p) == chatID {
+			alreadyPresent = true
+			break
+		}
+	}
+	if !alreadyPresent {
+		c.Pin = append(c.Pin, chatID)
+	}
+
+	targetPath := c.SourcePath
+	if targetPath == "" {
+		for _, p := range defaultCandidatePaths() {
+			if _, err := os.Stat(p); err == nil {
+				targetPath = p
+				break
+			}
+		}
+		if targetPath == "" {
+			targetPath = "watui.yaml"
+		}
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			content := fmt.Sprintf("pin:\n  - %q\n", chatID)
+			return os.WriteFile(targetPath, []byte(content), 0644)
+		}
+		return fmt.Errorf("failed to read config file %q: %w", targetPath, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	newLines := make([]string, 0, len(lines)+2)
+
+	pinLineRegex := regexp.MustCompile(`^(pin|pinned):\s*(#.*)?$`)
+	commentedPinRegex := regexp.MustCompile(`^#\s*(pin|pinned):\s*$`)
+
+	foundActivePin := false
+	inserted := false
+
+	// First check if an active "pin:" already exists
+	for i, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if pinLineRegex.MatchString(trimmed) {
+			foundActivePin = true
+			newLines = append(newLines, line)
+			foundInFile := false
+			for j := i + 1; j < len(lines); j++ {
+				t := strings.TrimSpace(strings.TrimRight(lines[j], "\r"))
+				if strings.HasPrefix(t, "-") {
+					val := strings.TrimSpace(strings.TrimPrefix(t, "-"))
+					val = strings.Trim(val, `"'`)
+					if val == chatID {
+						foundInFile = true
+						break
+					}
+				} else if t != "" && !strings.HasPrefix(t, "#") {
+					break
+				}
+			}
+			if !foundInFile {
+				newLines = append(newLines, fmt.Sprintf("  - %q", chatID))
+			}
+			inserted = true
+			continue
+		}
+		newLines = append(newLines, line)
+	}
+
+	if !foundActivePin {
+		newLines = make([]string, 0, len(lines)+2)
+		for _, line := range lines {
+			trimmed := strings.TrimRight(line, "\r")
+			if !inserted && commentedPinRegex.MatchString(trimmed) {
+				newLines = append(newLines, "pin:")
+				newLines = append(newLines, fmt.Sprintf("  - %q", chatID))
+				inserted = true
+				continue
+			}
+			newLines = append(newLines, line)
+		}
+	}
+
+	if !inserted {
+		newLines = append([]string{"pin:", fmt.Sprintf("  - %q", chatID), ""}, newLines...)
+	}
+
+	out := strings.Join(newLines, "\n")
+	return os.WriteFile(targetPath, []byte(out), 0644)
+}
+
+// RemovePinChat removes a chat JID (and matching names) from the in-memory Pin list and updates the config file on disk.
+func (c *Config) RemovePinChat(chatID string, chatNames ...string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("cannot unpin empty chat ID")
+	}
+
+	// Update in-memory lists
+	var newPin []string
+	for _, p := range c.Pin {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == chatID || MatchTarget(trimmed, chatID, chatNames...) {
+			continue
+		}
+		newPin = append(newPin, p)
+	}
+	c.Pin = newPin
+
+	var newPinned []string
+	for _, p := range c.Pinned {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == chatID || MatchTarget(trimmed, chatID, chatNames...) {
+			continue
+		}
+		newPinned = append(newPinned, p)
+	}
+	c.Pinned = newPinned
+
+	targetPath := c.SourcePath
+	if targetPath == "" {
+		for _, p := range defaultCandidatePaths() {
+			if _, err := os.Stat(p); err == nil {
+				targetPath = p
+				break
+			}
+		}
+		if targetPath == "" {
+			targetPath = "watui.yaml"
+		}
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read config file %q: %w", targetPath, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	newLines := make([]string, 0, len(lines))
+
+	pinSectionRegex := regexp.MustCompile(`^(pin|pinned):\s*(#.*)?$`)
+	inPinSection := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		trimmedSpace := strings.TrimSpace(trimmed)
+
+		if pinSectionRegex.MatchString(trimmed) {
+			inPinSection = true
+			newLines = append(newLines, line)
+			continue
+		}
+
+		if inPinSection {
+			if strings.HasPrefix(trimmedSpace, "-") {
+				val := strings.TrimSpace(strings.TrimPrefix(trimmedSpace, "-"))
+				val = strings.Trim(val, `"'`)
+				if val == chatID || MatchTarget(val, chatID, chatNames...) {
+					// Drop this line
+					continue
+				}
+			} else if trimmedSpace != "" && !strings.HasPrefix(trimmedSpace, "#") {
+				inPinSection = false
+			}
+		}
+
+		newLines = append(newLines, line)
+	}
+
+	out := strings.Join(newLines, "\n")
+	return os.WriteFile(targetPath, []byte(out), 0644)
+}
+
+
 

@@ -2001,6 +2001,64 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 
+	case "p": // toggle local watui.yaml pin
+		m.previewStatus = ""
+		m.confirmSave = false
+		m.confirmDocAction = false
+		m.promptOpenWith = false
+		m.pendingDocMsg = nil
+		m.promptGlobalMute = false
+		if len(m.chatOrder) > 0 && m.cursor < len(m.chatOrder) {
+			chatID := m.chatOrder[m.cursor]
+			chat := m.unreadChats[chatID]
+			if chat != nil && m.cfg != nil {
+				m.localMuteToggled = true
+				allNames := m.getChatMatchNames(chatID, chat.Name)
+				if m.cfg.IsPinned(chatID, allNames...) {
+					if err := m.cfg.RemovePinChat(chatID, allNames...); err != nil {
+						m.previewStatus = fmt.Sprintf("Error unpinning in config: %v", err)
+					} else {
+						m.mu.Lock()
+						chat.IsPinned = false
+						if chat.UnreadCount == 0 && len(chat.Messages) == 0 {
+							delete(m.unreadChats, chatID)
+						}
+						m.sortChatOrderLocked()
+						m.cursor = 0
+						for idx, id := range m.chatOrder {
+							if id == chatID {
+								m.cursor = idx
+								break
+							}
+						}
+						if m.cursor >= len(m.chatOrder) && len(m.chatOrder) > 0 {
+							m.cursor = len(m.chatOrder) - 1
+						}
+						m.mu.Unlock()
+						m.previewStatus = fmt.Sprintf("Unpinned %s in watui.yaml", chat.Name)
+					}
+				} else {
+					if err := m.cfg.AddPinChat(chatID); err != nil {
+						m.previewStatus = fmt.Sprintf("Error pinning in config: %v", err)
+					} else {
+						m.mu.Lock()
+						chat.IsPinned = true
+						m.sortChatOrderLocked()
+						m.cursor = 0
+						for idx, id := range m.chatOrder {
+							if id == chatID {
+								m.cursor = idx
+								break
+							}
+						}
+						m.mu.Unlock()
+						m.previewStatus = fmt.Sprintf("Pinned %s in watui.yaml", chat.Name)
+					}
+				}
+			}
+		}
+		return nil
+
 	case "enter", "l", "right": // open chat
 		m.previewStatus = ""
 		m.confirmSave = false

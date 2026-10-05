@@ -139,6 +139,7 @@ nix develop github:Arun0A/watui
 | <kbd>Shift</kbd>+<kbd>a</kbd> / <kbd>A</kbd> | Archive / Unarchive selected conversation |
 | <kbd>Shift</kbd>+<kbd>m</kbd> / <kbd>M</kbd> | Toggle global mute (1h, 8h, always) |
 | <kbd>m</kbd> | Toggle local mute in `watui.yaml` |
+| <kbd>p</kbd> | Toggle local pin in `watui.yaml` |
 | <kbd>n</kbd> | Start a new chat (search all contacts & groups) |
 | <kbd>Ctrl</kbd>+<kbd>h</kbd> / <kbd>Ctrl</kbd>+<kbd>/</kbd> | Open all keybinds menu (also <kbd>F1</kbd>) |
 | <kbd>q</kbd> / <kbd>Ctrl</kbd>+<kbd>c</kbd> | Quit watui |

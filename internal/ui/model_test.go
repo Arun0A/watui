@@ -4668,3 +4668,85 @@ theme: dark
 		t.Errorf("Expected previewStatus to mention 'permanently globally', got %q", model.previewStatus)
 	}
 }
+
+func TestUnreadListPinKeybinding(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "watui.yaml")
+	initialContent := `# Initial config
+theme: dark
+# pin:
+#   - 12345@s.whatsapp.net
+`
+	if err := os.WriteFile(yamlPath, []byte(initialContent), 0644); err != nil {
+		t.Fatalf("Failed to write initial yaml: %v", err)
+	}
+
+	cfg, err := config.Load(yamlPath)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	mock := &mockAdapter{}
+	model := NewModel(context.Background(), mock, cfg)
+	model.view = ViewUnreadList
+	model.width = 100
+	model.height = 30
+
+	testChatID := "alice@s.whatsapp.net"
+	model.handleIncomingMessage(domain.Message{
+		ID:         "M1",
+		ChatID:     testChatID,
+		ChatName:   "Alice",
+		Sender:     testChatID,
+		SenderName: "Alice",
+		Body:       "Hey there",
+		Timestamp:  time.Now(),
+	})
+
+	if len(model.chatOrder) == 0 {
+		t.Fatalf("Expected chatOrder to have 1 chat")
+	}
+
+	// 1. Press 'p' to pin
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+
+	chat := model.unreadChats[testChatID]
+	if chat == nil || !chat.IsPinned {
+		t.Errorf("Expected chat.IsPinned to be true after pressing 'p'")
+	}
+	if !strings.Contains(model.previewStatus, "Pinned Alice in watui.yaml") {
+		t.Errorf("Expected previewStatus to mention 'Pinned Alice in watui.yaml', got %q", model.previewStatus)
+	}
+	if !model.LocalMuteToggled() {
+		t.Errorf("Expected LocalMuteToggled() to be true")
+	}
+
+	// Verify disk
+	diskContent, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("Failed to read updated yaml: %v", err)
+	}
+	if !strings.Contains(string(diskContent), testChatID) {
+		t.Errorf("Expected yaml on disk to contain %s, got:\n%s", testChatID, string(diskContent))
+	}
+
+	// 2. Press 'p' again to unpin
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+
+	if chat.IsPinned {
+		t.Errorf("Expected chat.IsPinned to be false after pressing 'p' again")
+	}
+	if !strings.Contains(model.previewStatus, "Unpinned Alice in watui.yaml") {
+		t.Errorf("Expected previewStatus to mention 'Unpinned Alice in watui.yaml', got %q", model.previewStatus)
+	}
+
+	// Verify disk no longer has chatID
+	diskContent, err = os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("Failed to read updated yaml after unpin: %v", err)
+	}
+	if strings.Contains(string(diskContent), testChatID) {
+		t.Errorf("Expected yaml on disk to not contain %s, got:\n%s", testChatID, string(diskContent))
+	}
+}
+
