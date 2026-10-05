@@ -877,3 +877,53 @@ func TestAddMuteChat(t *testing.T) {
 	}
 }
 
+func TestAddAndRemovePinChat(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlFile := filepath.Join(tmpDir, "pin_test.yaml")
+	err := os.WriteFile(yamlFile, []byte("# 1. Pinned chats\n# pin:\n#   - old\ntheme: dark\n"), 0644)
+	if err != nil {
+		t.Fatalf("write err: %v", err)
+	}
+
+	cfg, err := Load(yamlFile)
+	if err != nil {
+		t.Fatalf("load err: %v", err)
+	}
+
+	testJID := "alice@s.whatsapp.net"
+	err = cfg.AddPinChat(testJID)
+	if err != nil {
+		t.Fatalf("AddPinChat err: %v", err)
+	}
+
+	if !cfg.IsPinned(testJID, "Alice") {
+		t.Errorf("Expected chat to be pinned in memory")
+	}
+
+	reloaded, err := Load(yamlFile)
+	if err != nil {
+		t.Fatalf("reload err: %v", err)
+	}
+	if !reloaded.IsPinned(testJID, "Alice") {
+		t.Errorf("Expected chat to be pinned on disk")
+	}
+
+	// Remove pin
+	err = reloaded.RemovePinChat(testJID, "Alice")
+	if err != nil {
+		t.Fatalf("RemovePinChat err: %v", err)
+	}
+	if reloaded.IsPinned(testJID, "Alice") {
+		t.Errorf("Expected chat to be unpinned in memory")
+	}
+
+	reloaded2, err := Load(yamlFile)
+	if err != nil {
+		t.Fatalf("reload2 err: %v", err)
+	}
+	if reloaded2.IsPinned(testJID, "Alice") {
+		t.Errorf("Expected chat to be unpinned on disk")
+	}
+}
+
+
