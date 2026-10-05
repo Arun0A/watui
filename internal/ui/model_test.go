@@ -4749,3 +4749,280 @@ theme: dark
 		t.Errorf("Expected yaml on disk to not contain %s, got:\n%s", testChatID, string(diskContent))
 	}
 }
+
+func TestDefaultDownloadDirConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	customDownloadDir := filepath.Join(tmpDir, "MyCustomDownloads")
+	cfg := &config.Config{
+		DownloadDir: customDownloadDir,
+	}
+
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	// Mock cached media file
+	mockMediaFile := filepath.Join(tmpDir, "msg12345678_photo.jpg")
+	_ = os.WriteFile(mockMediaFile, []byte("photo-data"), 0644)
+
+	destPath, err := model.saveToDownloads(mockMediaFile)
+	if err != nil {
+		t.Fatalf("Failed to save to custom downloads: %v", err)
+	}
+
+	expectedSavedPath := filepath.Join(customDownloadDir, "photo.jpg")
+	if !strings.HasSuffix(destPath, "photo.jpg") {
+		t.Errorf("Expected destPath ending in photo.jpg, got %s", destPath)
+	}
+	if _, err := os.Stat(expectedSavedPath); os.IsNotExist(err) {
+		t.Errorf("Expected file saved at %s", expectedSavedPath)
+	}
+}
+
+func TestShiftSSaveWithFilePicker(t *testing.T) {
+	tmpDir := t.TempDir()
+	pickerTargetDir := filepath.Join(tmpDir, "PickedDirectory")
+	_ = os.MkdirAll(pickerTargetDir, 0755)
+
+	cfg := &config.Config{
+		FilePicker: "echo " + pickerTargetDir,
+	}
+
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	// Create a media message
+	mediaMsg := domain.Message{
+		ID:        "media1",
+		ChatID:    model.activeChatID,
+		Body:      "[Image: picture.png]",
+		Type:      domain.MessageTypeImage,
+		IsFromMe:  false,
+		Timestamp: time.Now(),
+	}
+	model.activeMsgs = []domain.Message{mediaMsg}
+	model.selectedMsgIdx = 0
+
+	// 1. In hover mode, press 'Shift+s' / 'S'
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil tea.Cmd on 'S' in hover mode")
+	}
+
+	// 2. Simulate saveLocationPickedMsg
+	resMsg, _ := model.Update(saveLocationPickedMsg{
+		ChosenPath: pickerTargetDir,
+		SaveTarget: saveTargetData{
+			Mode:    "single_msg",
+			Message: mediaMsg,
+		},
+	})
+	updated := resMsg.(*Model)
+	if !strings.Contains(updated.previewStatus, "Downloading & saving image") {
+		t.Errorf("Expected previewStatus to reflect download, got %q", updated.previewStatus)
+	}
+
+	// 3. Test confirmSave mode with Shift+s
+	cachedFile := filepath.Join(tmpDir, "previewed.jpg")
+	_ = os.WriteFile(cachedFile, []byte("previewed-bytes"), 0644)
+	model.confirmSave = true
+	model.pendingSavePath = cachedFile
+
+	res, shiftSCmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	model = res.(*Model)
+	if shiftSCmd == nil {
+		t.Fatalf("Expected non-nil cmd on 'S' during confirmSave")
+	}
+	if model.confirmSave {
+		t.Errorf("Expected confirmSave to be false after 'S'")
+	}
+
+	// 4. Test cancel on picker
+	resMsg, _ = model.Update(saveLocationPickedMsg{
+		ChosenPath: "",
+		SaveTarget: saveTargetData{Mode: "cached_file", CachedPath: cachedFile},
+	})
+	updated = resMsg.(*Model)
+	if updated.previewStatus != "Save cancelled" {
+		t.Errorf("Expected 'Save cancelled', got %q", updated.previewStatus)
+	}
+}
+
+func TestCreateSavePlaceholderFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Create initial placeholder
+	p1, err := createSavePlaceholderFile(tmpDir, "report.pdf")
+	if err != nil {
+		t.Fatalf("createSavePlaceholderFile failed: %v", err)
+	}
+	if filepath.Base(p1) != "report.pdf" {
+		t.Errorf("Expected report.pdf, got %s", filepath.Base(p1))
+	}
+	content, err := os.ReadFile(p1)
+	if err != nil {
+		t.Fatalf("Failed to read placeholder file: %v", err)
+	}
+	if !strings.Contains(string(content), "watui save instructions") {
+		t.Errorf("Expected placeholder file to contain save instructions, got %q", string(content))
+	}
+
+	// 2. Second file with same name avoids collision by appending _1
+	p2, err := createSavePlaceholderFile(tmpDir, "report.pdf")
+	if err != nil {
+		t.Fatalf("createSavePlaceholderFile failed on collision: %v", err)
+	}
+	if filepath.Base(p2) != "report.pdf_1" && filepath.Base(p2) != "report_1.pdf" {
+		t.Errorf("Expected non-conflicting filename for collision, got %s", filepath.Base(p2))
+	}
+}
+
+func TestBuildTerminalSavePickerCmd(t *testing.T) {
+	// 1. Single file save with Yazi
+	cmd, outPath, cwdPath, err := buildTerminalSavePickerCmd("yazi", "yazi", "/tmp/save/photo.jpg", false)
+	if err != nil {
+		t.Fatalf("buildTerminalSavePickerCmd failed: %v", err)
+	}
+	defer func() {
+		_ = os.Remove(outPath)
+		if cwdPath != "" {
+			_ = os.Remove(cwdPath)
+		}
+	}()
+
+	if cmd.Path != "yazi" && !strings.HasSuffix(cmd.Path, "yazi") {
+		t.Errorf("Expected cmd to execute yazi, got %q", cmd.Path)
+	}
+	// Check args contain --chooser-file and the target file path
+	hasChooser := false
+	hasTarget := false
+	for _, arg := range cmd.Args {
+		if strings.HasPrefix(arg, "--chooser-file=") {
+			hasChooser = true
+		}
+		if arg == "/tmp/save/photo.jpg" {
+			hasTarget = true
+		}
+	}
+	if !hasChooser || !hasTarget {
+		t.Errorf("Expected yazi args to contain --chooser-file and target file, got %v", cmd.Args)
+	}
+
+	// 2. Directory save with Yazi (multi messages)
+	cmdDir, outDir, cwdDir, err := buildTerminalSavePickerCmd("yazi", "yazi", "/tmp/save", true)
+	if err != nil {
+		t.Fatalf("buildTerminalSavePickerCmd directory failed: %v", err)
+	}
+	defer func() {
+		_ = os.Remove(outDir)
+		if cwdDir != "" {
+			_ = os.Remove(cwdDir)
+		}
+	}()
+	hasCwdFile := false
+	for _, arg := range cmdDir.Args {
+		if strings.HasPrefix(arg, "--cwd-file=") {
+			hasCwdFile = true
+		}
+	}
+	if !hasCwdFile {
+		t.Errorf("Expected yazi directory mode to contain --cwd-file, got %v", cmdDir.Args)
+	}
+
+	// 3. Wrapper script format (xdg-desktop-portal-termfilechooser style)
+	wrapperCmd, outWrap, _, err := buildTerminalSavePickerCmd("sh", "yazi-wrapper.sh", "/tmp/save/photo.jpg", false)
+	if err != nil {
+		t.Fatalf("buildTerminalSavePickerCmd wrapper failed: %v", err)
+	}
+	defer func() { _ = os.Remove(outWrap) }()
+	// Check wrapper arguments: multiple=0, directory=0, save=1
+	foundSaveFlag := false
+	for _, a := range wrapperCmd.Args {
+		if a == "1" {
+			foundSaveFlag = true
+		}
+	}
+	if !foundSaveFlag {
+		t.Errorf("Expected wrapper script args to contain save flag '1', got %v", wrapperCmd.Args)
+	}
+}
+
+func TestSaveLocationPickedDirectFileAndPlaceholderCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+	sourceFile := filepath.Join(tmpDir, "source.jpg")
+	_ = os.WriteFile(sourceFile, []byte("real-image-data"), 0644)
+
+	placeholderFile := filepath.Join(tmpDir, "placeholder.jpg")
+	_ = os.WriteFile(placeholderFile, []byte("instructions"), 0644)
+
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+
+	// 1. Chosen path is the placeholder file: placeholder is overwritten with source content
+	resMsg, _ := model.Update(saveLocationPickedMsg{
+		ChosenPath: placeholderFile,
+		SaveTarget: saveTargetData{
+			Mode:            "cached_file",
+			CachedPath:      sourceFile,
+			PlaceholderPath: placeholderFile,
+		},
+	})
+	m := resMsg.(*Model)
+	if !strings.Contains(m.previewStatus, "Saved to") {
+		t.Errorf("Expected 'Saved to', got %q", m.previewStatus)
+	}
+	data, _ := os.ReadFile(placeholderFile)
+	if string(data) != "real-image-data" {
+		t.Errorf("Expected placeholder file to be overwritten with real-image-data, got %q", string(data))
+	}
+
+	// 2. Chosen path is a DIFFERENT file (user moved or selected another file): placeholder is cleaned up
+	placeholder2 := filepath.Join(tmpDir, "placeholder2.jpg")
+	_ = os.WriteFile(placeholder2, []byte("instructions2"), 0644)
+	chosenFile := filepath.Join(tmpDir, "destination.jpg")
+
+	resMsg, _ = model.Update(saveLocationPickedMsg{
+		ChosenPath: chosenFile,
+		SaveTarget: saveTargetData{
+			Mode:            "cached_file",
+			CachedPath:      sourceFile,
+			PlaceholderPath: placeholder2,
+		},
+	})
+	m = resMsg.(*Model)
+	if !strings.Contains(m.previewStatus, "Saved to") {
+		t.Errorf("Expected 'Saved to', got %q", m.previewStatus)
+	}
+	if _, err := os.Stat(placeholder2); !os.IsNotExist(err) {
+		t.Errorf("Expected old placeholder %s to be removed, but still exists", placeholder2)
+	}
+	data2, _ := os.ReadFile(chosenFile)
+	if string(data2) != "real-image-data" {
+		t.Errorf("Expected destination file to contain real-image-data, got %q", string(data2))
+	}
+
+	// 3. User cancels save (ChosenPath is empty): placeholder is removed
+	placeholder3 := filepath.Join(tmpDir, "placeholder3.jpg")
+	_ = os.WriteFile(placeholder3, []byte("instructions3"), 0644)
+
+	resMsg, _ = model.Update(saveLocationPickedMsg{
+		ChosenPath: "",
+		SaveTarget: saveTargetData{
+			Mode:            "cached_file",
+			CachedPath:      sourceFile,
+			PlaceholderPath: placeholder3,
+		},
+	})
+	m = resMsg.(*Model)
+	if m.previewStatus != "Save cancelled" {
+		t.Errorf("Expected 'Save cancelled', got %q", m.previewStatus)
+	}
+	if _, err := os.Stat(placeholder3); !os.IsNotExist(err) {
+		t.Errorf("Expected placeholder %s to be deleted on cancel, but still exists", placeholder3)
+	}
+}

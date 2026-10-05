@@ -154,5 +154,10 @@
 #
 # clear_on_exit: false
 
-
-
+# 16. Default Download Directory
+# Directory where downloaded media, attachments, and files are saved when pressing 's'.
+# Pressing 'Shift+s' / 'S' lets you choose the save location interactively with file_picker.
+# Supports '~' expansion (e.g. "~/Downloads", "~/Media", "/data/whatsapp").
+# Defaults to your operating system's standard Downloads folder (~/Downloads or $XDG_DOWNLOAD_DIR).
+#
+# download_dir: "~/Downloads"

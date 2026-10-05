@@ -198,7 +198,21 @@ type multiMessagesSavedMsg struct {
 	MediaCount int
 	TextCount  int
 	TextPath   string
+	DestDir    string
 	Err        error
+}
+
+type saveLocationPickedMsg struct {
+	ChosenPath string
+	SaveTarget saveTargetData
+}
+
+type saveTargetData struct {
+	Mode            string // "cached_file", "single_msg", "multi_msgs"
+	CachedPath      string
+	Message         domain.Message
+	MultiMsgs       []domain.Message
+	PlaceholderPath string
 }
 
 // NewModel initializes the TUI model.
@@ -804,7 +818,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			parts = append(parts, fmt.Sprintf("%d text message(s)", msg.TextCount))
 		}
 		if len(parts) > 0 {
-			m.previewStatus = fmt.Sprintf("Saved %s to Downloads", strings.Join(parts, " and "))
+			destDisplay := "Downloads"
+			if msg.DestDir != "" && ((m.cfg != nil && m.cfg.GetDownloadDir() != "" && msg.DestDir == m.cfg.GetDownloadDir()) || msg.DestDir != m.getDownloadDir()) {
+				home, _ := os.UserHomeDir()
+				destDisplay = msg.DestDir
+				if home != "" && strings.HasPrefix(msg.DestDir, home) {
+					destDisplay = "~" + strings.TrimPrefix(msg.DestDir, home)
+				}
+			}
+			m.previewStatus = fmt.Sprintf("Saved %s to %s", strings.Join(parts, " and "), destDisplay)
 		} else {
 			m.previewStatus = "Nothing to save"
 		}
@@ -822,7 +844,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		if err := m.launchViewer(msg.Cmd, msg.Path); err != nil {
-			destPath, saveErr := saveToDownloads(msg.Path)
+			destPath, saveErr := m.saveToDownloads(msg.Path)
 			if saveErr != nil {
 				return m, func() tea.Msg {
 					return mediaPreviewErrMsg{Err: fmt.Errorf("open failed (%v) and save failed (%w)", err, saveErr)}
@@ -856,6 +878,64 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewStatus = "No file picker found"
 		} else {
 			m.previewStatus = "File picker failed"
+		}
+		return m, tea.ClearScreen
+
+	case saveLocationPickedMsg:
+		if msg.ChosenPath == "" {
+			if msg.SaveTarget.PlaceholderPath != "" {
+				_ = os.Remove(msg.SaveTarget.PlaceholderPath)
+			}
+			m.previewStatus = "Save cancelled"
+			return m, tea.ClearScreen
+		}
+
+		cleanChosen := config.ExpandHome(strings.TrimSpace(msg.ChosenPath))
+		if msg.SaveTarget.PlaceholderPath != "" && msg.SaveTarget.PlaceholderPath != cleanChosen {
+			_ = os.Remove(msg.SaveTarget.PlaceholderPath)
+		}
+
+		fi, statErr := os.Stat(cleanChosen)
+		isDir := (statErr == nil && fi.IsDir()) || strings.HasSuffix(cleanChosen, "/") || strings.HasSuffix(cleanChosen, string(filepath.Separator))
+
+		if isDir {
+			destDir := cleanChosen
+			preferredFile := getTargetFileName(msg.SaveTarget)
+			switch msg.SaveTarget.Mode {
+			case "cached_file":
+				destPath, err := saveFileToDir(msg.SaveTarget.CachedPath, destDir, preferredFile)
+				if err != nil {
+					m.previewStatus = fmt.Sprintf("Failed to save: %v", err)
+				} else {
+					m.previewStatus = fmt.Sprintf("Saved to %s", destPath)
+				}
+				return m, tea.ClearScreen
+
+			case "single_msg":
+				return m, tea.Batch(tea.ClearScreen, m.downloadAndSaveMsgToDirCmd(msg.SaveTarget.Message, destDir, preferredFile))
+
+			case "multi_msgs":
+				return m, tea.Batch(tea.ClearScreen, m.saveMultiMessagesToDirCmd(msg.SaveTarget.MultiMsgs, destDir))
+			}
+		} else {
+			// Specific file chosen
+			switch msg.SaveTarget.Mode {
+			case "cached_file":
+				destPath, err := saveFileToPath(msg.SaveTarget.CachedPath, cleanChosen)
+				if err != nil {
+					m.previewStatus = fmt.Sprintf("Failed to save: %v", err)
+				} else {
+					m.previewStatus = fmt.Sprintf("Saved to %s", destPath)
+				}
+				return m, tea.ClearScreen
+
+			case "single_msg":
+				return m, tea.Batch(tea.ClearScreen, m.downloadAndSaveMsgToPathCmd(msg.SaveTarget.Message, cleanChosen))
+
+			case "multi_msgs":
+				destDir := filepath.Dir(cleanChosen)
+				return m, tea.Batch(tea.ClearScreen, m.saveMultiMessagesToDirCmd(msg.SaveTarget.MultiMsgs, destDir))
+			}
 		}
 		return m, tea.ClearScreen
 
@@ -1011,12 +1091,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openWithInput.SetValue("")
 				m.openWithInput.Focus()
 				return m, textinput.Blink
-			case "s", "S":
+			case "s":
 				m.confirmDocAction = false
 				if m.pendingDocMsg != nil {
 					targetMsg := *m.pendingDocMsg
 					m.pendingDocMsg = nil
 					return m, m.downloadAndSaveDocCmd(targetMsg)
+				}
+				return m, nil
+			case "shift+s", "S":
+				m.confirmDocAction = false
+				if m.pendingDocMsg != nil {
+					targetMsg := *m.pendingDocMsg
+					m.pendingDocMsg = nil
+					return m, m.pickSaveLocationCmd(saveTargetData{Mode: "single_msg", Message: targetMsg})
 				}
 				return m, nil
 			case "esc":
@@ -1033,17 +1121,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.confirmSave {
 			switch msg.String() {
-			case "y", "Y":
+			case "y", "Y", "s":
 				m.confirmSave = false
 				srcPath := m.pendingSavePath
 				m.pendingSavePath = ""
-				destPath, err := saveToDownloads(srcPath)
+				destPath, err := m.saveToDownloads(srcPath)
 				if err != nil {
 					m.previewStatus = fmt.Sprintf("Failed to save: %v", err)
 				} else {
 					m.previewStatus = fmt.Sprintf("Saved to %s", destPath)
 				}
 				return m, nil
+			case "shift+s", "S":
+				m.confirmSave = false
+				srcPath := m.pendingSavePath
+				m.pendingSavePath = ""
+				return m, m.pickSaveLocationCmd(saveTargetData{Mode: "cached_file", CachedPath: srcPath})
 			case "n", "N", "enter", "esc":
 				m.confirmSave = false
 				m.pendingSavePath = ""
@@ -2719,6 +2812,32 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 				m.multiSelectedMsgs = make(map[string]struct{})
 				return m.saveMultiMessagesCmd(targets)
 			}
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				if target.IsMedia() {
+					if target.Type == domain.MessageTypeDocument {
+						m.confirmDocAction = true
+						m.pendingDocMsg = &target
+						m.previewStatus = ""
+						return nil
+					}
+					return m.downloadAndSaveMediaCmd(target)
+				}
+			}
+			return nil
+
+		case "shift+s", "S":
+			if len(m.multiSelectedMsgs) > 0 {
+				targets := m.getSelectedMsgsInOrder()
+				m.multiSelectedMsgs = make(map[string]struct{})
+				return m.pickSaveLocationCmd(saveTargetData{Mode: "multi_msgs", MultiMsgs: targets})
+			}
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				if target.IsMedia() {
+					return m.pickSaveLocationCmd(saveTargetData{Mode: "single_msg", Message: target})
+				}
+			}
 			return nil
 
 		case "d":
@@ -3750,9 +3869,9 @@ func (m *Model) renderUnreadListView() []string {
 	} else if m.promptOpenWith {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Open with: ") + m.openWithInput.View() + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" (Enter to open, Esc to cancel)")
 	} else if m.confirmDocAction {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], or Save [s]? (Esc to cancel)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], Save [s], or Choose location [S]? (Esc to cancel)")
 	} else if m.confirmSave {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save? [y/s: default dir, S: choose location, n: cancel]")
 	} else if m.previewStatus != "" {
 		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
 	}
@@ -4184,9 +4303,9 @@ func (m *Model) renderChatView() []string {
 	if m.promptOpenWith {
 		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Open with: ") + m.openWithInput.View() + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" (Enter to open, Esc to cancel)")
 	} else if m.confirmDocAction {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], or Save [s]? (Esc to cancel)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], Save [s], or Choose location [S]? (Esc to cancel)")
 	} else if m.confirmSave {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save to Downloads? (y/N)")
+		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save? [y/s: default dir, S: choose location, n: cancel]")
 	} else if m.confirmDelete {
 		promptText := "Delete message for you? (y/N)"
 		if len(m.pendingDeleteMultiMsgs) > 0 {
@@ -4480,15 +4599,71 @@ func (m *Model) downloadAndOpenDocCmd(msg domain.Message, customCmd ...string) t
 	}
 }
 
-func (m *Model) downloadAndSaveDocCmd(msg domain.Message) tea.Cmd {
+func (m *Model) downloadAndSaveDocCmd(msg domain.Message, customDestDir ...string) tea.Cmd {
 	m.previewStatus = "Downloading & saving document..."
 	m.confirmSave = false
+	destDir := ""
+	if len(customDestDir) > 0 {
+		destDir = customDestDir[0]
+	} else {
+		destDir = m.getDownloadDir()
+	}
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return func() tea.Msg {
-		filePath, err := m.adapter.DownloadMedia(m.ctx, msg)
+		filePath, err := m.adapter.DownloadMedia(ctx, msg)
 		if err != nil {
 			return mediaPreviewErrMsg{Err: err}
 		}
-		destPath, err := saveToDownloads(filePath)
+		destPath, err := m.saveToDownloads(filePath, destDir)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		return docSavedMsg{DestPath: destPath}
+	}
+}
+
+func (m *Model) downloadAndSaveMediaCmd(msg domain.Message, customDestDir ...string) tea.Cmd {
+	m.previewStatus = fmt.Sprintf("Downloading & saving %s...", msg.Type)
+	m.confirmSave = false
+	destDir := ""
+	if len(customDestDir) > 0 {
+		destDir = customDestDir[0]
+	} else {
+		destDir = m.getDownloadDir()
+	}
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func() tea.Msg {
+		filePath, err := m.adapter.DownloadMedia(ctx, msg)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		destPath, err := m.saveToDownloads(filePath, destDir)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		return docSavedMsg{DestPath: destPath}
+	}
+}
+
+func (m *Model) downloadAndSaveMsgToDirCmd(msg domain.Message, destDir, preferredFile string) tea.Cmd {
+	m.previewStatus = fmt.Sprintf("Downloading & saving %s...", msg.Type)
+	m.confirmSave = false
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func() tea.Msg {
+		filePath, err := m.adapter.DownloadMedia(ctx, msg)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		destPath, err := saveFileToDir(filePath, destDir, preferredFile)
 		if err != nil {
 			return mediaPreviewErrMsg{Err: err}
 		}
@@ -4518,7 +4693,16 @@ func (m *Model) getSelectedMsgsInOrder() []domain.Message {
 }
 
 func (m *Model) saveMultiMessagesCmd(msgs []domain.Message) tea.Cmd {
-	m.previewStatus = "Saving selected messages to Downloads..."
+	return m.saveMultiMessagesToDirCmd(msgs, m.getDownloadDir())
+}
+
+func (m *Model) saveMultiMessagesToDirCmd(msgs []domain.Message, destDir string) tea.Cmd {
+	destDisplay := destDir
+	home, _ := os.UserHomeDir()
+	if home != "" && strings.HasPrefix(destDir, home) {
+		destDisplay = "~" + strings.TrimPrefix(destDir, home)
+	}
+	m.previewStatus = fmt.Sprintf("Saving selected messages to %s...", destDisplay)
 	chatName := m.activeName
 	ctx := m.ctx
 	if ctx == nil {
@@ -4545,7 +4729,7 @@ func (m *Model) saveMultiMessagesCmd(msgs []domain.Message) tea.Cmd {
 				}
 				continue
 			}
-			_, err = saveToDownloads(dlPath)
+			_, err = saveFileToDir(dlPath, destDir, "")
 			if err != nil {
 				if firstErr == nil {
 					firstErr = err
@@ -4558,59 +4742,49 @@ func (m *Model) saveMultiMessagesCmd(msgs []domain.Message) tea.Cmd {
 		savedTextCount := 0
 		var textFilePath string
 		if len(textMsgs) > 0 {
-			home, err := os.UserHomeDir()
-			downloadsDir := ""
-			if err == nil && home != "" {
-				downloadsDir = filepath.Join(home, "Downloads")
-				if xdg := os.Getenv("XDG_DOWNLOAD_DIR"); xdg != "" {
-					downloadsDir = xdg
+			_ = os.MkdirAll(destDir, 0755)
+			safeName := ""
+			for _, r := range chatName {
+				if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+					safeName += string(r)
 				}
-				_ = os.MkdirAll(downloadsDir, 0755)
 			}
-			if downloadsDir != "" {
-				safeName := ""
-				for _, r := range chatName {
-					if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-						safeName += string(r)
-					}
-				}
-				if len(safeName) > 20 {
-					safeName = safeName[:20]
-				}
-				fileName := fmt.Sprintf("messages_%s_%s.txt", safeName, time.Now().Format("20060102_150405"))
-				if safeName == "" {
-					fileName = fmt.Sprintf("messages_%s.txt", time.Now().Format("20060102_150405"))
-				}
-				textFilePath = filepath.Join(downloadsDir, fileName)
+			if len(safeName) > 20 {
+				safeName = safeName[:20]
+			}
+			fileName := fmt.Sprintf("messages_%s_%s.txt", safeName, time.Now().Format("20060102_150405"))
+			if safeName == "" {
+				fileName = fmt.Sprintf("messages_%s.txt", time.Now().Format("20060102_150405"))
+			}
+			textFilePath = filepath.Join(destDir, fileName)
 
-				var sb strings.Builder
-				sb.WriteString(fmt.Sprintf("--- Watui Saved Messages: %s (%s) ---\n\n", chatName, time.Now().Format("02/01/2006 15:04:05")))
-				for _, tm := range textMsgs {
-					timeStr := tm.Timestamp.Format("02/01/2006 15:04:05")
-					sender := "You"
-					if !tm.IsFromMe {
-						name := m.resolveMsgSenderName(tm)
-						if name != "" && tm.Sender != "" && name != tm.Sender {
-							sender = fmt.Sprintf("%s (%s)", name, tm.Sender)
-						} else if name != "" {
-							sender = name
-						} else if tm.Sender != "" {
-							sender = tm.Sender
-						} else {
-							sender = "Them"
-						}
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("--- Watui Saved Messages: %s (%s) ---\n\n", chatName, time.Now().Format("02/01/2006 15:04:05")))
+			for _, tm := range textMsgs {
+				timeStr := tm.Timestamp.Format("02/01/2006 15:04:05")
+				sender := "You"
+				if !tm.IsFromMe {
+					name := m.resolveMsgSenderName(tm)
+					if name != "" && tm.Sender != "" && name != tm.Sender {
+						sender = fmt.Sprintf("%s (%s)", name, tm.Sender)
+					} else if name != "" {
+						sender = name
+					} else if tm.Sender != "" {
+						sender = tm.Sender
+					} else {
+						sender = "Them"
 					}
-					body := m.formatMentions(tm.Body)
-					sb.WriteString(fmt.Sprintf("[%s] %s:\n%s\n\n", timeStr, sender, body))
 				}
+				body := m.formatMentions(tm.Body)
+				sb.WriteString(fmt.Sprintf("[%s] %s:\n%s\n\n", timeStr, sender, body))
+			}
 
-				if err := os.WriteFile(textFilePath, []byte(sb.String()), 0644); err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-				} else {
-					savedTextCount = len(textMsgs)
+			if err := os.WriteFile(textFilePath, []byte(sb.String()), 0644); err != nil {
+				if firstErr == nil {
+					firstErr = err
 				}
+			} else {
+				savedTextCount = len(textMsgs)
 			}
 		}
 
@@ -4618,47 +4792,65 @@ func (m *Model) saveMultiMessagesCmd(msgs []domain.Message) tea.Cmd {
 			MediaCount: savedMediaCount,
 			TextCount:  savedTextCount,
 			TextPath:   textFilePath,
+			DestDir:    destDir,
 			Err:        firstErr,
 		}
 	}
 }
 
-func saveToDownloads(srcPath string) (string, error) {
+func (m *Model) getDownloadDir() string {
+	if m.cfg != nil {
+		if dir := m.cfg.GetDownloadDir(); dir != "" {
+			return dir
+		}
+	}
+	if xdg := os.Getenv("XDG_DOWNLOAD_DIR"); xdg != "" {
+		return xdg
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		return filepath.Join(home, "Downloads")
+	}
+	return "."
+}
+
+func (m *Model) saveToDownloads(srcPath string, customDestDir ...string) (string, error) {
+	destDir := ""
+	if len(customDestDir) > 0 && strings.TrimSpace(customDestDir[0]) != "" {
+		destDir = customDestDir[0]
+	} else {
+		destDir = m.getDownloadDir()
+	}
+	return saveFileToDir(srcPath, destDir, "")
+}
+
+func saveFileToDir(srcPath, destDir, preferredFile string) (string, error) {
 	if srcPath == "" {
 		return "", fmt.Errorf("no media file to save")
 	}
+	destDir = strings.TrimSpace(destDir)
+	if destDir == "" {
+		return "", fmt.Errorf("destination directory is empty")
+	}
+	destDir = config.ExpandHome(destDir)
 
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return "", fmt.Errorf("cannot find home directory: %w", err)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create destination directory: %w", err)
 	}
 
-	downloadsDir := filepath.Join(home, "Downloads")
-	if xdg := os.Getenv("XDG_DOWNLOAD_DIR"); xdg != "" {
-		downloadsDir = xdg
+	fileName := strings.TrimSpace(preferredFile)
+	if fileName == "" {
+		fileName = cleanCachedFileName(srcPath)
 	}
 
-	if err := os.MkdirAll(downloadsDir, 0755); err != nil {
-		return "", fmt.Errorf("cannot create downloads directory: %w", err)
-	}
-
-	fileName := filepath.Base(srcPath)
-	// If cached filename has prefix like <msgID>_<realFileName>, clean it up for ~/Downloads
-	if idx := strings.Index(fileName, "_"); idx != -1 && idx < len(fileName)-1 {
-		prefix := fileName[:idx]
-		if len(prefix) >= 8 {
-			fileName = fileName[idx+1:]
-		}
-	}
-
-	destPath := filepath.Join(downloadsDir, fileName)
+	destPath := filepath.Join(destDir, fileName)
 
 	// Avoid overwriting existing files
 	if _, err := os.Stat(destPath); err == nil {
 		ext := filepath.Ext(fileName)
 		base := strings.TrimSuffix(fileName, ext)
 		for i := 1; i < 1000; i++ {
-			candidate := filepath.Join(downloadsDir, fmt.Sprintf("%s_%d%s", base, i, ext))
+			candidate := filepath.Join(destDir, fmt.Sprintf("%s_%d%s", base, i, ext))
 			if _, err := os.Stat(candidate); os.IsNotExist(err) {
 				destPath = candidate
 				break
@@ -4672,15 +4864,531 @@ func saveToDownloads(srcPath string) (string, error) {
 	}
 
 	if err := os.WriteFile(destPath, data, 0644); err != nil {
-		return "", fmt.Errorf("failed to write to downloads: %w", err)
+		return "", fmt.Errorf("failed to write to destination: %w", err)
 	}
 
+	home, _ := os.UserHomeDir()
 	displayPath := destPath
-	if strings.HasPrefix(destPath, home) {
+	if home != "" && strings.HasPrefix(destPath, home) {
 		displayPath = "~" + strings.TrimPrefix(destPath, home)
 	}
 
 	return displayPath, nil
+}
+
+func cleanCachedFileName(fileName string) string {
+	fileName = filepath.Base(fileName)
+	if idx := strings.Index(fileName, "_"); idx != -1 && idx < len(fileName)-1 {
+		prefix := fileName[:idx]
+		if len(prefix) >= 8 {
+			fileName = fileName[idx+1:]
+		}
+	}
+	return fileName
+}
+
+func getTargetFileName(target saveTargetData) string {
+	if target.Mode == "cached_file" && target.CachedPath != "" {
+		return cleanCachedFileName(target.CachedPath)
+	}
+	if target.Mode == "single_msg" {
+		msg := target.Message
+		if msg.Type == domain.MessageTypeDocument {
+			if strings.HasPrefix(msg.Body, "[Document: ") && strings.HasSuffix(msg.Body, "]") {
+				fn := strings.TrimSpace(msg.Body[len("[Document: ") : len(msg.Body)-1])
+				if fn != "" {
+					return filepath.Base(fn)
+				}
+			}
+		}
+		safeID := strings.ReplaceAll(msg.ID, "/", "_")
+		if cacheDir, err := media.GetMediaCacheDir(); err == nil {
+			if matches, _ := filepath.Glob(filepath.Join(cacheDir, safeID+"*")); len(matches) > 0 {
+				return cleanCachedFileName(filepath.Base(matches[0]))
+			}
+		}
+		shortID := safeID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		switch msg.Type {
+		case domain.MessageTypeImage:
+			return fmt.Sprintf("image_%s.jpg", shortID)
+		case domain.MessageTypeVideo:
+			return fmt.Sprintf("video_%s.mp4", shortID)
+		case domain.MessageTypeAudio:
+			return fmt.Sprintf("audio_%s.ogg", shortID)
+		case domain.MessageTypeSticker:
+			return fmt.Sprintf("sticker_%s.webp", shortID)
+		default:
+			return fmt.Sprintf("document_%s.bin", shortID)
+		}
+	}
+	return ""
+}
+
+func saveFileToPath(srcPath, destPath string) (string, error) {
+	if srcPath == "" {
+		return "", fmt.Errorf("no media file to save")
+	}
+	destPath = strings.TrimSpace(destPath)
+	if destPath == "" {
+		return "", fmt.Errorf("destination path is empty")
+	}
+	destPath = config.ExpandHome(destPath)
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return "", fmt.Errorf("cannot create destination directory: %w", err)
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read cached file: %w", err)
+	}
+
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write to destination: %w", err)
+	}
+
+	home, _ := os.UserHomeDir()
+	displayPath := destPath
+	if home != "" && strings.HasPrefix(destPath, home) {
+		displayPath = "~" + strings.TrimPrefix(destPath, home)
+	}
+
+	return displayPath, nil
+}
+
+func (m *Model) downloadAndSaveMsgToPathCmd(msg domain.Message, destPath string) tea.Cmd {
+	m.previewStatus = fmt.Sprintf("Downloading & saving %s...", msg.Type)
+	m.confirmSave = false
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return func() tea.Msg {
+		filePath, err := m.adapter.DownloadMedia(ctx, msg)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		savedPath, err := saveFileToPath(filePath, destPath)
+		if err != nil {
+			return mediaPreviewErrMsg{Err: err}
+		}
+		return docSavedMsg{DestPath: savedPath}
+	}
+}
+
+func createSavePlaceholderFile(startDir, fileName string) (string, error) {
+	if startDir == "" {
+		startDir = "."
+	}
+	startDir = config.ExpandHome(startDir)
+	if err := os.MkdirAll(startDir, 0755); err != nil {
+		return "", err
+	}
+	if fileName == "" {
+		fileName = "download"
+	}
+	candidatePath := filepath.Join(startDir, fileName)
+	if _, err := os.Stat(candidatePath); err == nil {
+		ext := filepath.Ext(fileName)
+		base := strings.TrimSuffix(fileName, ext)
+		for i := 1; i < 1000; i++ {
+			c := filepath.Join(startDir, fmt.Sprintf("%s_%d%s", base, i, ext))
+			if _, err := os.Stat(c); os.IsNotExist(err) {
+				candidatePath = c
+				break
+			}
+		}
+	}
+
+	instructions := `* watui save instructions *
+---------------------------------------------------
+			!!! WARNING !!!
+Opening a file OVERWRITES it with the saved media!
+How to save:
+1) Move this file to your desired location (e.g. 'x' then 'p' in yazi).
+2) Rename the file if needed (e.g. 'r' in yazi).
+3) Press Enter to confirm saving to this file.
+Tips:
+- Press Enter on directories to navigate into them normally.
+- If you quit ('q') without opening a file, saving is cancelled.
+---------------------------------------------------
+`
+	if err := os.WriteFile(candidatePath, []byte(instructions), 0644); err != nil {
+		return "", err
+	}
+	return candidatePath, nil
+}
+
+func buildTerminalSavePickerCmd(pickerType, customCmd, suggestedPath string, isDirectory bool) (*exec.Cmd, string, string, error) {
+	tmpFile, err := os.CreateTemp("", "watui_picker_out_*")
+	if err != nil {
+		return nil, "", "", err
+	}
+	outPath := tmpFile.Name()
+	_ = tmpFile.Close()
+
+	var cwdPath string
+	if isDirectory {
+		cwdTmp, err := os.CreateTemp("", "watui_picker_cwd_*")
+		if err == nil {
+			cwdPath = cwdTmp.Name()
+			_ = cwdTmp.Close()
+		}
+	}
+
+	// Check if customCmd is a termfilechooser wrapper script
+	isWrapper := strings.HasSuffix(customCmd, ".sh") || strings.Contains(customCmd, "wrapper") || strings.Contains(customCmd, "termfilechooser")
+	if isWrapper && customCmd != "" {
+		multiple := "0"
+		dirFlag := "0"
+		saveFlag := "1"
+		if isDirectory {
+			dirFlag = "1"
+			saveFlag = "0"
+		}
+		cmd := exec.Command("sh", "-c", customCmd+` "$1" "$2" "$3" "$4" "$5" "$6"`, "--", multiple, dirFlag, saveFlag, suggestedPath, outPath, "0")
+		return cmd, outPath, cwdPath, nil
+	}
+
+	switch pickerType {
+	case "yazi":
+		args := []string{"--chooser-file=" + outPath}
+		if isDirectory && cwdPath != "" {
+			args = append(args, "--cwd-file="+cwdPath)
+		}
+		if customCmd != "" {
+			parts := strings.Split(customCmd, "&&")
+			firstPart := strings.TrimSpace(parts[0])
+			words := strings.Fields(firstPart)
+			for i := 1; i < len(words); i++ {
+				w := words[i]
+				if strings.HasPrefix(w, "--chooser-file") || strings.HasPrefix(w, "--cwd-file") {
+					continue
+				}
+				args = append(args, w)
+			}
+		}
+		if suggestedPath != "" {
+			args = append(args, suggestedPath)
+		}
+		return exec.Command("yazi", args...), outPath, cwdPath, nil
+
+	case "ranger":
+		args := []string{}
+		if isDirectory {
+			args = append(args, "--choosedir="+outPath)
+		} else {
+			args = append(args, "--choosefile="+outPath)
+			if suggestedPath != "" {
+				args = append(args, "--selectfile="+suggestedPath)
+			}
+		}
+		if customCmd != "" {
+			parts := strings.Split(customCmd, "&&")
+			firstPart := strings.TrimSpace(parts[0])
+			words := strings.Fields(firstPart)
+			for i := 1; i < len(words); i++ {
+				w := words[i]
+				if strings.HasPrefix(w, "--choosefile") || strings.HasPrefix(w, "--choosedir") || strings.HasPrefix(w, "--selectfile") {
+					continue
+				}
+				args = append(args, w)
+			}
+		}
+		if isDirectory && suggestedPath != "" {
+			args = append(args, suggestedPath)
+		}
+		return exec.Command("ranger", args...), outPath, cwdPath, nil
+
+	case "lf":
+		args := []string{"-selection-path=" + outPath}
+		if isDirectory && cwdPath != "" {
+			args = append(args, "-last-dir-path="+cwdPath)
+		}
+		if customCmd != "" {
+			parts := strings.Split(customCmd, "&&")
+			firstPart := strings.TrimSpace(parts[0])
+			words := strings.Fields(firstPart)
+			for i := 1; i < len(words); i++ {
+				w := words[i]
+				if strings.HasPrefix(w, "-selection-path") || strings.HasPrefix(w, "-last-dir-path") {
+					continue
+				}
+				args = append(args, w)
+			}
+		}
+		if suggestedPath != "" {
+			args = append(args, suggestedPath)
+		}
+		return exec.Command("lf", args...), outPath, cwdPath, nil
+
+	case "nnn":
+		args := []string{"-p", outPath}
+		if suggestedPath != "" {
+			args = append(args, suggestedPath)
+		}
+		return exec.Command("nnn", args...), outPath, cwdPath, nil
+
+	case "fzf":
+		return exec.Command("sh", "-c", `fzf > "$1"`, "--", outPath), outPath, cwdPath, nil
+
+	default:
+		cmd := exec.Command("sh", "-c", customCmd+` > "$1"`, "--", outPath)
+		cmd.Env = append(os.Environ(), "WATUI_PICKER_FILE="+outPath)
+		return cmd, outPath, cwdPath, nil
+	}
+}
+
+func (m *Model) pickSaveLocationCmd(target saveTargetData) tea.Cmd {
+	customCmd := ""
+	if m.cfg != nil {
+		customCmd = m.cfg.GetFilePickerCommand()
+	}
+	startDir := m.getDownloadDir()
+	isDirectory := (target.Mode == "multi_msgs")
+
+	suggestedPath := startDir
+	if !isDirectory {
+		fileName := getTargetFileName(target)
+		candidatePath, err := createSavePlaceholderFile(startDir, fileName)
+		if err == nil {
+			target.PlaceholderPath = candidatePath
+			suggestedPath = candidatePath
+		}
+	}
+
+	pickerType, isTerm := resolvePicker(customCmd)
+	if isTerm {
+		execCmd, outPath, cwdPath, err := buildTerminalSavePickerCmd(pickerType, customCmd, suggestedPath, isDirectory)
+		if err != nil {
+			if target.PlaceholderPath != "" {
+				_ = os.Remove(target.PlaceholderPath)
+			}
+			return func() tea.Msg {
+				return filePickErrMsg{Err: err}
+			}
+		}
+		if startDir != "" && isDirectory {
+			execCmd.Dir = startDir
+		}
+		return tea.ExecProcess(execCmd, func(err error) tea.Msg {
+			defer func() {
+				_ = os.Remove(outPath)
+				if cwdPath != "" {
+					_ = os.Remove(cwdPath)
+				}
+			}()
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					if target.PlaceholderPath != "" {
+						_ = os.Remove(target.PlaceholderPath)
+					}
+					return saveLocationPickedMsg{ChosenPath: "", SaveTarget: target}
+				}
+				data, readErr := os.ReadFile(outPath)
+				if readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+					selected := strings.TrimSpace(string(data))
+					if idx := strings.Index(selected, "\n"); idx != -1 {
+						selected = strings.TrimSpace(selected[:idx])
+					}
+					return saveLocationPickedMsg{ChosenPath: selected, SaveTarget: target}
+				}
+				if target.PlaceholderPath != "" {
+					_ = os.Remove(target.PlaceholderPath)
+				}
+				return filePickErrMsg{Err: err}
+			}
+			data, readErr := os.ReadFile(outPath)
+			selected := ""
+			if readErr == nil {
+				selected = strings.TrimSpace(string(data))
+				if idx := strings.Index(selected, "\n"); idx != -1 {
+					selected = strings.TrimSpace(selected[:idx])
+				}
+			}
+			if selected == "" && isDirectory && cwdPath != "" {
+				cwdData, cwdErr := os.ReadFile(cwdPath)
+				if cwdErr == nil {
+					selected = strings.TrimSpace(string(cwdData))
+					if idx := strings.Index(selected, "\n"); idx != -1 {
+						selected = strings.TrimSpace(selected[:idx])
+					}
+				}
+			}
+			if selected == "" {
+				if target.PlaceholderPath != "" {
+					_ = os.Remove(target.PlaceholderPath)
+				}
+				return saveLocationPickedMsg{ChosenPath: "", SaveTarget: target}
+			}
+			return saveLocationPickedMsg{ChosenPath: selected, SaveTarget: target}
+		})
+	}
+
+	return func() tea.Msg {
+		path, err := openSavePicker(customCmd, suggestedPath, isDirectory)
+		if err != nil {
+			if target.PlaceholderPath != "" {
+				_ = os.Remove(target.PlaceholderPath)
+			}
+			return filePickErrMsg{Err: err}
+		}
+		if path == "" && target.PlaceholderPath != "" {
+			_ = os.Remove(target.PlaceholderPath)
+		}
+		return saveLocationPickedMsg{ChosenPath: path, SaveTarget: target}
+	}
+}
+
+func openSavePicker(customCmd, suggestedPath string, isDirectory bool) (string, error) {
+	startDir := suggestedPath
+	if !isDirectory && suggestedPath != "" {
+		startDir = filepath.Dir(suggestedPath)
+	}
+
+	if strings.TrimSpace(customCmd) != "" {
+		var cmd *exec.Cmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command("cmd", "/c", customCmd)
+		} else {
+			cmd = exec.Command("sh", "-c", customCmd)
+		}
+		if startDir != "" {
+			cmd.Dir = startDir
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 {
+				return "", nil
+			}
+			return "", fmt.Errorf("picker failed: %w", err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		if isDirectory {
+			cmd := exec.Command("powershell", "-NoProfile", "-Command",
+				"[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Select download location'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath }")
+			out, err := cmd.Output()
+			if err != nil {
+				return "", errNoFilePicker
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		escPath := strings.ReplaceAll(suggestedPath, "'", "''")
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			fmt.Sprintf("[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; $f = New-Object System.Windows.Forms.SaveFileDialog; $f.Title = 'Save file'; $f.FileName = '%s'; if ($f.ShowDialog() -eq 'OK') { $f.FileName }", escPath))
+		out, err := cmd.Output()
+		if err != nil {
+			return "", errNoFilePicker
+		}
+		return strings.TrimSpace(string(out)), nil
+
+	case "darwin":
+		if isDirectory {
+			cmd := exec.Command("osascript", "-e", "POSIX path of (choose folder with prompt \"Select download location:\")")
+			out, err := cmd.Output()
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					return "", nil
+				}
+				return "", errNoFilePicker
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		fileName := filepath.Base(suggestedPath)
+		dirName := filepath.Dir(suggestedPath)
+		script := fmt.Sprintf("POSIX path of (choose file name with prompt \"Save as:\" default name \"%s\" default location \"%s\")", fileName, dirName)
+		cmd := exec.Command("osascript", "-e", script)
+		out, err := cmd.Output()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+				return "", nil
+			}
+			return "", errNoFilePicker
+		}
+		return strings.TrimSpace(string(out)), nil
+
+	default: // Linux / BSD
+		if _, err := exec.LookPath("zenity"); err == nil {
+			var args []string
+			if isDirectory {
+				args = []string{"--file-selection", "--directory", "--title=Select download location"}
+			} else {
+				args = []string{"--file-selection", "--save", "--confirm-overwrite", "--title=Save File"}
+				if suggestedPath != "" {
+					args = append(args, "--filename="+suggestedPath)
+				}
+			}
+			cmd := exec.Command("zenity", args...)
+			if startDir != "" {
+				cmd.Dir = startDir
+			}
+			out, err := cmd.Output()
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					return "", nil
+				}
+				return "", fmt.Errorf("zenity failed: %w", err)
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		if _, err := exec.LookPath("kdialog"); err == nil {
+			var args []string
+			if isDirectory {
+				args = []string{"--getexistingdirectory", "--title", "Select download location"}
+				if suggestedPath != "" {
+					args = append(args, suggestedPath)
+				}
+			} else {
+				args = []string{"--getsavefilename"}
+				if suggestedPath != "" {
+					args = append(args, suggestedPath)
+				}
+				args = append(args, "--title", "Save File")
+			}
+			cmd := exec.Command("kdialog", args...)
+			if startDir != "" {
+				cmd.Dir = startDir
+			}
+			out, err := cmd.Output()
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+					return "", nil
+				}
+				return "", fmt.Errorf("kdialog failed: %w", err)
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		if _, err := exec.LookPath("python3"); err == nil {
+			var pyScript string
+			if isDirectory {
+				pyScript = "import tkinter as tk, tkinter.filedialog as fd; root = tk.Tk(); root.withdraw(); print(fd.askdirectory() or '')"
+			} else {
+				pyScript = fmt.Sprintf("import tkinter as tk, tkinter.filedialog as fd; root = tk.Tk(); root.withdraw(); print(fd.asksaveasfilename(initialfile='%s', initialdir='%s') or '')", filepath.Base(suggestedPath), startDir)
+			}
+			cmd := exec.Command("python3", "-c", pyScript)
+			if startDir != "" {
+				cmd.Dir = startDir
+			}
+			out, err := cmd.Output()
+			if err == nil {
+				return strings.TrimSpace(string(out)), nil
+			}
+		}
+		return "", errNoFilePicker
+	}
 }
 
 func (m *Model) stopActiveViewer() {

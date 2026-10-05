@@ -158,8 +158,8 @@ nix develop github:Arun0A/watui
 | <kbd>y</kbd> *(while hovering / multi-select)* | Copy hovered or selected messages (text only) to clipboard |
 | <kbd>l</kbd> *(while hovering)* | Open link(s) in default browser |
 | <kbd>p</kbd> *(while hovering)* | Preview selected media or open document prompt |
-| <kbd>Space</kbd> *(while hovering)* | Toggle select message and focus next |
-| <kbd>s</kbd> *(multi-select)* | Save selected attachments and/or text messages to Downloads |
+| <kbd>s</kbd> *(while hovering / multi-select)* | Save hovered media or selected messages to default download dir |
+| <kbd>Shift</kbd> + <kbd>s</kbd> / <kbd>S</kbd> *(while hovering / multi-select)* | Choose download location via file picker (`yazi`, etc.) and save |
 | <kbd>d</kbd> *(while hovering / multi-select)* | Delete hovered or selected messages for you (confirms y/N) |
 | <kbd>Shift</kbd> + <kbd>d</kbd> *(while hovering / multi-select)* | Delete hovered or selected messages for everyone, if possible (confirms y/N) |
 | <kbd>Esc</kbd> *(while hovering)* | Clear selection (or return to message box) |

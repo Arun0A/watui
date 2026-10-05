@@ -180,14 +180,18 @@ preview:
 	if emptyCfg.GetFilePickerCommand() != "" {
 		t.Errorf("Expected empty default file picker command, got %s", emptyCfg.GetFilePickerCommand())
 	}
+	if emptyCfg.GetDownloadDir() != "" {
+		t.Errorf("Expected empty default download dir, got %s", emptyCfg.GetDownloadDir())
+	}
 	if emptyCfg.GetDeviceName() != "WA-TUI" {
 		t.Errorf("Expected default device name 'WA-TUI', got %q", emptyCfg.GetDeviceName())
 	}
 
-	// Test custom file_picker and device_name
+	// Test custom file_picker, download_dir, and device_name
 	customCfgYAML := `
 device_name: "MyCustomTUI"
 file_picker: "ranger --choosefile=/tmp/watui_test && cat /tmp/watui_test"
+download_dir: "~/Downloads/CustomWatui"
 `
 	_ = os.WriteFile(filepath.Join(tmpDir, "custom.yaml"), []byte(customCfgYAML), 0644)
 	customCfg, err := Load(filepath.Join(tmpDir, "custom.yaml"))
@@ -196,6 +200,11 @@ file_picker: "ranger --choosefile=/tmp/watui_test && cat /tmp/watui_test"
 	}
 	if customCfg.GetFilePickerCommand() != "ranger --choosefile=/tmp/watui_test && cat /tmp/watui_test" {
 		t.Errorf("Expected ranger file picker command, got %q", customCfg.GetFilePickerCommand())
+	}
+	home, _ := os.UserHomeDir()
+	expectedDownloadDir := filepath.Join(home, "Downloads/CustomWatui")
+	if customCfg.GetDownloadDir() != expectedDownloadDir {
+		t.Errorf("Expected %q, got %q", expectedDownloadDir, customCfg.GetDownloadDir())
 	}
 	if customCfg.GetDeviceName() != "MyCustomTUI" {
 		t.Errorf("Expected device name 'MyCustomTUI', got %q", customCfg.GetDeviceName())

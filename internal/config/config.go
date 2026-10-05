@@ -89,6 +89,14 @@ type Config struct {
 	// FilePicker specifies an optional custom command to open a file picker.
 	FilePicker string `json:"file_picker" yaml:"file_picker"`
 
+	// DownloadDir optionally specifies the custom directory where downloaded media/attachments are saved.
+	// Defaults to user's system Downloads folder (~/Downloads or $XDG_DOWNLOAD_DIR).
+	DownloadDir       string `json:"download_dir" yaml:"download_dir"`
+	DownloadsDir      string `json:"downloads_dir" yaml:"downloads_dir"`
+	DownloadPath      string `json:"download_path" yaml:"download_path"`
+	DownloadsPath     string `json:"downloads_path" yaml:"downloads_path"`
+	DownloadDirectory string `json:"download_directory" yaml:"download_directory"`
+
 	// DeviceName specifies the companion client name registered in WhatsApp Linked Devices (default: "WA-TUI").
 	DeviceName string `json:"device_name" yaml:"device_name"`
 
@@ -523,6 +531,30 @@ func (c *Config) GetFilePickerCommand() string {
 	return ""
 }
 
+// GetDownloadDir returns the configured custom download directory, expanded,
+// or empty string if not configured (in which case OS default is used).
+func (c *Config) GetDownloadDir() string {
+	if c == nil {
+		return ""
+	}
+	var raw string
+	switch {
+	case strings.TrimSpace(c.DownloadDir) != "":
+		raw = c.DownloadDir
+	case strings.TrimSpace(c.DownloadsDir) != "":
+		raw = c.DownloadsDir
+	case strings.TrimSpace(c.DownloadPath) != "":
+		raw = c.DownloadPath
+	case strings.TrimSpace(c.DownloadsPath) != "":
+		raw = c.DownloadsPath
+	case strings.TrimSpace(c.DownloadDirectory) != "":
+		raw = c.DownloadDirectory
+	default:
+		return ""
+	}
+	return ExpandHome(strings.TrimSpace(raw))
+}
+
 // GetDeviceName returns the configured companion device name, or "WA-TUI" by default.
 func (c *Config) GetDeviceName() string {
 	if c != nil && strings.TrimSpace(c.DeviceName) != "" {
@@ -751,6 +783,21 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if overlay.FilePicker != "" {
 		base.FilePicker = overlay.FilePicker
+	}
+	if overlay.DownloadDir != "" {
+		base.DownloadDir = overlay.DownloadDir
+	}
+	if overlay.DownloadsDir != "" {
+		base.DownloadsDir = overlay.DownloadsDir
+	}
+	if overlay.DownloadPath != "" {
+		base.DownloadPath = overlay.DownloadPath
+	}
+	if overlay.DownloadsPath != "" {
+		base.DownloadsPath = overlay.DownloadsPath
+	}
+	if overlay.DownloadDirectory != "" {
+		base.DownloadDirectory = overlay.DownloadDirectory
 	}
 	if overlay.DeviceName != "" {
 		base.DeviceName = overlay.DeviceName
