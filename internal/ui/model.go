@@ -132,6 +132,10 @@ type Model struct {
 	// Active external preview/player process
 	activeViewerCmd *exec.Cmd
 	viewerMu        sync.Mutex
+
+	// Theme & visual styles
+	theme  Theme
+	styles Styles
 }
 
 // Msg types for Tea event loop
@@ -236,16 +240,29 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 	ti.ShowLineNumbers = false
 	ti.EndOfBufferCharacter = 0
 	ti.KeyMap.InsertNewline = key.NewBinding(key.WithDisabled())
+	var cfg *config.Config
+	if len(cfgs) > 0 && cfgs[0] != nil {
+		cfg = cfgs[0]
+	} else {
+		cfg = &config.Config{}
+	}
+	if cfg.IsClearOnExitEnabled() {
+		_ = media.ClearMediaCache()
+	}
+
+	theme, _ := LoadTheme(cfg)
+	styles := MakeStyles(theme)
+
 	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ti.FocusedStyle.Base = lipgloss.NewStyle()
-	ti.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
-	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB"))
-	ti.FocusedStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
+	ti.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.InputPlaceholder))
+	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.InputPrompt))
+	ti.FocusedStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.InputText))
 	ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	ti.BlurredStyle.Base = lipgloss.NewStyle()
-	ti.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
-	ti.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
-	ti.BlurredStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8"))
+	ti.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.InputPlaceholder))
+	ti.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Status))
+	ti.BlurredStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.TextMuted))
 	ti.SetPromptFunc(2, func(lineIdx int) string {
 		if lineIdx == 0 {
 			return "> "
@@ -263,20 +280,12 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 	oi.CharLimit = 100
 	oi.Width = 35
 
-	var cfg *config.Config
-	if len(cfgs) > 0 && cfgs[0] != nil {
-		cfg = cfgs[0]
-	} else {
-		cfg = &config.Config{}
-	}
-	if cfg.IsClearOnExitEnabled() {
-		_ = media.ClearMediaCache()
-	}
-
 	m := &Model{
 		adapter:           adapter,
 		ctx:               ctx,
 		cfg:               cfg,
+		theme:             theme,
+		styles:            styles,
 		view:              ViewUnreadList,
 		unreadChats:       make(map[string]*UnreadChat),
 		readChats:         make(map[string]bool),
@@ -3583,63 +3592,7 @@ func (m *Model) filterContacts(query string) {
 // Styles and Layout Dimensions
 // -------------------------------------------------------------
 
-var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#A6E3A1"))
 
-	statusStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6C7086"))
-
-	dividerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#313244"))
-
-	badgeStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#11111B")).
-			Background(lipgloss.Color("#A6E3A1")).
-			Padding(0, 1)
-
-	pinBadgeStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#11111B")).
-			Background(lipgloss.Color("#89B4FA")).
-			Padding(0, 1)
-
-	mentionBadgeStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#11111B")).
-				Background(lipgloss.Color("#A6E3A1")).
-				Padding(0, 1)
-
-	ephemeralBadgeStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FAB387"))
-
-	selectedTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#89B4FA"))
-
-	normalTitleStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#CDD6F4"))
-
-	snippetStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6C7086"))
-
-	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#585B70"))
-
-	jidStyle = lipgloss.NewStyle().
-			Faint(true).
-			Foreground(lipgloss.Color("#585B70"))
-
-	mentionYouStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#A6E3A1"))
-
-	mentionOtherStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#89B4FA"))
-)
 
 var (
 	mentionRegex    = regexp.MustCompile(`(?:^|[^\w@])@(\d{5,20})\b`)
@@ -3681,9 +3634,9 @@ func (m *Model) styleMentionsForDisplay(text string) string {
 			if resolved != "" && resolved != digits && !strings.Contains(resolved, "@") {
 				var styled string
 				if resolved == "You" {
-					styled = mentionYouStyle.Render("@You")
+					styled = m.styles.MentionYou.Render("@You")
 				} else {
-					styled = mentionOtherStyle.Render("@" + resolved)
+					styled = m.styles.MentionOther.Render("@" + resolved)
 				}
 				atIdx := digitStart - 1
 				text = text[:atIdx] + styled + text[digitEnd:]
@@ -3695,7 +3648,7 @@ func (m *Model) styleMentionsForDisplay(text string) string {
 	for i := len(youMatches) - 1; i >= 0; i-- {
 		sub := youMatches[i]
 		start, end := sub[2], sub[3]
-		styled := mentionYouStyle.Render("@You")
+		styled := m.styles.MentionYou.Render("@You")
 		text = text[:start] + styled + text[end:]
 	}
 	return text
@@ -3817,16 +3770,16 @@ func (m *Model) renderUnreadListView() []string {
 	var headerText string
 	if m.showArchived {
 		headerText = fmt.Sprintf("%s  %s",
-			titleStyle.Render("watui"),
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("· [ARCHIVED CHATS]")+statusStyle.Render(fmt.Sprintf(" (%d)", len(m.chatOrder))),
+			m.styles.Title.Render("watui"),
+			m.styles.PromptText.Render("· [ARCHIVED CHATS]")+m.styles.Status.Render(fmt.Sprintf(" (%d)", len(m.chatOrder))),
 		)
 	} else {
 		headerText = fmt.Sprintf("%s  %s",
-			titleStyle.Render("watui"),
-			statusStyle.Render("· "+statusText),
+			m.styles.Title.Render("watui"),
+			m.styles.Status.Render("· "+statusText),
 		)
 	}
-	divider := dividerStyle.Render(strings.Repeat("─", cw))
+	divider := m.styles.Divider.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
 
 	if len(m.chatOrder) == 0 {
@@ -3835,7 +3788,7 @@ func (m *Model) renderUnreadListView() []string {
 			lines = append(lines, "")
 			lines = append(lines, "  No archived chats with unread messages.")
 			lines = append(lines, "")
-			lines = append(lines, statusStyle.Render("  Press [a] or [Esc] to return to unread messages."))
+			lines = append(lines, m.styles.Status.Render("  Press [a] or [Esc] to return to unread messages."))
 			lines = append(lines, "")
 		} else {
 			lines = append(lines, "  Inbox Zero")
@@ -3843,10 +3796,10 @@ func (m *Model) renderUnreadListView() []string {
 			lines = append(lines, "  No unread messages.")
 			lines = append(lines, "")
 			if archivedCount > 0 {
-				lines = append(lines, statusStyle.Render(fmt.Sprintf("  Press [a] to view %d archived chat(s) with unread messages.", archivedCount)))
+				lines = append(lines, m.styles.Status.Render(fmt.Sprintf("  Press [a] to view %d archived chat(s) with unread messages.", archivedCount)))
 				lines = append(lines, "")
 			}
-			lines = append(lines, statusStyle.Render("  Press [n] to compose to a contact, or wait for incoming messages."))
+			lines = append(lines, m.styles.Status.Render("  Press [n] to compose to a contact, or wait for incoming messages."))
 			lines = append(lines, "")
 		}
 	} else {
@@ -3864,12 +3817,12 @@ func (m *Model) renderUnreadListView() []string {
 			var badge string
 			if chat.UnreadCount > 0 {
 				if chat.HasMention {
-					badge = mentionBadgeStyle.Render(fmt.Sprintf("@ %d", chat.UnreadCount))
+					badge = m.styles.MentionBadge.Render(fmt.Sprintf("@ %d", chat.UnreadCount))
 				} else {
-					badge = badgeStyle.Render(fmt.Sprintf("%d", chat.UnreadCount))
+					badge = m.styles.Badge.Render(fmt.Sprintf("%d", chat.UnreadCount))
 				}
 			} else if chat.IsPinned {
-				badge = pinBadgeStyle.Render("PIN")
+				badge = m.styles.PinBadge.Render("PIN")
 			}
 
 			name := chat.Name
@@ -3943,18 +3896,18 @@ func (m *Model) renderUnreadListView() []string {
 				lines = append(lines, fmt.Sprintf("%s%s%s  %s",
 					cursorPrefix,
 					badgePrefix,
-					selectedTitleStyle.Render(name),
-					statusStyle.Render(timeStr),
+					m.styles.SelectedTitle.Render(name),
+					m.styles.Status.Render(timeStr),
 				))
-				lines = append(lines, snippetStyle.Render("    "+lastMsg))
+				lines = append(lines, m.styles.Snippet.Render("    "+lastMsg))
 			} else {
 				lines = append(lines, fmt.Sprintf("%s%s%s  %s",
 					cursorPrefix,
 					badgePrefix,
-					normalTitleStyle.Render(name),
-					statusStyle.Render(timeStr),
+					m.styles.NormalTitle.Render(name),
+					m.styles.Status.Render(timeStr),
 				))
-				lines = append(lines, snippetStyle.Render("    "+lastMsg))
+				lines = append(lines, m.styles.Snippet.Render("    "+lastMsg))
 			}
 			lines = append(lines, "")
 		}
@@ -3962,15 +3915,15 @@ func (m *Model) renderUnreadListView() []string {
 
 	statusNotice := ""
 	if m.promptGlobalMute {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render(fmt.Sprintf("Mute %s globally: 1: 1 hour, 2: 8 hours, 3: Always (Esc to cancel)", m.globalMuteChatName))
+		statusNotice = m.styles.PromptText.Render(fmt.Sprintf("Mute %s globally: 1: 1 hour, 2: 8 hours, 3: Always (Esc to cancel)", m.globalMuteChatName))
 	} else if m.promptOpenWith {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Open with: ") + m.openWithInput.View() + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" (Enter to open, Esc to cancel)")
+		statusNotice = m.styles.PromptText.Render("Open with: ") + m.openWithInput.View() + m.styles.PromptEsc.Render(" (Enter to open, Esc to cancel)")
 	} else if m.confirmDocAction {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], Save [s], or Choose location [S]? (Esc to cancel)")
+		statusNotice = m.styles.PromptText.Render("Document: Open [o], Open with [w], Save [s], or Choose location [S]? (Esc to cancel)")
 	} else if m.confirmSave {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save? [y/s: default dir, S: choose location, n: cancel]")
+		statusNotice = m.styles.PromptText.Render("Save? [y/s: default dir, S: choose location, n: cancel]")
 	} else if m.previewStatus != "" {
-		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
+		statusNotice = m.styles.NoticeText.Render(m.previewStatus)
 	}
 
 	selectedHasMedia := false
@@ -3988,12 +3941,12 @@ func (m *Model) renderUnreadListView() []string {
 	if selectedHasMedia && statusNotice != "" {
 		mediaHint := "[Alt+P] Preview Media"
 		if lipgloss.Width(mediaHint)+3+lipgloss.Width(statusNotice) <= cw {
-			lines = append(lines, helpStyle.Render(mediaHint)+" · "+statusNotice)
+			lines = append(lines, m.styles.Help.Render(mediaHint)+" · "+statusNotice)
 		} else {
 			lines = append(lines, statusNotice)
 		}
 	} else if selectedHasMedia {
-		lines = append(lines, helpStyle.Render("[Alt+P] Preview Media"))
+		lines = append(lines, m.styles.Help.Render("[Alt+P] Preview Media"))
 	} else if statusNotice != "" {
 		lines = append(lines, statusNotice)
 	} else {
@@ -4013,16 +3966,16 @@ func (m *Model) renderChatView() []string {
 	ephBadge := ""
 	if m.adapter != nil && m.activeChatID != "" {
 		if timer := m.adapter.GetChatEphemeralTimer(m.activeChatID); timer > 0 {
-			ephBadge = " " + ephemeralBadgeStyle.Render(fmt.Sprintf("[⏱ %s]", domain.FormatDisappearingTimer(timer)))
+			ephBadge = " " + m.styles.EphemeralBadge.Render(fmt.Sprintf("[⏱ %s]", domain.FormatDisappearingTimer(timer)))
 		}
 	}
-	leftTitle := fmt.Sprintf("%s %s%s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(m.activeName), ephBadge)
-	escBack := statusStyle.Render("· [Esc] Back")
+	leftTitle := fmt.Sprintf("%s %s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(m.activeName), ephBadge)
+	escBack := m.styles.Status.Render("· [Esc] Back")
 	leftPart := fmt.Sprintf("%s  %s", leftTitle, escBack)
 
 	rightPart := ""
 	if m.activeChatID != "" {
-		rightPart = jidStyle.Render(m.activeChatID)
+		rightPart = m.styles.Jid.Render(m.activeChatID)
 	}
 
 	leftW := lipgloss.Width(leftPart)
@@ -4039,7 +3992,7 @@ func (m *Model) renderChatView() []string {
 		if len(truncName) > availForName {
 			truncName = truncName[:max(1, availForName-1)] + "…"
 		}
-		leftTitle = fmt.Sprintf("%s %s%s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(truncName), ephBadge)
+		leftTitle = fmt.Sprintf("%s %s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(truncName), ephBadge)
 		leftPart = fmt.Sprintf("%s  %s", leftTitle, escBack)
 		leftW = lipgloss.Width(leftPart)
 		spaces := strings.Repeat(" ", max(1, cw-leftW-rightW))
@@ -4048,12 +4001,12 @@ func (m *Model) renderChatView() []string {
 		headerText = leftPart
 	}
 
-	divider := dividerStyle.Render(strings.Repeat("─", cw))
+	divider := m.styles.Divider.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
 
 	var msgLines []string
 	if len(m.activeMsgs) == 0 {
-		msgLines = append(msgLines, statusStyle.Render("  (No messages in this session yet. Type below to send.)"))
+		msgLines = append(msgLines, m.styles.Status.Render("  (No messages in this session yet. Type below to send.)"))
 	} else {
 		msgWrapWidth := max(20, cw-6)
 		wrapStyle := lipgloss.NewStyle().Width(msgWrapWidth)
@@ -4096,13 +4049,13 @@ func (m *Model) renderChatView() []string {
 				if pos != -1 {
 					if len(mediaIndices) > 1 {
 						if pos == m.selectedMediaIdx {
-							mediaBadge = " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#11111B")).Background(lipgloss.Color("#FAB387")).Render(fmt.Sprintf(" ▶ [%d/%d] ", pos+1, len(mediaIndices)))
+							mediaBadge = " " + m.styles.MediaBadgeSelected.Render(fmt.Sprintf(" ▶ [%d/%d] ", pos+1, len(mediaIndices)))
 						} else {
-							mediaBadge = " " + statusStyle.Render(fmt.Sprintf("[%d/%d]", pos+1, len(mediaIndices)))
+							mediaBadge = " " + m.styles.Status.Render(fmt.Sprintf("[%d/%d]", pos+1, len(mediaIndices)))
 						}
 					} else {
 						if pos == m.selectedMediaIdx {
-							mediaBadge = " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#11111B")).Background(lipgloss.Color("#FAB387")).Render(" ▶ MEDIA ")
+							mediaBadge = " " + m.styles.MediaBadgeSelected.Render(" ▶ MEDIA ")
 						}
 					}
 				}
@@ -4110,21 +4063,21 @@ func (m *Model) renderChatView() []string {
 
 			cursorPrefix := "  "
 			if isHovered {
-				cursorPrefix = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("▸ ")
+				cursorPrefix = m.styles.CursorPrefix.Render("▸ ")
 			}
 
 			isSelected := m.isMsgMultiSelected(msg.ID)
 			selectPrefix := ""
 			if isSelected {
-				selectPrefix = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render("[✓] ")
+				selectPrefix = m.styles.SelectPrefix.Render("[✓] ")
 			}
 
 			if msg.IsFromMe {
 				header = fmt.Sprintf("%s%s%s %s%s",
 					cursorPrefix,
 					selectPrefix,
-					lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render("You"),
-					statusStyle.Render(timeStr),
+					m.styles.MsgYouHeader.Render("You"),
+					m.styles.Status.Render(timeStr),
 					mediaBadge,
 				)
 			} else {
@@ -4135,8 +4088,8 @@ func (m *Model) renderChatView() []string {
 				header = fmt.Sprintf("%s%s%s %s%s",
 					cursorPrefix,
 					selectPrefix,
-					selectedTitleStyle.Render(sender),
-					statusStyle.Render(timeStr),
+					m.styles.SelectedTitle.Render(sender),
+					m.styles.Status.Render(timeStr),
 					mediaBadge,
 				)
 			}
@@ -4144,9 +4097,9 @@ func (m *Model) renderChatView() []string {
 
 			bodyPrefix := "    "
 			if isHovered {
-				bodyPrefix = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#FAB387")).Render("┃ ")
+				bodyPrefix = "  " + m.styles.BodyPrefixCursor.Render("┃ ")
 			} else if isSelected {
-				bodyPrefix = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E3A1")).Render("┃ ")
+				bodyPrefix = "  " + m.styles.BodyPrefixSelect.Render("┃ ")
 			}
 
 			if msg.QuotedText != "" || msg.QuotedID != "" {
@@ -4212,10 +4165,10 @@ func (m *Model) renderChatView() []string {
 				var quoteLine string
 				if msg.IsEdit {
 					cleanText := strings.TrimPrefix(quotePreview, "[EDIT] ")
-					editTag := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("[EDIT] ")
-					quoteLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render("┌─ ") + editTag + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Italic(true).Render(cleanText)
+					editTag := m.styles.EditTag.Render("[EDIT] ")
+					quoteLine = m.styles.QuoteLinePrefix.Render("┌─ ") + editTag + m.styles.QuoteLineClean.Render(cleanText)
 				} else {
-					quoteLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Italic(true).Render("┌─ " + quotePreview)
+					quoteLine = m.styles.QuoteLineClean.Render("┌─ " + quotePreview)
 				}
 				msgLines = append(msgLines, bodyPrefix+quoteLine)
 			}
@@ -4246,10 +4199,10 @@ func (m *Model) renderChatView() []string {
 		if len(replySnippet) > maxSnippetW {
 			replySnippet = replySnippet[:maxSnippetW-3] + "..."
 		}
-		replyBarStr = "  " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("↩ Replying to ") +
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CDD6F4")).Render(replySender) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8")).Render(": "+replySnippet) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render("  (Esc to cancel)")
+		replyBarStr = "  " + m.styles.ReplyBarPrompt.Render("↩ Replying to ") +
+			m.styles.ReplyBarSender.Render(replySender) +
+			m.styles.ReplyBarSnippet.Render(": "+replySnippet) +
+			m.styles.ReplyBarEsc.Render("  (Esc to cancel)")
 		replyBarLines = 1
 	}
 
@@ -4261,16 +4214,16 @@ func (m *Model) renderChatView() []string {
 		if len(origSnippet) > maxSnippetW {
 			origSnippet = origSnippet[:maxSnippetW-3] + "..."
 		}
-		editBarStr = "  " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("✎ Editing: ") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8")).Render(origSnippet) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render("  (Enter to save, Esc to cancel)")
+		editBarStr = "  " + m.styles.EditBarPrompt.Render("✎ Editing: ") +
+			m.styles.EditBarSnippet.Render(origSnippet) +
+			m.styles.EditBarEsc.Render("  (Enter to save, Esc to cancel)")
 		editBarLines = 1
 	}
 
 	var mentionHintLines []string
 	if len(m.mentionHints) > 0 {
-		header := "  " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89DCEB")).Render("@ Mention") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" [Tab/Enter: tag · Ctrl+N/P: select · Esc: close]:")
+		header := "  " + m.styles.MentionHeaderPrompt.Render("@ Mention") +
+			m.styles.MentionHeaderEsc.Render(" [Tab/Enter: tag · Ctrl+N/P: select · Esc: close]:")
 		mentionHintLines = append(mentionHintLines, header)
 
 		maxVisible := 4
@@ -4311,21 +4264,21 @@ func (m *Model) renderChatView() []string {
 
 			var itemLine string
 			if i == m.mentionCursor {
-				styledPrefix := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render(prefix)
-				styledName := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6E3A1")).Render(name)
-				styledPhone := lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(phoneInfo)
+				styledPrefix := m.styles.MentionItemSelPref.Render(prefix)
+				styledName := m.styles.MentionItemSelName.Render(name)
+				styledPhone := m.styles.MentionItemPhone.Render(phoneInfo)
 				itemLine = styledPrefix + styledName + styledPhone
 			} else {
 				styledPrefix := prefix
-				styledName := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Render(name)
-				styledPhone := lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(phoneInfo)
+				styledName := m.styles.MentionItemNormName.Render(name)
+				styledPhone := m.styles.MentionItemPhone.Render(phoneInfo)
 				itemLine = styledPrefix + styledName + styledPhone
 			}
 			mentionHintLines = append(mentionHintLines, itemLine)
 		}
 
 		if len(m.mentionHints) > maxVisible {
-			footer := "    " + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(
+			footer := "    " + m.styles.MentionFooter.Render(
 				fmt.Sprintf("... (%d/%d matches · type to filter)", m.mentionCursor+1, len(m.mentionHints)),
 			)
 			mentionHintLines = append(mentionHintLines, footer)
@@ -4404,11 +4357,11 @@ func (m *Model) renderChatView() []string {
 
 	statusNotice := ""
 	if m.promptOpenWith {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Open with: ") + m.openWithInput.View() + lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086")).Render(" (Enter to open, Esc to cancel)")
+		statusNotice = m.styles.PromptText.Render("Open with: ") + m.openWithInput.View() + m.styles.PromptEsc.Render(" (Enter to open, Esc to cancel)")
 	} else if m.confirmDocAction {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Document: Open [o], Open with [w], Save [s], or Choose location [S]? (Esc to cancel)")
+		statusNotice = m.styles.PromptText.Render("Document: Open [o], Open with [w], Save [s], or Choose location [S]? (Esc to cancel)")
 	} else if m.confirmSave {
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387")).Render("Save? [y/s: default dir, S: choose location, n: cancel]")
+		statusNotice = m.styles.PromptText.Render("Save? [y/s: default dir, S: choose location, n: cancel]")
 	} else if m.confirmDelete {
 		promptText := "Delete message for you? (y/N)"
 		if len(m.pendingDeleteMultiMsgs) > 0 {
@@ -4419,19 +4372,19 @@ func (m *Model) renderChatView() []string {
 		} else if m.pendingDeleteForEveryone {
 			promptText = "Delete message for everyone? (y/N)"
 		}
-		statusNotice = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F38BA8")).Render(promptText)
+		statusNotice = m.styles.ErrorText.Render(promptText)
 	} else if m.previewStatus != "" {
-		statusNotice = lipgloss.NewStyle().Foreground(lipgloss.Color("#89DCEB")).Render(m.previewStatus)
+		statusNotice = m.styles.NoticeText.Render(m.previewStatus)
 	}
 
 	if dynamicHelp != "" && statusNotice != "" {
 		if lipgloss.Width(dynamicHelp)+3+lipgloss.Width(statusNotice) <= cw {
-			lines = append(lines, helpStyle.Render(dynamicHelp)+" · "+statusNotice)
+			lines = append(lines, m.styles.Help.Render(dynamicHelp)+" · "+statusNotice)
 		} else {
 			lines = append(lines, statusNotice)
 		}
 	} else if dynamicHelp != "" {
-		lines = append(lines, helpStyle.Render(dynamicHelp))
+		lines = append(lines, m.styles.Help.Render(dynamicHelp))
 	} else if statusNotice != "" {
 		lines = append(lines, statusNotice)
 	} else {
@@ -4465,15 +4418,15 @@ func (m *Model) renderDateDivider(t time.Time, width int) string {
 	availW := max(textW+4, width-4)
 	if availW <= textW+4 {
 		leftPad := max(0, (width-textW)/2)
-		return strings.Repeat(" ", leftPad) + statusStyle.Render(text)
+		return strings.Repeat(" ", leftPad) + m.styles.Status.Render(text)
 	}
 
 	lineW := (availW - textW) / 2
 	leftRule := strings.Repeat("─", max(2, lineW))
 	rightRule := strings.Repeat("─", max(2, availW-textW-len([]rune(leftRule))))
 
-	styledText := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A6ADC8")).Render(text)
-	line := dividerStyle.Render(leftRule) + styledText + dividerStyle.Render(rightRule)
+	styledText := m.styles.DateDividerText.Render(text)
+	line := m.styles.Divider.Render(leftRule) + styledText + m.styles.Divider.Render(rightRule)
 	totalW := lipgloss.Width(line)
 	leftPad := max(0, (width-totalW)/2)
 	return strings.Repeat(" ", leftPad) + line
@@ -4484,10 +4437,10 @@ func (m *Model) renderContactPickerView() []string {
 	var lines []string
 
 	headerText := fmt.Sprintf("%s  %s",
-		titleStyle.Render("Send Message Upfront"),
-		statusStyle.Render("· Select contact without loading history"),
+		m.styles.Title.Render("Send Message Upfront"),
+		m.styles.Status.Render("· Select contact without loading history"),
 	)
-	divider := dividerStyle.Render(strings.Repeat("─", cw))
+	divider := m.styles.Divider.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
 
 	lines = append(lines, m.contactSearch.View())
@@ -4496,13 +4449,13 @@ func (m *Model) renderContactPickerView() []string {
 	maxItems := m.maxVisibleContacts()
 
 	if m.loadingContact {
-		lines = append(lines, statusStyle.Render("  Loading contacts..."))
+		lines = append(lines, m.styles.Status.Render("  Loading contacts..."))
 		for k := 1; k < maxItems; k++ {
 			lines = append(lines, "")
 		}
 	} else if len(m.filteredList) == 0 {
 		query := m.contactSearch.Value()
-		lines = append(lines, statusStyle.Render(fmt.Sprintf("  No contacts found matching %q", query)))
+		lines = append(lines, m.styles.Status.Render(fmt.Sprintf("  No contacts found matching %q", query)))
 		for k := 1; k < maxItems; k++ {
 			lines = append(lines, "")
 		}
@@ -4552,11 +4505,11 @@ func (m *Model) renderContactPickerView() []string {
 
 			var styledLabel string
 			if isSelected {
-				styledLabel = selectedTitleStyle.Render(label)
+				styledLabel = m.styles.SelectedTitle.Render(label)
 			} else {
-				styledLabel = normalTitleStyle.Render(label)
+				styledLabel = m.styles.NormalTitle.Render(label)
 			}
-			styledPhone := statusStyle.Render(phone)
+			styledPhone := m.styles.Status.Render(phone)
 
 			lines = append(lines, prefix+styledLabel+gap+styledPhone)
 		}

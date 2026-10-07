@@ -157,6 +157,9 @@ type Config struct {
 	ClearOnExit      *bool `json:"clear_on_exit" yaml:"clear_on_exit"`
 	ClearMediaOnExit *bool `json:"clear_media_on_exit" yaml:"clear_media_on_exit"`
 
+	// Theme specifies an optional custom theme file path (e.g. "theme.yaml").
+	Theme string `json:"theme" yaml:"theme"`
+
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
 }
@@ -897,6 +900,9 @@ func mergeConfig(base, overlay *Config) {
 	}
 	if overlay.ClearMediaOnExit != nil {
 		base.ClearMediaOnExit = overlay.ClearMediaOnExit
+	}
+	if overlay.Theme != "" {
+		base.Theme = overlay.Theme
 	}
 }
 

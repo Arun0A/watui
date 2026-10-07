@@ -114,9 +114,9 @@ var allKeybindGroups = []keybindGroup{
 }
 
 func (m *Model) getKeybindContentLines(cw int) []string {
-	groupTitleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FAB387"))
-	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89DCEB"))
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
+	groupTitleStyle := m.styles.KeybindGroupTitle
+	keyStyle := m.styles.KeybindKey
+	descStyle := m.styles.KeybindDesc
 
 	var contentLines []string
 	keyColW := 28
@@ -155,11 +155,11 @@ func (m *Model) renderKeybindsHelpView() []string {
 	var lines []string
 
 	leftPart := fmt.Sprintf("%s %s  %s",
-		titleStyle.Render("watui"),
-		selectedTitleStyle.Render("Keyboard Shortcuts"),
-		statusStyle.Render("· [Esc/q] Back"),
+		m.styles.Title.Render("watui"),
+		m.styles.SelectedTitle.Render("Keyboard Shortcuts"),
+		m.styles.Status.Render("· [Esc/q] Back"),
 	)
-	rightPart := jidStyle.Render("[Ctrl+H / Ctrl+/] Close")
+	rightPart := m.styles.Jid.Render("[Ctrl+H / Ctrl+/] Close")
 	leftW := lipgloss.Width(leftPart)
 	rightW := lipgloss.Width(rightPart)
 
@@ -171,7 +171,7 @@ func (m *Model) renderKeybindsHelpView() []string {
 		headerText = leftPart
 	}
 
-	divider := dividerStyle.Render(strings.Repeat("─", cw))
+	divider := m.styles.Divider.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
 
 	contentLines := m.getKeybindContentLines(cw)
@@ -207,7 +207,7 @@ func (m *Model) renderKeybindsHelpView() []string {
 		}
 		scrollInfo = fmt.Sprintf(" [%d%% - %d/%d]", scrollPct, start+1, totalContent)
 	}
-	footerText := helpStyle.Render("[Esc/q/Ctrl+H] Back · [j/k/PgUp/PgDn] Scroll") + statusStyle.Render(scrollInfo)
+	footerText := m.styles.Help.Render("[Esc/q/Ctrl+H] Back · [j/k/PgUp/PgDn] Scroll") + m.styles.Status.Render(scrollInfo)
 	lines = append(lines, footerText)
 
 	return lines

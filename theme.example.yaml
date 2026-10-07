@@ -1,0 +1,69 @@
+# ==============================================================================
+# watui Theme Configuration (theme.yaml)
+# ==============================================================================
+# This file is completely optional. If deleted or absent, watui uses its
+# built-in default theme with zero extra overhead.
+#
+# To use this file:
+#   - Copy or rename it to "theme.yaml" in your config directory:
+#       * Linux / BSD: ~/.config/watui/theme.yaml (or $XDG_CONFIG_HOME/watui/theme.yaml)
+#       * macOS:       ~/.config/watui/theme.yaml
+#       * Windows:     %APPDATA%\watui\theme.yaml or next to watui.exe
+#   - Or place it directly next to the watui executable (portable mode)
+#   - Or specify "theme: /path/to/theme.yaml" in watui.yaml
+#
+# You can override all keys, or just a few. Any omitted key will automatically
+# fall back to its built-in default color.
+#
+# Supported color formats:
+#   - 24-bit Hex codes: "#RRGGBB" (e.g. "#A6E3A1") or "#RGB" (e.g. "#AFA")
+#   - ANSI 256 colors:  "1" - "256"
+#   - Basic ANSI names: "red", "green", "blue", "cyan", "magenta", "yellow", "white", "black"
+# ==============================================================================
+
+# --- Header & General ---
+title: "#A6E3A1"               # App title ("watui", "Send Message Upfront")
+divider: "#313244"             # Horizontal dividing lines & rule dividers
+status: "#6C7086"              # Connection status, timestamps (15:04), faint metadata
+notice: "#89DCEB"              # Transient status notifications & banners
+error: "#F38BA8"               # Error messages & destructive prompts (e.g. delete confirm)
+prompt: "#FAB387"              # Interactive prompts ("Open with", "Save?", media actions)
+
+# --- Chat List & Inbox ---
+chat_selected: "#89B4FA"       # Title of currently selected/hovered chat
+chat_normal: "#CDD6F4"         # Title of unselected chats
+snippet: "#6C7086"             # Last message preview snippet in chat list
+help: "#585B70"                # Bottom keybind help bar & faint JIDs
+
+# --- Badges ---
+badge_unread_bg: "#A6E3A1"     # Unread count badge background
+badge_unread_fg: "#11111B"     # Unread count badge text
+badge_pin_bg: "#89B4FA"        # Pinned chat badge background
+badge_pin_fg: "#11111B"        # Pinned chat badge text
+badge_mention_bg: "#A6E3A1"    # Mention (@) unread badge background
+badge_mention_fg: "#11111B"    # Mention (@) unread badge text
+badge_media_bg: "#FAB387"      # Media indicator [▶ MEDIA] background
+badge_media_fg: "#11111B"      # Media indicator text
+badge_ephemeral: "#FAB387"     # Disappearing timer badge [⏱ 24h]
+
+# --- Message View ---
+cursor: "#FAB387"              # Message navigation cursor (▸) and left bar (┃)
+select: "#A6E3A1"              # Multi-select checkmark ([✓]) and select bar (┃)
+msg_you: "#A6E3A1"             # "You" sender label
+msg_them: "#89B4FA"            # Other participants' sender labels
+msg_text: "#CDD6F4"            # Message body text
+text_muted: "#A6ADC8"          # Blurred input text, date divider label, snippets
+quote_prefix: "#6C7086"        # Quoted message border (┌─) and snippet text
+edit_tag: "#FAB387"            # [EDIT] tag indicator
+
+# --- Input Box & Mentions ---
+input_text: "#CDD6F4"          # Text inside typing area
+input_prompt: "#89DCEB"        # Input prompt symbol ("> ")
+input_placeholder: "#6C7086"   # Placeholder text ("Type a message...")
+mention_you: "#A6E3A1"         # Mention @You tag in message text
+mention_other: "#89B4FA"       # Mention @Other tag in message text
+
+# --- Keybinds Help Screen (F1 / ?) ---
+keybind_group: "#FAB387"       # Help screen category header
+keybind_key: "#89DCEB"         # Key combination name
+keybind_desc: "#CDD6F4"        # Action description

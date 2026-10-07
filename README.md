@@ -290,6 +290,14 @@ notifications:
 # clear_on_exit: false   # Set to true to clear all cached media on TUI exit (default: false)
 ```
 
+### Theme Customization (`theme.yaml`)
+
+By default, `watui` uses a built-in Catppuccin Mocha color palette without requiring any extra files.
+
+To customize colors, create a `theme.yaml` in your configuration directory (`~/.config/watui/theme.yaml`) or next to the `watui` executable. You can override any key, or just a few. Omitted keys automatically fall back to their default values.
+
+See [**`theme.example.yaml`**](theme.example.yaml) for all available color options and documentation.
+
 ---
 
 ## Building from Source
