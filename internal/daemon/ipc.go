@@ -29,6 +29,7 @@ type InitialSnapshot struct {
 	Contacts       []domain.Contact        `json:"contacts"`
 	ArchivedChats  map[string]bool         `json:"archived_chats"`
 	MutedChats     map[string]bool         `json:"muted_chats,omitempty"`
+	EphemeralChats map[string]uint32       `json:"ephemeral_chats,omitempty"`
 }
 
 type SendTextParams struct {
@@ -94,4 +95,9 @@ type GetChatHistoryParams struct {
 	ChatID          string    `json:"chat_id"`
 	Limit           int       `json:"limit"`
 	BeforeTimestamp time.Time `json:"before_timestamp"`
+}
+
+type SetChatEphemeralParams struct {
+	ChatID string `json:"chat_id"`
+	Timer  uint32 `json:"timer"`
 }

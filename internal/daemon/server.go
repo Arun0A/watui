@@ -98,6 +98,10 @@ func NewServer(adapter domain.WhatsAppAdapter, dbPath string) (*Server, error) {
 		s.BroadcastEvent("dismiss", chatID)
 	})
 
+	adapter.OnChatEphemeral(func(chatID string, timer uint32) {
+		s.BroadcastEvent("ephemeral", SetChatEphemeralParams{ChatID: chatID, Timer: timer})
+	})
+
 	go s.acceptLoop()
 
 	return s, nil
@@ -169,6 +173,7 @@ func (s *Server) handleClient(conn net.Conn) {
 		UnreadMessages: unreads,
 		ArchivedChats:  archivedMap,
 		MutedChats:     mutedMap,
+		EphemeralChats: s.adapter.GetEphemeralChats(),
 	}
 
 	snapData, _ := json.Marshal(snapshot)
@@ -426,6 +431,26 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 				resp.Error = err.Error()
 			} else {
 				s.BroadcastEvent("muted", p)
+			}
+		}
+
+	case "get_chat_ephemeral":
+		var p DismissParams
+		if err := json.Unmarshal(req.Params, &p); err == nil {
+			timer := s.adapter.GetChatEphemeralTimer(p.ChatID)
+			resp.Result, _ = json.Marshal(timer)
+		}
+
+	case "set_chat_ephemeral":
+		var p SetChatEphemeralParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			err := s.adapter.SetChatDisappearingTimer(reqCtx, p.ChatID, time.Duration(p.Timer)*time.Second)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				s.BroadcastEvent("ephemeral", p)
 			}
 		}
 

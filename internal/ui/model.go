@@ -123,10 +123,11 @@ type Model struct {
 	width         int
 	height        int
 
-	msgChan      chan domain.Message
-	statusChan   chan domain.ConnectionStatus
-	dismissChan  chan string
-	contactsChan chan []domain.Contact
+	msgChan       chan domain.Message
+	statusChan    chan domain.ConnectionStatus
+	dismissChan   chan string
+	contactsChan  chan []domain.Contact
+	ephemeralChan chan ephemeralUpdateMsg
 
 	// Active external preview/player process
 	activeViewerCmd *exec.Cmd
@@ -140,6 +141,15 @@ type contactsLoadedMsg []domain.Contact
 type messageSentMsg domain.Message
 type unreadsLoadedMsg []domain.Message
 type chatDismissedMsg string
+type ephemeralUpdateMsg struct {
+	ChatID string
+	Timer  uint32
+}
+type ephemeralSetResultMsg struct {
+	ChatID string
+	Timer  uint32
+	Err    error
+}
 type sendErrMsg struct {
 	ChatID string
 	Text   string
@@ -280,6 +290,7 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		statusChan:        make(chan domain.ConnectionStatus, 10),
 		dismissChan:       make(chan string, 50),
 		contactsChan:      make(chan []domain.Contact, 10),
+		ephemeralChan:     make(chan ephemeralUpdateMsg, 50),
 		contactsByJID:     make(map[string]*domain.Contact),
 		contactsByUser:    make(map[string]*domain.Contact),
 		multiSelectedMsgs: make(map[string]struct{}),
@@ -312,6 +323,12 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		default:
 		}
 	})
+	adapter.OnChatEphemeral(func(chatID string, timer uint32) {
+		select {
+		case m.ephemeralChan <- ephemeralUpdateMsg{ChatID: chatID, Timer: timer}:
+		default:
+		}
+	})
 
 	return m
 }
@@ -323,6 +340,7 @@ func (m *Model) Init() tea.Cmd {
 		m.waitForMessages(),
 		m.waitForStatus(),
 		m.waitForChatDismissed(),
+		m.waitForEphemeralUpdated(),
 		m.loadPersistedUnread(),
 		m.loadContacts(),
 		m.waitForContactsUpdated(),
@@ -570,6 +588,12 @@ func (m *Model) waitForChatDismissed() tea.Cmd {
 	}
 }
 
+func (m *Model) waitForEphemeralUpdated() tea.Cmd {
+	return func() tea.Msg {
+		return <-m.ephemeralChan
+	}
+}
+
 func (m *Model) waitForContactsUpdated() tea.Cmd {
 	return func() tea.Msg {
 		c := <-m.contactsChan
@@ -696,6 +720,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatDismissedMsg:
 		m.dismissUnread(string(msg))
 		cmds = append(cmds, m.waitForChatDismissed())
+
+	case ephemeralUpdateMsg:
+		cmds = append(cmds, m.waitForEphemeralUpdated())
+
+	case ephemeralSetResultMsg:
+		if msg.Err != nil {
+			m.previewStatus = fmt.Sprintf("Error setting disappearing messages: %v", msg.Err)
+		} else if msg.Timer > 0 {
+			m.previewStatus = fmt.Sprintf("Disappearing messages set to %s", domain.FormatDisappearingTimer(msg.Timer))
+		} else {
+			m.previewStatus = "Disappearing messages turned off"
+		}
+		return m, nil
 
 	case unreadsLoadedMsg:
 		var unreads []domain.Message
@@ -3216,6 +3253,63 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		if text == "" {
 			return nil
 		}
+		if strings.HasPrefix(text, "/ephemeral") || strings.HasPrefix(text, "/disappearing") {
+			m.input.Reset()
+			m.input.SetHeight(1)
+			m.mentionHints = nil
+			m.mentionCursor = 0
+			chatID := m.activeChatID
+			if chatID == "" {
+				m.previewStatus = "No active chat selected"
+				return nil
+			}
+			parts := strings.Fields(text)
+			arg := ""
+			if len(parts) > 1 {
+				arg = strings.ToLower(parts[1])
+			}
+			currTimer := m.adapter.GetChatEphemeralTimer(chatID)
+			var targetDur time.Duration
+			var actionName string
+			switch arg {
+			case "":
+				if currTimer > 0 {
+					targetDur = time.Duration(currTimer) * time.Second
+					actionName = fmt.Sprintf("Re-applying disappearing timer (%s)...", domain.FormatDisappearingTimer(currTimer))
+				} else {
+					m.previewStatus = "Disappearing messages are off. Use: /ephemeral [24h | 7d | 90d | off]"
+					return nil
+				}
+			case "status":
+				if currTimer > 0 {
+					m.previewStatus = fmt.Sprintf("Disappearing messages: %s", domain.FormatDisappearingTimer(currTimer))
+				} else {
+					m.previewStatus = "Disappearing messages: off"
+				}
+				return nil
+			case "24h", "24", "1d":
+				targetDur = 24 * time.Hour
+				actionName = "Setting disappearing timer to 24h..."
+			case "7d", "7", "1w":
+				targetDur = 7 * 24 * time.Hour
+				actionName = "Setting disappearing timer to 7d..."
+			case "90d", "90", "3m":
+				targetDur = 90 * 24 * time.Hour
+				actionName = "Setting disappearing timer to 90d..."
+			case "off", "0", "disable":
+				targetDur = 0
+				actionName = "Turning off disappearing messages..."
+			default:
+				m.previewStatus = "Invalid option. Use: /ephemeral [24h | 7d | 90d | off | status]"
+				return nil
+			}
+
+			m.previewStatus = actionName
+			return func() tea.Msg {
+				err := m.adapter.SetChatDisappearingTimer(m.ctx, chatID, targetDur)
+				return ephemeralSetResultMsg{ChatID: chatID, Timer: uint32(targetDur.Seconds()), Err: err}
+			}
+		}
 		m.previewStatus = "Sending..."
 		m.input.Reset()
 		m.input.SetHeight(1)
@@ -3517,6 +3611,9 @@ var (
 				Foreground(lipgloss.Color("#11111B")).
 				Background(lipgloss.Color("#A6E3A1")).
 				Padding(0, 1)
+
+	ephemeralBadgeStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FAB387"))
 
 	selectedTitleStyle = lipgloss.NewStyle().
 				Bold(true).
@@ -3913,7 +4010,13 @@ func (m *Model) renderChatView() []string {
 	if strings.Contains(m.activeChatID, "@g.us") {
 		chatPrefix = "Group"
 	}
-	leftTitle := fmt.Sprintf("%s %s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(m.activeName))
+	ephBadge := ""
+	if m.adapter != nil && m.activeChatID != "" {
+		if timer := m.adapter.GetChatEphemeralTimer(m.activeChatID); timer > 0 {
+			ephBadge = " " + ephemeralBadgeStyle.Render(fmt.Sprintf("[⏱ %s]", domain.FormatDisappearingTimer(timer)))
+		}
+	}
+	leftTitle := fmt.Sprintf("%s %s%s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(m.activeName), ephBadge)
 	escBack := statusStyle.Render("· [Esc] Back")
 	leftPart := fmt.Sprintf("%s  %s", leftTitle, escBack)
 
@@ -3936,7 +4039,7 @@ func (m *Model) renderChatView() []string {
 		if len(truncName) > availForName {
 			truncName = truncName[:max(1, availForName-1)] + "…"
 		}
-		leftTitle = fmt.Sprintf("%s %s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(truncName))
+		leftTitle = fmt.Sprintf("%s %s%s", titleStyle.Render(chatPrefix), selectedTitleStyle.Render(truncName), ephBadge)
 		leftPart = fmt.Sprintf("%s  %s", leftTitle, escBack)
 		leftW = lipgloss.Width(leftPart)
 		spaces := strings.Repeat(" ", max(1, cw-leftW-rightW))

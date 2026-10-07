@@ -93,6 +93,11 @@ type Adapter struct {
 	groupParticipantsMu sync.RWMutex
 	groupParticipants   map[string][]domain.Contact
 
+	ephemeralMu        sync.RWMutex
+	ephemeralTimers    map[string]uint32
+	ephemeralSettingTS map[string]int64
+	ephemeralHandlers  []func(chatID string, timer uint32)
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -620,6 +625,11 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			jid TEXT PRIMARY KEY,
 			name TEXT
 		);
+		CREATE TABLE IF NOT EXISTS watui_chat_ephemeral (
+			chat_id TEXT PRIMARY KEY,
+			timer INTEGER NOT NULL,
+			setting_timestamp INTEGER NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS watui_unread_messages (
 			id TEXT PRIMARY KEY,
 			chat_id TEXT NOT NULL,
@@ -716,17 +726,23 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	adapterCtx, cancel := context.WithCancel(ctx)
 	adapter := &Adapter{
-		client:            client,
-		container:         container,
-		localDB:           localDB,
-		config:            cfg,
-		appConfig:         cfg.AppConfig,
-		currentStatus:     domain.StatusDisconnected,
-		mediaCache:        make(map[string]*waE2E.Message),
-		archivedChats:     make(map[string]bool),
-		groupParticipants: make(map[string][]domain.Contact),
-		ctx:               adapterCtx,
-		cancel:            cancel,
+		client:             client,
+		container:          container,
+		localDB:            localDB,
+		config:             cfg,
+		appConfig:          cfg.AppConfig,
+		currentStatus:      domain.StatusDisconnected,
+		mediaCache:         make(map[string]*waE2E.Message),
+		archivedChats:      make(map[string]bool),
+		groupParticipants:  make(map[string][]domain.Contact),
+		ephemeralTimers:    make(map[string]uint32),
+		ephemeralSettingTS: make(map[string]int64),
+		ctx:                adapterCtx,
+		cancel:             cancel,
+	}
+
+	if localDB != nil {
+		adapter.loadEphemeralChats()
 	}
 
 	client.AddEventHandler(adapter.handleEvent)
@@ -735,6 +751,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	if adapter.IsLoggedIn() {
 		adapter.loadArchivedChats()
 		adapter.loadMutedChats()
+		adapter.loadEphemeralChats()
 		initial := adapter.fetchLocalContacts(adapterCtx)
 		if len(initial) > 0 {
 			adapter.contactsMu.Lock()
@@ -1168,6 +1185,380 @@ func (a *Adapter) SetChatMuted(ctx context.Context, chatID string, muted bool, d
 	return a.client.SendAppState(ctx, patch)
 }
 
+func (a *Adapter) loadEphemeralChats() {
+	if a.localDB == nil {
+		return
+	}
+	// 1. Load from watui_chat_ephemeral
+	rows, err := a.localDB.Query("SELECT chat_id, timer, setting_timestamp FROM watui_chat_ephemeral WHERE timer > 0")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var cid string
+			var timer uint32
+			var ts int64
+			if err := rows.Scan(&cid, &timer, &ts); err == nil && cid != "" && timer > 0 {
+				a.updateChatEphemeralTimer(cid, timer, ts)
+			}
+		}
+	}
+
+	// 2. Scan recent messages from watui_messages to automatically adopt active disappearing timers for all existing chats
+	mRows, err := a.localDB.Query(`
+		SELECT chat_id, raw_message FROM watui_messages 
+		WHERE raw_message IS NOT NULL 
+		ORDER BY timestamp DESC
+	`)
+	if err == nil {
+		defer mRows.Close()
+		seen := make(map[string]bool)
+		for mRows.Next() {
+			var cid string
+			var rawBytes []byte
+			if err := mRows.Scan(&cid, &rawBytes); err == nil && len(rawBytes) > 0 {
+				if seen[cid] {
+					continue
+				}
+				seen[cid] = true
+				var m waE2E.Message
+				if err := proto.Unmarshal(rawBytes, &m); err == nil {
+					ci := extractContextInfo(&m)
+					if ci != nil && ci.GetExpiration() > 0 {
+						ts := ci.GetEphemeralSettingTimestamp()
+						if ts <= 0 {
+							ts = time.Now().Unix()
+						}
+						a.updateChatEphemeralTimer(cid, ci.GetExpiration(), ts)
+					}
+				}
+			}
+		}
+	}
+}
+
+// GetChatEphemeralTimer returns the disappearing message timer (in seconds) for a chat, or 0 if disabled.
+func (a *Adapter) GetChatEphemeralTimer(chatID string) uint32 {
+	if chatID == "" {
+		return 0
+	}
+	t, _ := a.getChatEphemeralTimer(context.Background(), chatID)
+	return t
+}
+
+// GetEphemeralChats returns a map of all chats with disappearing messages enabled along with their timer in seconds.
+func (a *Adapter) GetEphemeralChats() map[string]uint32 {
+	a.ephemeralMu.RLock()
+	defer a.ephemeralMu.RUnlock()
+	res := make(map[string]uint32, len(a.ephemeralTimers))
+	for k, timer := range a.ephemeralTimers {
+		if timer > 0 {
+			res[k] = timer
+		}
+	}
+	return res
+}
+
+// OnChatEphemeral registers a listener triggered when a chat's disappearing timer changes.
+func (a *Adapter) OnChatEphemeral(handler func(chatID string, timer uint32)) {
+	a.ephemeralMu.Lock()
+	defer a.ephemeralMu.Unlock()
+	a.ephemeralHandlers = append(a.ephemeralHandlers, handler)
+}
+
+func (a *Adapter) notifyChatEphemeral(chatID string, timer uint32) {
+	a.ephemeralMu.RLock()
+	handlers := make([]func(string, uint32), len(a.ephemeralHandlers))
+	copy(handlers, a.ephemeralHandlers)
+	a.ephemeralMu.RUnlock()
+	for _, h := range handlers {
+		h(chatID, timer)
+	}
+}
+
+// SetChatDisappearingTimer changes the disappearing messages timer on WhatsApp for a chat.
+func (a *Adapter) SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error {
+	if a.client == nil {
+		return errors.New("whatsapp client not initialized")
+	}
+	chatJID, err := NormalizeJID(chatID)
+	if err != nil {
+		return err
+	}
+	clean := chatJID.ToNonAD().String()
+	err = a.client.SetDisappearingTimer(ctx, chatJID, timer, time.Now())
+	if err != nil {
+		return err
+	}
+	a.updateChatEphemeralTimer(clean, uint32(timer.Seconds()), time.Now().Unix())
+	return nil
+}
+
+func (a *Adapter) updateChatEphemeralTimer(chatID string, timer uint32, settingTS int64) {
+	if chatID == "" {
+		return
+	}
+	clean := chatID
+	if parsed, err := NormalizeJID(chatID); err == nil {
+		clean = parsed.ToNonAD().String()
+	} else if parsed, err := types.ParseJID(chatID); err == nil {
+		clean = parsed.ToNonAD().String()
+	}
+
+	var allIDs []string
+	allIDs = append(allIDs, clean)
+	if chatID != clean {
+		allIDs = append(allIDs, chatID)
+	}
+
+	// Bidirectional LID <-> Phone resolution so DMs match regardless of representation
+	if strings.HasSuffix(clean, "@lid") {
+		lidUser := strings.TrimSuffix(clean, "@lid")
+		if idx := strings.Index(lidUser, ":"); idx != -1 {
+			lidUser = lidUser[:idx]
+		}
+		if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+			allIDs = append(allIDs, pn+"@s.whatsapp.net")
+		}
+	} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+		pn := strings.TrimSuffix(clean, "@s.whatsapp.net")
+		if idx := strings.Index(pn, ":"); idx != -1 {
+			pn = pn[:idx]
+		}
+		if lid := a.ResolvePhoneToLID(pn); lid != "" {
+			allIDs = append(allIDs, lid+"@lid")
+		}
+	}
+
+	a.ephemeralMu.Lock()
+	if a.ephemeralTimers == nil {
+		a.ephemeralTimers = make(map[string]uint32)
+	}
+	if a.ephemeralSettingTS == nil {
+		a.ephemeralSettingTS = make(map[string]int64)
+	}
+	prev := a.ephemeralTimers[clean]
+	for _, id := range allIDs {
+		if timer > 0 {
+			a.ephemeralTimers[id] = timer
+			a.ephemeralSettingTS[id] = settingTS
+		} else {
+			delete(a.ephemeralTimers, id)
+			delete(a.ephemeralSettingTS, id)
+		}
+	}
+	a.ephemeralMu.Unlock()
+
+	if a.localDB != nil {
+		for _, id := range allIDs {
+			if timer > 0 {
+				_, _ = a.localDB.Exec(`
+					INSERT OR REPLACE INTO watui_chat_ephemeral (chat_id, timer, setting_timestamp)
+					VALUES (?, ?, ?)
+				`, id, timer, settingTS)
+			} else {
+				_, _ = a.localDB.Exec(`DELETE FROM watui_chat_ephemeral WHERE chat_id = ?`, id)
+			}
+		}
+	}
+
+	if prev != timer {
+		for _, id := range allIDs {
+			a.notifyChatEphemeral(id, timer)
+		}
+	}
+}
+
+func (a *Adapter) getChatEphemeralTimer(ctx context.Context, chatID string) (uint32, int64) {
+	if chatID == "" {
+		return 0, 0
+	}
+	var chatJID types.JID
+	clean := chatID
+	if parsed, err := NormalizeJID(chatID); err == nil {
+		chatJID = parsed.ToNonAD()
+		clean = chatJID.String()
+	} else if parsed, err := types.ParseJID(chatID); err == nil {
+		chatJID = parsed.ToNonAD()
+		clean = chatJID.String()
+	}
+
+	var altID string
+	if strings.HasSuffix(clean, "@lid") {
+		lidUser := strings.TrimSuffix(clean, "@lid")
+		if idx := strings.Index(lidUser, ":"); idx != -1 {
+			lidUser = lidUser[:idx]
+		}
+		if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+			altID = pn + "@s.whatsapp.net"
+		}
+	} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+		pn := strings.TrimSuffix(clean, "@s.whatsapp.net")
+		if idx := strings.Index(pn, ":"); idx != -1 {
+			pn = pn[:idx]
+		}
+		if lid := a.ResolvePhoneToLID(pn); lid != "" {
+			altID = lid + "@lid"
+		}
+	}
+
+	a.ephemeralMu.RLock()
+	timer, ok := a.ephemeralTimers[clean]
+	if !ok {
+		timer, ok = a.ephemeralTimers[chatID]
+	}
+	if !ok && altID != "" {
+		timer, ok = a.ephemeralTimers[altID]
+	}
+	settingTS := a.ephemeralSettingTS[clean]
+	if settingTS == 0 {
+		settingTS = a.ephemeralSettingTS[chatID]
+	}
+	if settingTS == 0 && altID != "" {
+		settingTS = a.ephemeralSettingTS[altID]
+	}
+	a.ephemeralMu.RUnlock()
+
+	if ok && timer > 0 {
+		return timer, settingTS
+	}
+
+	// Check local database
+	if a.localDB != nil {
+		var dbTimer uint32
+		var dbTS int64
+		err := a.localDB.QueryRowContext(ctx, "SELECT timer, setting_timestamp FROM watui_chat_ephemeral WHERE chat_id = ? OR chat_id = ? OR chat_id = ?", clean, chatID, altID).Scan(&dbTimer, &dbTS)
+		if err == nil && dbTimer > 0 {
+			a.updateChatEphemeralTimer(clean, dbTimer, dbTS)
+			return dbTimer, dbTS
+		}
+	}
+
+	// For groups, query GetGroupInfo if connected and not cached
+	if chatJID.Server == types.GroupServer && a.client != nil && a.client.IsConnected() {
+		groupInfo, err := a.client.GetGroupInfo(ctx, chatJID)
+		if err == nil && groupInfo != nil {
+			gTimer := groupInfo.DisappearingTimer
+			now := time.Now().Unix()
+			a.updateChatEphemeralTimer(clean, gTimer, now)
+			return gTimer, now
+		}
+	}
+
+	// Chat history fallback: scan recent messages in this chat to detect if other clients have disappearing mode on
+	if a.localDB != nil {
+		var rawBytes []byte
+		row := a.localDB.QueryRowContext(ctx, `
+			SELECT raw_message FROM watui_messages 
+			WHERE (chat_id = ? OR chat_id = ? OR chat_id = ?) AND raw_message IS NOT NULL 
+			ORDER BY timestamp DESC LIMIT 1
+		`, clean, chatID, altID)
+		if err := row.Scan(&rawBytes); err == nil && len(rawBytes) > 0 {
+			var m waE2E.Message
+			if err := proto.Unmarshal(rawBytes, &m); err == nil {
+				ci := extractContextInfo(&m)
+				if ci != nil && ci.GetExpiration() > 0 {
+					exp := ci.GetExpiration()
+					ts := ci.GetEphemeralSettingTimestamp()
+					if ts <= 0 {
+						ts = time.Now().Unix()
+					}
+					a.updateChatEphemeralTimer(clean, exp, ts)
+					return exp, ts
+				}
+			}
+		}
+	}
+
+	return 0, 0
+}
+
+func (a *Adapter) prepareOutgoingMessage(ctx context.Context, recipientJID types.JID, waMsg *waE2E.Message) *waE2E.Message {
+	if waMsg == nil {
+		return nil
+	}
+	if waMsg.EphemeralMessage != nil {
+		return waMsg
+	}
+
+	timer, settingTS := a.getChatEphemeralTimer(ctx, recipientJID.ToNonAD().String())
+	if timer == 0 {
+		return waMsg
+	}
+	if settingTS <= 0 {
+		settingTS = time.Now().Unix()
+	}
+
+	mode := &waE2E.DisappearingMode{
+		Initiator:     waE2E.DisappearingMode_CHANGED_IN_CHAT.Enum(),
+		Trigger:       waE2E.DisappearingMode_CHAT_SETTING.Enum(),
+		InitiatedByMe: proto.Bool(true),
+	}
+
+	innerMsg := waMsg
+
+	if innerMsg.Conversation != nil {
+		ctxInfo := &waE2E.ContextInfo{
+			Expiration:                proto.Uint32(timer),
+			EphemeralSettingTimestamp: proto.Int64(settingTS),
+			DisappearingMode:          mode,
+		}
+		innerMsg = &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text:        innerMsg.Conversation,
+				ContextInfo: ctxInfo,
+			},
+		}
+	} else if innerMsg.ExtendedTextMessage != nil {
+		if innerMsg.ExtendedTextMessage.ContextInfo == nil {
+			innerMsg.ExtendedTextMessage.ContextInfo = &waE2E.ContextInfo{}
+		}
+		innerMsg.ExtendedTextMessage.ContextInfo.Expiration = proto.Uint32(timer)
+		innerMsg.ExtendedTextMessage.ContextInfo.EphemeralSettingTimestamp = proto.Int64(settingTS)
+		innerMsg.ExtendedTextMessage.ContextInfo.DisappearingMode = mode
+	} else if innerMsg.ImageMessage != nil {
+		if innerMsg.ImageMessage.ContextInfo == nil {
+			innerMsg.ImageMessage.ContextInfo = &waE2E.ContextInfo{}
+		}
+		innerMsg.ImageMessage.ContextInfo.Expiration = proto.Uint32(timer)
+		innerMsg.ImageMessage.ContextInfo.EphemeralSettingTimestamp = proto.Int64(settingTS)
+		innerMsg.ImageMessage.ContextInfo.DisappearingMode = mode
+	} else if innerMsg.VideoMessage != nil {
+		if innerMsg.VideoMessage.ContextInfo == nil {
+			innerMsg.VideoMessage.ContextInfo = &waE2E.ContextInfo{}
+		}
+		innerMsg.VideoMessage.ContextInfo.Expiration = proto.Uint32(timer)
+		innerMsg.VideoMessage.ContextInfo.EphemeralSettingTimestamp = proto.Int64(settingTS)
+		innerMsg.VideoMessage.ContextInfo.DisappearingMode = mode
+	} else if innerMsg.AudioMessage != nil {
+		if innerMsg.AudioMessage.ContextInfo == nil {
+			innerMsg.AudioMessage.ContextInfo = &waE2E.ContextInfo{}
+		}
+		innerMsg.AudioMessage.ContextInfo.Expiration = proto.Uint32(timer)
+		innerMsg.AudioMessage.ContextInfo.EphemeralSettingTimestamp = proto.Int64(settingTS)
+		innerMsg.AudioMessage.ContextInfo.DisappearingMode = mode
+	} else if innerMsg.DocumentMessage != nil {
+		if innerMsg.DocumentMessage.ContextInfo == nil {
+			innerMsg.DocumentMessage.ContextInfo = &waE2E.ContextInfo{}
+		}
+		innerMsg.DocumentMessage.ContextInfo.Expiration = proto.Uint32(timer)
+		innerMsg.DocumentMessage.ContextInfo.EphemeralSettingTimestamp = proto.Int64(settingTS)
+		innerMsg.DocumentMessage.ContextInfo.DisappearingMode = mode
+	} else if innerMsg.StickerMessage != nil {
+		if innerMsg.StickerMessage.ContextInfo == nil {
+			innerMsg.StickerMessage.ContextInfo = &waE2E.ContextInfo{}
+		}
+		innerMsg.StickerMessage.ContextInfo.Expiration = proto.Uint32(timer)
+		innerMsg.StickerMessage.ContextInfo.EphemeralSettingTimestamp = proto.Int64(settingTS)
+		innerMsg.StickerMessage.ContextInfo.DisappearingMode = mode
+	}
+
+	return &waE2E.Message{
+		EphemeralMessage: &waE2E.FutureProofMessage{
+			Message: innerMsg,
+		},
+	}
+}
+
 // DeleteMessage deletes a message locally ("delete for me") or revokes it on WhatsApp servers for everyone ("delete for all").
 func (a *Adapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
 	if deleteForEveryone {
@@ -1375,6 +1766,7 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		}
 	}
 
+	msg = a.prepareOutgoingMessage(ctx, recipientJID, msg)
 	resp, err := a.client.SendMessage(ctx, recipientJID, msg)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("failed to send message: %w", err)
@@ -1746,6 +2138,7 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 		waMsg = &waE2E.Message{DocumentMessage: docMsg}
 	}
 
+	waMsg = a.prepareOutgoingMessage(ctx, recipientJID, waMsg)
 	sendResp, err := a.client.SendMessage(ctx, recipientJID, waMsg)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("failed to send media message: %w", err)
@@ -2753,6 +3146,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularHigh, false, false)
 			a.loadArchivedChats()
 			a.loadMutedChats()
+			a.loadEphemeralChats()
 		}()
 
 	case *events.Disconnected:
@@ -2761,6 +3155,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 	case *events.AppState:
 		go a.loadArchivedChats()
 		go a.loadMutedChats()
+		go a.loadEphemeralChats()
 
 	case *events.Mute:
 		if evt.Action != nil {
@@ -2834,6 +3229,17 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				chatID = rawJID
 			}
 
+			if conv.EphemeralExpiration != nil {
+				var ts int64
+				if conv.EphemeralSettingTimestamp != nil {
+					ts = *conv.EphemeralSettingTimestamp
+				}
+				if ts <= 0 {
+					ts = time.Now().Unix()
+				}
+				a.updateChatEphemeralTimer(chatID, *conv.EphemeralExpiration, ts)
+			}
+
 			if conv.GetUnreadCount() == 0 {
 				_ = a.DismissUnread(context.Background(), chatID)
 				_ = a.DismissUnread(context.Background(), rawJID)
@@ -2882,6 +3288,38 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", targetID)
 			}
 			return
+		}
+
+		var protoMsg *waE2E.ProtocolMessage
+		unwrapped := unwrapMessage(evt.Message)
+		if unwrapped != nil && unwrapped.ProtocolMessage != nil {
+			protoMsg = unwrapped.ProtocolMessage
+		}
+		if protoMsg == nil && evt.RawMessage != nil {
+			rawUnwrapped := unwrapMessage(evt.RawMessage)
+			if rawUnwrapped != nil && rawUnwrapped.ProtocolMessage != nil {
+				protoMsg = rawUnwrapped.ProtocolMessage
+			}
+		}
+		if protoMsg != nil && protoMsg.Type != nil && *protoMsg.Type == waE2E.ProtocolMessage_EPHEMERAL_SETTING {
+			timer := protoMsg.GetEphemeralExpiration()
+			ts := protoMsg.GetEphemeralSettingTimestamp()
+			if ts <= 0 {
+				ts = evt.Info.Timestamp.Unix()
+			}
+			a.updateChatEphemeralTimer(evt.Info.Chat.ToNonAD().String(), timer, ts)
+		} else if ci := extractContextInfo(evt.Message); ci != nil && ci.GetExpiration() > 0 {
+			ts := ci.GetEphemeralSettingTimestamp()
+			if ts <= 0 {
+				ts = evt.Info.Timestamp.Unix()
+			}
+			a.updateChatEphemeralTimer(evt.Info.Chat.ToNonAD().String(), ci.GetExpiration(), ts)
+		} else if ci := extractContextInfo(evt.RawMessage); ci != nil && ci.GetExpiration() > 0 {
+			ts := ci.GetEphemeralSettingTimestamp()
+			if ts <= 0 {
+				ts = evt.Info.Timestamp.Unix()
+			}
+			a.updateChatEphemeralTimer(evt.Info.Chat.ToNonAD().String(), ci.GetExpiration(), ts)
 		}
 
 		if targetID, targetChat, newMsg, isEdit := a.extractEditDetails(evt); isEdit && targetID != "" {
@@ -3033,6 +3471,17 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		}
 
 	case *events.GroupInfo:
+		if evt.Ephemeral != nil {
+			var timer uint32
+			if evt.Ephemeral.IsEphemeral {
+				timer = evt.Ephemeral.DisappearingTimer
+			}
+			ts := evt.Timestamp.Unix()
+			if ts <= 0 {
+				ts = time.Now().Unix()
+			}
+			a.updateChatEphemeralTimer(evt.JID.ToNonAD().String(), timer, ts)
+		}
 		if evt.Name != nil && evt.Name.Name != "" {
 			name := strings.TrimSpace(evt.Name.Name)
 			if a.localDB != nil {

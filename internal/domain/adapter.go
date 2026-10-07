@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -105,4 +106,42 @@ type WhatsAppAdapter interface {
 
 	// GetGroupParticipants retrieves the list of participants in a group chat.
 	GetGroupParticipants(ctx context.Context, groupJID string) ([]Contact, error)
+
+	// GetChatEphemeralTimer returns the disappearing message timer (in seconds) for a chat, or 0 if disabled.
+	GetChatEphemeralTimer(chatID string) uint32
+
+	// GetEphemeralChats returns a map of all chats with disappearing messages enabled along with their timer in seconds.
+	GetEphemeralChats() map[string]uint32
+
+	// OnChatEphemeral registers a listener triggered when a chat's disappearing timer changes.
+	OnChatEphemeral(handler func(chatID string, timer uint32))
+
+	// SetChatDisappearingTimer changes the disappearing messages timer on WhatsApp for a chat.
+	SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error
+}
+
+// FormatDisappearingTimer formats a duration in seconds into a friendly string like "24h", "7d", "90d".
+func FormatDisappearingTimer(seconds uint32) string {
+	if seconds == 0 {
+		return ""
+	}
+	switch seconds {
+	case 86400:
+		return "24h"
+	case 604800:
+		return "7d"
+	case 7776000:
+		return "90d"
+	default:
+		if seconds%86400 == 0 {
+			return fmt.Sprintf("%dd", seconds/86400)
+		}
+		if seconds%3600 == 0 {
+			return fmt.Sprintf("%dh", seconds/3600)
+		}
+		if seconds%60 == 0 {
+			return fmt.Sprintf("%dm", seconds/60)
+		}
+		return fmt.Sprintf("%ds", seconds)
+	}
 }
