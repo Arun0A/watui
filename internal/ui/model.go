@@ -3592,8 +3592,6 @@ func (m *Model) filterContacts(query string) {
 // Styles and Layout Dimensions
 // -------------------------------------------------------------
 
-
-
 var (
 	mentionRegex    = regexp.MustCompile(`(?:^|[^\w@])@(\d{5,20})\b`)
 	mentionYouRegex = regexp.MustCompile(`(?:^|[^\w@])(@You)\b`)
