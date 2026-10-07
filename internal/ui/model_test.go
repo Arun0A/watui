@@ -34,6 +34,8 @@ type mockAdapter struct {
 	dismissedChats        []string
 	historyMessages       map[string][]domain.Message
 	participants          []domain.Contact
+	ephemeralChats        map[string]uint32
+	ephemeralHandler      func(string, uint32)
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -115,6 +117,37 @@ func (m *mockAdapter) SetChatMuted(ctx context.Context, chatID string, muted boo
 		m.mutedChats[chatID] = true
 	} else {
 		delete(m.mutedChats, chatID)
+	}
+	return nil
+}
+func (m *mockAdapter) GetChatEphemeralTimer(chatID string) uint32 {
+	if m.ephemeralChats != nil {
+		return m.ephemeralChats[chatID]
+	}
+	return 0
+}
+func (m *mockAdapter) GetEphemeralChats() map[string]uint32 {
+	res := make(map[string]uint32)
+	for k, v := range m.ephemeralChats {
+		res[k] = v
+	}
+	return res
+}
+func (m *mockAdapter) OnChatEphemeral(h func(chatID string, timer uint32)) {
+	m.ephemeralHandler = h
+}
+func (m *mockAdapter) SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error {
+	if m.ephemeralChats == nil {
+		m.ephemeralChats = make(map[string]uint32)
+	}
+	timerSec := uint32(timer.Seconds())
+	if timerSec > 0 {
+		m.ephemeralChats[chatID] = timerSec
+	} else {
+		delete(m.ephemeralChats, chatID)
+	}
+	if m.ephemeralHandler != nil {
+		m.ephemeralHandler(chatID, timerSec)
 	}
 	return nil
 }
@@ -5024,5 +5057,80 @@ func TestSaveLocationPickedDirectFileAndPlaceholderCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(placeholder3); !os.IsNotExist(err) {
 		t.Errorf("Expected placeholder %s to be deleted on cancel, but still exists", placeholder3)
+	}
+}
+
+func TestEphemeralSlashCommands(t *testing.T) {
+	mock := &mockAdapter{
+		ephemeralChats: make(map[string]uint32),
+	}
+	model := NewModel(context.Background(), mock)
+	model.activeChatID = "123456@s.whatsapp.net"
+
+	// 1. /ephemeral status when off
+	model.input.SetValue("/ephemeral status")
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("Expected no async command for status query")
+	}
+	if !strings.Contains(model.previewStatus, "off") {
+		t.Errorf("Expected status to indicate off, got %q", model.previewStatus)
+	}
+
+	// 2. /ephemeral 24h
+	model.input.SetValue("/ephemeral 24h")
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected async command for /ephemeral 24h")
+	}
+	resMsg := cmd()
+	setRes, ok := resMsg.(ephemeralSetResultMsg)
+	if !ok || setRes.Timer != 86400 || setRes.Err != nil {
+		t.Fatalf("Expected ephemeralSetResultMsg with timer 86400, got %+v", resMsg)
+	}
+	updMsg, _ := model.Update(setRes)
+	m := updMsg.(*Model)
+	if !strings.Contains(m.previewStatus, "24h") {
+		t.Errorf("Expected previewStatus to show 24h, got %q", m.previewStatus)
+	}
+	if mock.GetChatEphemeralTimer("123456@s.whatsapp.net") != 86400 {
+		t.Errorf("Expected adapter to have timer 86400, got %d", mock.GetChatEphemeralTimer("123456@s.whatsapp.net"))
+	}
+
+	// 3. /ephemeral with no args re-applies current timer
+	model.input.SetValue("/ephemeral")
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected async command for /ephemeral reapply")
+	}
+	if !strings.Contains(model.previewStatus, "Re-applying") {
+		t.Errorf("Expected previewStatus to indicate re-applying, got %q", model.previewStatus)
+	}
+
+	// 4. /ephemeral off
+	model.input.SetValue("/ephemeral off")
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected async command for /ephemeral off")
+	}
+	resMsg = cmd()
+	setRes, ok = resMsg.(ephemeralSetResultMsg)
+	if !ok || setRes.Timer != 0 || setRes.Err != nil {
+		t.Fatalf("Expected ephemeralSetResultMsg with timer 0, got %+v", resMsg)
+	}
+	updMsg, _ = model.Update(setRes)
+	m = updMsg.(*Model)
+	if !strings.Contains(m.previewStatus, "turned off") {
+		t.Errorf("Expected previewStatus to show turned off, got %q", m.previewStatus)
+	}
+
+	// 5. Invalid option
+	model.input.SetValue("/ephemeral banana")
+	cmd = model.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("Expected no command for invalid option")
+	}
+	if !strings.Contains(model.previewStatus, "Invalid option") {
+		t.Errorf("Expected previewStatus to show Invalid option, got %q", model.previewStatus)
 	}
 }

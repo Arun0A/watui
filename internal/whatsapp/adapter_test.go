@@ -955,3 +955,327 @@ func TestAdapterMuteLifecycle(t *testing.T) {
 		t.Errorf("Expected mutedMap to contain active mutes, got: %v", mutedMap)
 	}
 }
+
+func TestPrepareOutgoingMessage(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open test sqlite: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE watui_chat_ephemeral (
+		chat_id TEXT PRIMARY KEY,
+		timer INTEGER NOT NULL DEFAULT 0,
+		setting_timestamp INTEGER NOT NULL DEFAULT 0
+	);`)
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	adapter := &Adapter{
+		localDB:            db,
+		ephemeralTimers:    make(map[string]uint32),
+		ephemeralSettingTS: make(map[string]int64),
+	}
+
+	ephemeralJID := types.NewJID("111222333", types.DefaultUserServer)
+	adapter.updateChatEphemeralTimer(ephemeralJID.String(), 86400, 1700000000)
+
+	normalJID := types.NewJID("999888777", types.DefaultUserServer)
+
+	ctx := context.Background()
+
+	// 1. Plain Conversation should be wrapped and converted to ExtendedTextMessage with Expiration
+	plainMsg := &waE2E.Message{
+		Conversation: proto.String("Disappearing message text"),
+	}
+	preparedPlain := adapter.prepareOutgoingMessage(ctx, ephemeralJID, plainMsg)
+	if preparedPlain == nil || preparedPlain.EphemeralMessage == nil {
+		t.Fatalf("Expected EphemeralMessage wrapper for plain message")
+	}
+	innerPlain := preparedPlain.EphemeralMessage.Message
+	if innerPlain.ExtendedTextMessage == nil {
+		t.Fatalf("Expected Conversation to be converted to ExtendedTextMessage")
+	}
+	if innerPlain.ExtendedTextMessage.GetText() != "Disappearing message text" {
+		t.Errorf("Expected text 'Disappearing message text', got %q", innerPlain.ExtendedTextMessage.GetText())
+	}
+	ci := innerPlain.ExtendedTextMessage.ContextInfo
+	if ci == nil || ci.GetExpiration() != 86400 {
+		t.Errorf("Expected Expiration 86400, got %v", ci)
+	}
+	if ci.GetEphemeralSettingTimestamp() != 1700000000 {
+		t.Errorf("Expected EphemeralSettingTimestamp 1700000000, got %v", ci.GetEphemeralSettingTimestamp())
+	}
+	if ci.DisappearingMode == nil || ci.DisappearingMode.GetInitiator() != waE2E.DisappearingMode_CHANGED_IN_CHAT {
+		t.Errorf("Expected DisappearingMode CHANGED_IN_CHAT, got %v", ci.DisappearingMode)
+	}
+	if !ci.DisappearingMode.GetInitiatedByMe() {
+		t.Errorf("Expected DisappearingMode InitiatedByMe true")
+	}
+
+	// 2. ExtendedTextMessage with quote/mention should preserve fields and add Expiration
+	extMsg := &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String("Quoting a message"),
+			ContextInfo: &waE2E.ContextInfo{
+				StanzaID: proto.String("ORIG_STANZA_123"),
+			},
+		},
+	}
+	preparedExt := adapter.prepareOutgoingMessage(ctx, ephemeralJID, extMsg)
+	if preparedExt == nil || preparedExt.EphemeralMessage == nil {
+		t.Fatalf("Expected EphemeralMessage wrapper for extended message")
+	}
+	innerExt := preparedExt.EphemeralMessage.Message
+	if innerExt.ExtendedTextMessage.ContextInfo.GetStanzaID() != "ORIG_STANZA_123" {
+		t.Errorf("Expected StanzaID preserved, got %q", innerExt.ExtendedTextMessage.ContextInfo.GetStanzaID())
+	}
+	if innerExt.ExtendedTextMessage.ContextInfo.GetExpiration() != 86400 {
+		t.Errorf("Expected Expiration 86400, got %d", innerExt.ExtendedTextMessage.ContextInfo.GetExpiration())
+	}
+
+	// 3. Media message (ImageMessage) should have ContextInfo.Expiration and Ephemeral wrapper
+	imgMsg := &waE2E.Message{
+		ImageMessage: &waE2E.ImageMessage{
+			Caption:  proto.String("Photo caption"),
+			Mimetype: proto.String("image/jpeg"),
+		},
+	}
+	preparedImg := adapter.prepareOutgoingMessage(ctx, ephemeralJID, imgMsg)
+	if preparedImg == nil || preparedImg.EphemeralMessage == nil {
+		t.Fatalf("Expected EphemeralMessage wrapper for image message")
+	}
+	innerImg := preparedImg.EphemeralMessage.Message
+	if innerImg.ImageMessage.ContextInfo == nil || innerImg.ImageMessage.ContextInfo.GetExpiration() != 86400 {
+		t.Errorf("Expected ImageMessage ContextInfo.Expiration 86400, got %v", innerImg.ImageMessage.ContextInfo)
+	}
+
+	// 4. Non-ephemeral chat should return unmodified message without Ephemeral wrapper
+	normalMsg := &waE2E.Message{
+		Conversation: proto.String("Regular non-ephemeral message"),
+	}
+	preparedNormal := adapter.prepareOutgoingMessage(ctx, normalJID, normalMsg)
+	if preparedNormal.EphemeralMessage != nil {
+		t.Errorf("Did not expect EphemeralMessage for normal chat")
+	}
+	if preparedNormal.GetConversation() != "Regular non-ephemeral message" {
+		t.Errorf("Expected unmodified message for normal chat")
+	}
+
+	// 5. Already wrapped EphemeralMessage should not be double-wrapped
+	alreadyWrapped := &waE2E.Message{
+		EphemeralMessage: &waE2E.FutureProofMessage{
+			Message: &waE2E.Message{
+				Conversation: proto.String("Already wrapped"),
+			},
+		},
+	}
+	preparedWrapped := adapter.prepareOutgoingMessage(ctx, ephemeralJID, alreadyWrapped)
+	if preparedWrapped != alreadyWrapped {
+		t.Errorf("Expected already wrapped message to be returned as-is")
+	}
+}
+
+func TestEphemeralTimerManagementAndEvents(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open test sqlite: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE watui_chat_ephemeral (
+		chat_id TEXT PRIMARY KEY,
+		timer INTEGER NOT NULL DEFAULT 0,
+		setting_timestamp INTEGER NOT NULL DEFAULT 0
+	);`)
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	adapter := &Adapter{
+		localDB:            db,
+		ephemeralTimers:    make(map[string]uint32),
+		ephemeralSettingTS: make(map[string]int64),
+	}
+
+	var notifiedChat string
+	var notifiedTimer uint32
+	adapter.OnChatEphemeral(func(chatID string, timer uint32) {
+		notifiedChat = chatID
+		notifiedTimer = timer
+	})
+
+	// 1. Update timer to 24h
+	testChat := "447123456789@s.whatsapp.net"
+	adapter.updateChatEphemeralTimer(testChat, 86400, 1690000000)
+
+	if notifiedChat != testChat || notifiedTimer != 86400 {
+		t.Errorf("Expected OnChatEphemeral notification (chat: %s, timer: 86400), got (%s, %d)", testChat, notifiedChat, notifiedTimer)
+	}
+
+	if tSec := adapter.GetChatEphemeralTimer(testChat); tSec != 86400 {
+		t.Errorf("Expected GetChatEphemeralTimer %d, got %d", 86400, tSec)
+	}
+
+	// AD / device-specific JID should resolve to the same timer
+	testChatAD := "447123456789:12@s.whatsapp.net"
+	if tSec := adapter.GetChatEphemeralTimer(testChatAD); tSec != 86400 {
+		t.Errorf("Expected AD JID to resolve to 86400, got %d", tSec)
+	}
+
+	ephMap := adapter.GetEphemeralChats()
+	if ephMap[testChat] != 86400 {
+		t.Errorf("Expected GetEphemeralChats to contain %s: 86400, got %v", testChat, ephMap)
+	}
+
+	// Verify persistence in SQLite
+	var dbTimer uint32
+	var dbTS int64
+	err = db.QueryRow("SELECT timer, setting_timestamp FROM watui_chat_ephemeral WHERE chat_id = ?", testChat).Scan(&dbTimer, &dbTS)
+	if err != nil || dbTimer != 86400 || dbTS != 1690000000 {
+		t.Errorf("Expected SQLite row (86400, 1690000000), got (%d, %d, err: %v)", dbTimer, dbTS, err)
+	}
+
+	// 2. Turning off ephemeral (timer = 0)
+	adapter.updateChatEphemeralTimer(testChat, 0, 1690000001)
+	if notifiedTimer != 0 {
+		t.Errorf("Expected OnChatEphemeral notification with timer 0, got %d", notifiedTimer)
+	}
+	if tSec := adapter.GetChatEphemeralTimer(testChat); tSec != 0 {
+		t.Errorf("Expected GetChatEphemeralTimer 0 after turning off, got %d", tSec)
+	}
+
+	// 3. Test handleEvent with ProtocolMessage EPHEMERAL_SETTING
+	protoEvt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat: types.NewJID("group123", types.GroupServer),
+			},
+			Timestamp: time.Unix(1705000000, 0),
+		},
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Type:                      waE2E.ProtocolMessage_EPHEMERAL_SETTING.Enum(),
+				EphemeralExpiration:       proto.Uint32(604800), // 7 days
+				EphemeralSettingTimestamp: proto.Int64(1705000000),
+			},
+		},
+	}
+	adapter.handleEvent(protoEvt)
+	if tSec := adapter.GetChatEphemeralTimer("group123@g.us"); tSec != 604800 {
+		t.Errorf("Expected Group ephemeral timer 604800 from ProtocolMessage, got %d", tSec)
+	}
+
+	// 4. Test handleEvent with GroupInfo
+	groupInfoEvt := &events.GroupInfo{
+		JID: types.NewJID("group456", types.GroupServer),
+		Ephemeral: &types.GroupEphemeral{
+			IsEphemeral:       true,
+			DisappearingTimer: 7776000, // 90 days
+		},
+		Timestamp: time.Unix(1706000000, 0),
+	}
+	adapter.handleEvent(groupInfoEvt)
+	if tSec := adapter.GetChatEphemeralTimer("group456@g.us"); tSec != 7776000 {
+		t.Errorf("Expected Group ephemeral timer 7776000 from GroupInfo, got %d", tSec)
+	}
+}
+
+func TestEphemeralLIDPhoneResolutionAndHistoryFallback(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open test sqlite: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE watui_chat_ephemeral (
+			chat_id TEXT PRIMARY KEY,
+			timer INTEGER NOT NULL DEFAULT 0,
+			setting_timestamp INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE whatsmeow_lid_map (
+			lid TEXT PRIMARY KEY,
+			pn TEXT NOT NULL
+		);
+		CREATE TABLE watui_messages (
+			id TEXT PRIMARY KEY,
+			chat_id TEXT,
+			sender TEXT,
+			timestamp INTEGER,
+			raw_message BLOB
+		);
+	`)
+	if err != nil {
+		t.Fatalf("failed to create tables: %v", err)
+	}
+
+	_, _ = db.Exec(`INSERT INTO whatsmeow_lid_map (lid, pn) VALUES ('202808741634244', '919635706699')`)
+
+	adapter := &Adapter{
+		localDB:            db,
+		ephemeralTimers:    make(map[string]uint32),
+		ephemeralSettingTS: make(map[string]int64),
+	}
+
+	// 1. Test updating via LID resolves to Phone
+	adapter.updateChatEphemeralTimer("202808741634244@lid", 86400, 1791359305)
+
+	phoneJID := "919635706699@s.whatsapp.net"
+	lidJID := "202808741634244@lid"
+
+	if timer := adapter.GetChatEphemeralTimer(phoneJID); timer != 86400 {
+		t.Errorf("Expected Phone JID %s to resolve to timer 86400, got %d", phoneJID, timer)
+	}
+	if timer := adapter.GetChatEphemeralTimer(lidJID); timer != 86400 {
+		t.Errorf("Expected LID JID %s to resolve to timer 86400, got %d", lidJID, timer)
+	}
+
+	// Verify both stored in SQLite
+	var count int
+	_ = db.QueryRow("SELECT COUNT(*) FROM watui_chat_ephemeral WHERE timer = 86400").Scan(&count)
+	if count < 2 {
+		t.Errorf("Expected at least 2 rows in watui_chat_ephemeral, got %d", count)
+	}
+
+	// 2. Test chat history fallback
+	// Clear memory and DB ephemeral tables
+	adapter.ephemeralMu.Lock()
+	adapter.ephemeralTimers = make(map[string]uint32)
+	adapter.ephemeralSettingTS = make(map[string]int64)
+	adapter.ephemeralMu.Unlock()
+	_, _ = db.Exec("DELETE FROM watui_chat_ephemeral")
+
+	// Store an incoming message in history with ephemeral context info under LID
+	historyMsg := &waE2E.Message{
+		Conversation: proto.String("Hello with disappearing mode"),
+	}
+	ctxInfo := &waE2E.ContextInfo{
+		Expiration:                proto.Uint32(86400),
+		EphemeralSettingTimestamp: proto.Int64(1791359305),
+	}
+	historyMsg = &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:        historyMsg.Conversation,
+			ContextInfo: ctxInfo,
+		},
+	}
+	rawBytes, _ := proto.Marshal(historyMsg)
+	_, err = db.Exec("INSERT INTO watui_messages (id, chat_id, sender, timestamp, raw_message) VALUES (?, ?, ?, ?, ?)",
+		"HIST_MSG_1", lidJID, lidJID, 1791359305, rawBytes)
+	if err != nil {
+		t.Fatalf("failed to insert history message: %v", err)
+	}
+
+	// Query via Phone JID - should scan history via LID mapping and find the timer
+	timerFound := adapter.GetChatEphemeralTimer(phoneJID)
+	if timerFound != 86400 {
+		t.Errorf("Expected history fallback to find timer 86400 for %s, got %d", phoneJID, timerFound)
+	}
+
+	// Verify it auto-populated memory and SQLite
+	if timerMem := adapter.ephemeralTimers[phoneJID]; timerMem != 86400 {
+		t.Errorf("Expected timer to be cached in memory, got %d", timerMem)
+	}
+}

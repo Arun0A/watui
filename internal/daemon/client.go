@@ -41,6 +41,10 @@ type RemoteAdapter struct {
 	mutedMu    sync.RWMutex
 	mutedChats map[string]bool
 
+	ephemeralMu       sync.RWMutex
+	ephemeralChats    map[string]uint32
+	ephemeralHandlers []func(string, uint32)
+
 	cachedUnread   []domain.Message
 	cachedContacts []domain.Contact
 	cachedMu       sync.RWMutex
@@ -59,15 +63,16 @@ func ConnectRemote(dbPath string) (*RemoteAdapter, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &RemoteAdapter{
-		conn:          conn,
-		enc:           json.NewEncoder(conn),
-		dec:           json.NewDecoder(conn),
-		pending:       make(map[uint64]chan RPCResponse),
-		archivedChats: make(map[string]bool),
-		mutedChats:    make(map[string]bool),
-		currentStatus: domain.StatusConnected,
-		ctx:           ctx,
-		cancel:        cancel,
+		conn:           conn,
+		enc:            json.NewEncoder(conn),
+		dec:            json.NewDecoder(conn),
+		pending:        make(map[uint64]chan RPCResponse),
+		archivedChats:  make(map[string]bool),
+		mutedChats:     make(map[string]bool),
+		ephemeralChats: make(map[string]uint32),
+		currentStatus:  domain.StatusConnected,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	// 1. Wait for initial snapshot from daemon
@@ -88,6 +93,9 @@ func ConnectRemote(dbPath string) (*RemoteAdapter, error) {
 			r.archivedChats = snap.ArchivedChats
 			if snap.MutedChats != nil {
 				r.mutedChats = snap.MutedChats
+			}
+			if snap.EphemeralChats != nil {
+				r.ephemeralChats = snap.EphemeralChats
 			}
 		}
 	}
@@ -224,6 +232,29 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 					delete(r.mutedChats, p.ChatID)
 				}
 				r.mutedMu.Unlock()
+			}
+		}
+
+	case "ephemeral":
+		var p SetChatEphemeralParams
+		if err := json.Unmarshal(resp.Result, &p); err == nil && p.ChatID != "" {
+			r.ephemeralMu.Lock()
+			if r.ephemeralChats == nil {
+				r.ephemeralChats = make(map[string]uint32)
+			}
+			if p.Timer > 0 {
+				r.ephemeralChats[p.ChatID] = p.Timer
+			} else {
+				delete(r.ephemeralChats, p.ChatID)
+			}
+			r.ephemeralMu.Unlock()
+
+			r.handlersMu.RLock()
+			handlers := make([]func(string, uint32), len(r.ephemeralHandlers))
+			copy(handlers, r.ephemeralHandlers)
+			r.handlersMu.RUnlock()
+			for _, h := range handlers {
+				h(p.ChatID, p.Timer)
 			}
 		}
 	}
@@ -572,4 +603,64 @@ func (r *RemoteAdapter) SetChatMuted(ctx context.Context, chatID string, muted b
 	r.mutedMu.Unlock()
 
 	return r.call(ctx, "set_chat_muted", SetChatMutedParams{ChatID: chatID, Muted: muted, Duration: duration}, nil)
+}
+
+func (r *RemoteAdapter) GetChatEphemeralTimer(chatID string) uint32 {
+	r.ephemeralMu.RLock()
+	defer r.ephemeralMu.RUnlock()
+	clean := chatID
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		if atIdx := strings.Index(clean, "@"); atIdx != -1 && atIdx > idx {
+			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+	if r.ephemeralChats != nil {
+		if t, ok := r.ephemeralChats[clean]; ok {
+			return t
+		}
+		return r.ephemeralChats[chatID]
+	}
+	return 0
+}
+
+func (r *RemoteAdapter) GetEphemeralChats() map[string]uint32 {
+	r.ephemeralMu.RLock()
+	defer r.ephemeralMu.RUnlock()
+	res := make(map[string]uint32, len(r.ephemeralChats))
+	for k, v := range r.ephemeralChats {
+		if v > 0 {
+			res[k] = v
+		}
+	}
+	return res
+}
+
+func (r *RemoteAdapter) OnChatEphemeral(handler func(chatID string, timer uint32)) {
+	r.handlersMu.Lock()
+	defer r.handlersMu.Unlock()
+	r.ephemeralHandlers = append(r.ephemeralHandlers, handler)
+}
+
+func (r *RemoteAdapter) SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error {
+	timerSec := uint32(timer.Seconds())
+	clean := chatID
+	if idx := strings.Index(clean, ":"); idx != -1 {
+		if atIdx := strings.Index(clean, "@"); atIdx != -1 && atIdx > idx {
+			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+	r.ephemeralMu.Lock()
+	if r.ephemeralChats == nil {
+		r.ephemeralChats = make(map[string]uint32)
+	}
+	if timerSec > 0 {
+		r.ephemeralChats[clean] = timerSec
+		r.ephemeralChats[chatID] = timerSec
+	} else {
+		delete(r.ephemeralChats, clean)
+		delete(r.ephemeralChats, chatID)
+	}
+	r.ephemeralMu.Unlock()
+
+	return r.call(ctx, "set_chat_ephemeral", SetChatEphemeralParams{ChatID: chatID, Timer: timerSec}, nil)
 }

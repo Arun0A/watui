@@ -78,6 +78,19 @@ func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit i
 func (m *mockAdapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]domain.Contact, error) {
 	return []domain.Contact{{JID: "user1@s.whatsapp.net", Name: "User One"}}, nil
 }
+func (m *mockAdapter) GetChatEphemeralTimer(chatID string) uint32 {
+	if chatID == "ephemeral@s.whatsapp.net" {
+		return 86400
+	}
+	return 0
+}
+func (m *mockAdapter) GetEphemeralChats() map[string]uint32 {
+	return map[string]uint32{"ephemeral@s.whatsapp.net": 86400}
+}
+func (m *mockAdapter) OnChatEphemeral(h func(string, uint32)) {}
+func (m *mockAdapter) SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error {
+	return nil
+}
 
 func TestIPCEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
