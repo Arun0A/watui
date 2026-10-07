@@ -161,3 +161,11 @@
 # Defaults to your operating system's standard Downloads folder (~/Downloads or $XDG_DOWNLOAD_DIR).
 #
 # download_dir: "~/Downloads"
+
+# 17. Custom Theme Configuration
+# By default, watui uses built-in Catppuccin Mocha colors without needing any extra files.
+# You can customize any color by creating a "theme.yaml" in your config directory (~/.config/watui/theme.yaml)
+# or next to the executable. See theme.example.yaml for all supported color keys and default values.
+# Optionally, specify an explicit path to a custom theme file here:
+#
+# theme: "theme.yaml"

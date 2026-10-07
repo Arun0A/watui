@@ -80,7 +80,7 @@ jobs:
           PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$PKG_NAME"
           cp -r assets "$PKG_NAME/"
-          cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
+          cp watui watui.example.yaml theme.example.yaml README.md LICENSE "$PKG_NAME/"
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
 
       # -----------------------------------------------------------
@@ -92,7 +92,7 @@ jobs:
           PKG_NAME="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$PKG_NAME"
           cp -r assets "$PKG_NAME/"
-          cp watui watui.example.yaml README.md LICENSE "$PKG_NAME/"
+          cp watui watui.example.yaml theme.example.yaml README.md LICENSE "$PKG_NAME/"
           tar -czvf "${PKG_NAME}.tar.gz" "$PKG_NAME"
 
       # -----------------------------------------------------------
@@ -102,12 +102,14 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          # Windows Portable Package: contains binary + default watui.yaml (runs self-contained in folder)
+          # Windows Portable Package: contains binary + default watui.yaml & theme.yaml (runs self-contained in folder)
           PORTABLE_DIR="watui-${{ steps.version.outputs.tag }}-${{ matrix.target }}-portable"
           mkdir -p "$PORTABLE_DIR"
           cp -r assets "$PORTABLE_DIR/"
           cp watui.exe "$PORTABLE_DIR/"
           cp watui.example.yaml "$PORTABLE_DIR/watui.yaml"
+          cp theme.example.yaml "$PORTABLE_DIR/theme.yaml"
+          cp theme.example.yaml "$PORTABLE_DIR/theme.example.yaml"
           cp README.md LICENSE "$PORTABLE_DIR/"
           7z a "${PORTABLE_DIR}.zip" "$PORTABLE_DIR"
 
