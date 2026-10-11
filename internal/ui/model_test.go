@@ -36,6 +36,10 @@ type mockAdapter struct {
 	participants          []domain.Contact
 	ephemeralChats        map[string]uint32
 	ephemeralHandler      func(string, uint32)
+	receipts              map[string]*domain.MessageReceiptDetails
+	presences             map[string]domain.UserPresence
+	presenceHandler       domain.PresenceHandler
+	receiptHandler        domain.ReceiptHandler
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -217,6 +221,35 @@ func (m *mockAdapter) EditMessage(ctx context.Context, chatID string, messageID 
 		return m.editErr
 	}
 	return nil
+}
+
+func (m *mockAdapter) GetMessageReceipts(ctx context.Context, chatID string, messageID string) (*domain.MessageReceiptDetails, error) {
+	if m.receipts != nil {
+		if r, ok := m.receipts[messageID]; ok {
+			return r, nil
+		}
+	}
+	return &domain.MessageReceiptDetails{MessageID: messageID}, nil
+}
+
+func (m *mockAdapter) SubscribePresence(ctx context.Context, jid string) error {
+	return nil
+}
+
+func (m *mockAdapter) GetUserPresence(jid string) (domain.UserPresence, bool) {
+	if m.presences != nil {
+		p, ok := m.presences[jid]
+		return p, ok
+	}
+	return domain.UserPresence{}, false
+}
+
+func (m *mockAdapter) OnPresence(h domain.PresenceHandler) {
+	m.presenceHandler = h
+}
+
+func (m *mockAdapter) OnReceipt(h domain.ReceiptHandler) {
+	m.receiptHandler = h
 }
 
 func TestUnreadModelLifecycle(t *testing.T) {
@@ -5132,5 +5165,152 @@ func TestEphemeralSlashCommands(t *testing.T) {
 	}
 	if !strings.Contains(model.previewStatus, "Invalid option") {
 		t.Errorf("Expected previewStatus to show Invalid option, got %q", model.previewStatus)
+	}
+}
+
+func TestMessageReceiptModal(t *testing.T) {
+	adapter := &mockAdapter{
+		receipts: map[string]*domain.MessageReceiptDetails{
+			"MSG_INFO_1": {
+				MessageID:   "MSG_INFO_1",
+				DeliveredAt: time.Now().Add(-2 * time.Minute),
+				ReadAt:      time.Now().Add(-1 * time.Minute),
+				Delivered: []domain.MessageReceipt{
+					{UserName: "Alice", Timestamp: time.Now().Add(-2 * time.Minute)},
+				},
+				Read: []domain.MessageReceipt{
+					{UserName: "Alice", Timestamp: time.Now().Add(-1 * time.Minute)},
+				},
+			},
+		},
+	}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+
+	model.activeChatID = "123@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.activeMsgs = []domain.Message{
+		{
+			ID:        "MSG_INFO_1",
+			ChatID:    "123@s.whatsapp.net",
+			Sender:    "me@s.whatsapp.net",
+			IsFromMe:  true,
+			Body:      "Hello receipt test",
+			Timestamp: time.Now().Add(-5 * time.Minute),
+			Status:    domain.MessageStatusRead,
+		},
+	}
+	model.view = ViewChat
+	model.selectedMsgIdx = 0
+
+	// 1. Press 'i' while hovering message
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if !model.showReceiptModal {
+		t.Fatalf("Expected showReceiptModal to be true")
+	}
+	if !model.receiptLoading {
+		t.Errorf("Expected receiptLoading to be true before cmd execution")
+	}
+	if cmd == nil {
+		t.Fatalf("Expected async cmd to fetch receipts")
+	}
+
+	// 2. Execute cmd and handle receiptDetailsMsg
+	resMsg := cmd()
+	upd, _ := model.Update(resMsg)
+	m := upd.(*Model)
+
+	if m.receiptLoading {
+		t.Errorf("Expected receiptLoading to be false after receiptDetailsMsg")
+	}
+	if m.receiptDetails == nil || m.receiptDetails.MessageID != "MSG_INFO_1" {
+		t.Fatalf("Expected receiptDetails loaded for MSG_INFO_1, got %+v", m.receiptDetails)
+	}
+
+	// 3. Render modal
+	modalLines := m.renderReceiptModal(80, 20)
+	modalView := strings.Join(modalLines, "\n")
+	if !strings.Contains(modalView, "Message Info") {
+		t.Errorf("Expected modal to contain 'Message Info', got: %s", modalView)
+	}
+	if !strings.Contains(modalView, "Read") || !strings.Contains(modalView, "Delivered") {
+		t.Errorf("Expected modal to contain 'Read' and 'Delivered', got: %s", modalView)
+	}
+
+	// 4. Close modal with 'q' or 'esc' or 'i'
+	m.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if m.showReceiptModal {
+		t.Errorf("Expected showReceiptModal to be false after pressing q")
+	}
+
+	// 5. Attempt pressing 'i' on incoming message (IsFromMe: false) -> should not open
+	m.activeMsgs = append(m.activeMsgs, domain.Message{
+		ID:       "MSG_INCOMING",
+		ChatID:   "123@s.whatsapp.net",
+		Sender:   "123@s.whatsapp.net",
+		IsFromMe: false,
+		Body:     "Them message",
+	})
+	m.selectedMsgIdx = 1
+	m.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if m.showReceiptModal {
+		t.Errorf("Expected showReceiptModal to be false for incoming messages")
+	}
+	if !strings.Contains(m.previewStatus, "only available for your sent messages") {
+		t.Errorf("Expected previewStatus notice for incoming message info, got: %s", m.previewStatus)
+	}
+}
+
+func TestHeaderPresenceDisplay(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+
+	model.activeChatID = "alice@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.view = ViewChat
+
+	// 1. Initially no presence available -> no online/last-seen badge
+	view := model.View()
+	if strings.Contains(view, "[online]") || strings.Contains(view, "[last seen") {
+		t.Errorf("Expected no presence badge initially, got: %s", view)
+	}
+
+	// 2. User comes online
+	upd, _ := model.Update(domain.UserPresence{
+		JID:      "alice@s.whatsapp.net",
+		IsOnline: true,
+	})
+	m := upd.(*Model)
+	view = m.View()
+	if !strings.Contains(view, "[online]") {
+		t.Errorf("Expected [online] badge when user is online, got: %s", view)
+	}
+
+	// 3. User goes offline with last-seen timestamp
+	lastSeen := time.Now().Add(-10 * time.Minute)
+	upd, _ = m.Update(domain.UserPresence{
+		JID:      "alice@s.whatsapp.net",
+		IsOnline: false,
+		LastSeen: lastSeen,
+	})
+	m = upd.(*Model)
+	view = m.View()
+	if !strings.Contains(view, "[last seen") {
+		t.Errorf("Expected [last seen] badge when last seen timestamp present, got: %s", view)
+	}
+
+	// 4. Privacy: user hides online/last-seen (unavailable with zero LastSeen) -> badge disappears
+	upd, _ = m.Update(domain.UserPresence{
+		JID:      "alice@s.whatsapp.net",
+		IsOnline: false,
+		LastSeen: time.Time{},
+	})
+	m = upd.(*Model)
+	view = m.View()
+	if strings.Contains(view, "[online]") || strings.Contains(view, "[last seen") {
+		t.Errorf("Expected presence badge to be hidden for privacy, got: %s", view)
 	}
 }

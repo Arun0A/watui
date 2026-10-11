@@ -45,6 +45,13 @@ type RemoteAdapter struct {
 	ephemeralChats    map[string]uint32
 	ephemeralHandlers []func(string, uint32)
 
+	presenceMu       sync.RWMutex
+	cachedPresences  map[string]domain.UserPresence
+	presenceHandlers []domain.PresenceHandler
+
+	receiptMu       sync.RWMutex
+	receiptHandlers []domain.ReceiptHandler
+
 	cachedUnread   []domain.Message
 	cachedContacts []domain.Contact
 	cachedMu       sync.RWMutex
@@ -256,6 +263,24 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 			for _, h := range handlers {
 				h(p.ChatID, p.Timer)
 			}
+		}
+
+	case "presence":
+		var p domain.UserPresence
+		if err := json.Unmarshal(resp.Result, &p); err == nil && p.JID != "" {
+			r.presenceMu.Lock()
+			if r.cachedPresences == nil {
+				r.cachedPresences = make(map[string]domain.UserPresence)
+			}
+			r.cachedPresences[p.JID] = p
+			r.presenceMu.Unlock()
+			r.notifyPresence(p)
+		}
+
+	case "receipt":
+		var evt ReceiptEvent
+		if err := json.Unmarshal(resp.Result, &evt); err == nil {
+			r.notifyReceipt(evt.ChatID, evt.MessageIDs, evt.Type, evt.Timestamp)
 		}
 	}
 }
@@ -663,4 +688,92 @@ func (r *RemoteAdapter) SetChatDisappearingTimer(ctx context.Context, chatID str
 	r.ephemeralMu.Unlock()
 
 	return r.call(ctx, "set_chat_ephemeral", SetChatEphemeralParams{ChatID: chatID, Timer: timerSec}, nil)
+}
+
+func (r *RemoteAdapter) GetMessageReceipts(ctx context.Context, chatID string, messageID string) (*domain.MessageReceiptDetails, error) {
+	var details domain.MessageReceiptDetails
+	err := r.call(ctx, "get_message_receipts", GetMessageReceiptsParams{ChatID: chatID, MessageID: messageID}, &details)
+	if err != nil {
+		return nil, err
+	}
+	return &details, nil
+}
+
+func (r *RemoteAdapter) SubscribePresence(ctx context.Context, jid string) error {
+	var pres domain.UserPresence
+	err := r.call(ctx, "subscribe_presence", SubscribePresenceParams{JID: jid}, &pres)
+	if err == nil && pres.JID != "" {
+		r.presenceMu.Lock()
+		if r.cachedPresences == nil {
+			r.cachedPresences = make(map[string]domain.UserPresence)
+		}
+		r.cachedPresences[jid] = pres
+		r.cachedPresences[pres.JID] = pres
+		r.presenceMu.Unlock()
+		r.notifyPresence(pres)
+	}
+	return err
+}
+
+func (r *RemoteAdapter) GetUserPresence(jid string) (domain.UserPresence, bool) {
+	r.presenceMu.RLock()
+	defer r.presenceMu.RUnlock()
+	if r.cachedPresences == nil {
+		return domain.UserPresence{}, false
+	}
+	if p, ok := r.cachedPresences[jid]; ok {
+		return p, true
+	}
+	user := jid
+	if idx := strings.Index(user, "@"); idx != -1 {
+		user = user[:idx]
+	}
+	if idx := strings.Index(user, ":"); idx != -1 {
+		user = user[:idx]
+	}
+	for k, p := range r.cachedPresences {
+		kUser := k
+		if idx := strings.Index(kUser, "@"); idx != -1 {
+			kUser = kUser[:idx]
+		}
+		if idx := strings.Index(kUser, ":"); idx != -1 {
+			kUser = kUser[:idx]
+		}
+		if kUser == user {
+			return p, true
+		}
+	}
+	return domain.UserPresence{}, false
+}
+
+func (r *RemoteAdapter) OnPresence(handler domain.PresenceHandler) {
+	r.presenceMu.Lock()
+	defer r.presenceMu.Unlock()
+	r.presenceHandlers = append(r.presenceHandlers, handler)
+}
+
+func (r *RemoteAdapter) OnReceipt(handler domain.ReceiptHandler) {
+	r.receiptMu.Lock()
+	defer r.receiptMu.Unlock()
+	r.receiptHandlers = append(r.receiptHandlers, handler)
+}
+
+func (r *RemoteAdapter) notifyPresence(p domain.UserPresence) {
+	r.presenceMu.RLock()
+	handlers := make([]domain.PresenceHandler, len(r.presenceHandlers))
+	copy(handlers, r.presenceHandlers)
+	r.presenceMu.RUnlock()
+	for _, h := range handlers {
+		h(p)
+	}
+}
+
+func (r *RemoteAdapter) notifyReceipt(chatID string, messageIDs []string, receiptType string, ts time.Time) {
+	r.receiptMu.RLock()
+	handlers := make([]domain.ReceiptHandler, len(r.receiptHandlers))
+	copy(handlers, r.receiptHandlers)
+	r.receiptMu.RUnlock()
+	for _, h := range handlers {
+		h(chatID, messageIDs, receiptType, ts)
+	}
 }

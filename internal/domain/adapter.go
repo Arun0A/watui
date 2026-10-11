@@ -23,6 +23,12 @@ type MessageHandler func(msg Message)
 // StatusHandler is a callback function for connection status changes.
 type StatusHandler func(status ConnectionStatus)
 
+// ReceiptHandler is a callback function for newly arrived read/delivery receipts.
+type ReceiptHandler func(chatID string, messageIDs []string, receiptType string, timestamp time.Time)
+
+// PresenceHandler is a callback function for live presence/last-seen updates.
+type PresenceHandler func(presence UserPresence)
+
 // WhatsAppAdapter defines the clean contract between WhatsApp's wire protocol
 // and the rest of our application (local store, TUI, CLI).
 // The TUI or repository code NEVER touches protobufs, sockets, or crypto keys.
@@ -118,6 +124,21 @@ type WhatsAppAdapter interface {
 
 	// SetChatDisappearingTimer changes the disappearing messages timer on WhatsApp for a chat.
 	SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error
+
+	// GetMessageReceipts retrieves delivery and read receipt details for a message.
+	GetMessageReceipts(ctx context.Context, chatID string, messageID string) (*MessageReceiptDetails, error)
+
+	// SubscribePresence requests presence updates from WhatsApp for a specific user JID.
+	SubscribePresence(ctx context.Context, jid string) error
+
+	// GetUserPresence retrieves the cached presence information for a given user JID.
+	GetUserPresence(jid string) (UserPresence, bool)
+
+	// OnPresence registers a listener for live presence updates.
+	OnPresence(handler PresenceHandler)
+
+	// OnReceipt registers a listener for incoming live receipts.
+	OnReceipt(handler ReceiptHandler)
 }
 
 // FormatDisappearingTimer formats a duration in seconds into a friendly string like "24h", "7d", "90d".

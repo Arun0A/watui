@@ -101,3 +101,19 @@ type SetChatEphemeralParams struct {
 	ChatID string `json:"chat_id"`
 	Timer  uint32 `json:"timer"`
 }
+
+type GetMessageReceiptsParams struct {
+	ChatID    string `json:"chat_id"`
+	MessageID string `json:"message_id"`
+}
+
+type SubscribePresenceParams struct {
+	JID string `json:"jid"`
+}
+
+type ReceiptEvent struct {
+	ChatID     string    `json:"chat_id"`
+	MessageIDs []string  `json:"message_ids"`
+	Type       string    `json:"type"`
+	Timestamp  time.Time `json:"timestamp"`
+}

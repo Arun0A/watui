@@ -129,6 +129,16 @@ type Model struct {
 	contactsChan  chan []domain.Contact
 	ephemeralChan chan ephemeralUpdateMsg
 
+	// Presence & Receipts
+	presenceChan        chan domain.UserPresence
+	receiptChan         chan receiptEventMsg
+	presences           map[string]domain.UserPresence
+	showReceiptModal    bool
+	receiptMsg          *domain.Message
+	receiptDetails      *domain.MessageReceiptDetails
+	receiptLoading      bool
+	receiptScrollOffset int
+
 	// Active external preview/player process
 	activeViewerCmd *exec.Cmd
 	viewerMu        sync.Mutex
@@ -143,6 +153,19 @@ type incomingMsg domain.Message
 type statusChangeMsg domain.ConnectionStatus
 type contactsLoadedMsg []domain.Contact
 type messageSentMsg domain.Message
+
+type receiptEventMsg struct {
+	ChatID     string
+	MessageIDs []string
+	Type       string
+	Timestamp  time.Time
+}
+
+type receiptDetailsMsg struct {
+	MessageID string
+	Details   *domain.MessageReceiptDetails
+	Err       error
+}
 type unreadsLoadedMsg []domain.Message
 type chatDismissedMsg string
 type ephemeralUpdateMsg struct {
@@ -300,6 +323,9 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		dismissChan:       make(chan string, 50),
 		contactsChan:      make(chan []domain.Contact, 10),
 		ephemeralChan:     make(chan ephemeralUpdateMsg, 50),
+		presenceChan:      make(chan domain.UserPresence, 50),
+		receiptChan:       make(chan receiptEventMsg, 50),
+		presences:         make(map[string]domain.UserPresence),
 		contactsByJID:     make(map[string]*domain.Contact),
 		contactsByUser:    make(map[string]*domain.Contact),
 		multiSelectedMsgs: make(map[string]struct{}),
@@ -307,37 +333,51 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 
 	m.initPinnedChats()
 
-	adapter.OnMessage(func(msg domain.Message) {
-		select {
-		case m.msgChan <- msg:
-		default:
-		}
-	})
-	adapter.OnStatus(func(s domain.ConnectionStatus) {
-		m.status = s
-		select {
-		case m.statusChan <- s:
-		default:
-		}
-	})
-	adapter.OnChatDismissed(func(chatID string) {
-		select {
-		case m.dismissChan <- chatID:
-		default:
-		}
-	})
-	adapter.OnContactsUpdated(func(contacts []domain.Contact) {
-		select {
-		case m.contactsChan <- contacts:
-		default:
-		}
-	})
-	adapter.OnChatEphemeral(func(chatID string, timer uint32) {
-		select {
-		case m.ephemeralChan <- ephemeralUpdateMsg{ChatID: chatID, Timer: timer}:
-		default:
-		}
-	})
+	if adapter != nil {
+		adapter.OnMessage(func(msg domain.Message) {
+			select {
+			case m.msgChan <- msg:
+			default:
+			}
+		})
+		adapter.OnStatus(func(s domain.ConnectionStatus) {
+			m.status = s
+			select {
+			case m.statusChan <- s:
+			default:
+			}
+		})
+		adapter.OnChatDismissed(func(chatID string) {
+			select {
+			case m.dismissChan <- chatID:
+			default:
+			}
+		})
+		adapter.OnContactsUpdated(func(contacts []domain.Contact) {
+			select {
+			case m.contactsChan <- contacts:
+			default:
+			}
+		})
+		adapter.OnChatEphemeral(func(chatID string, timer uint32) {
+			select {
+			case m.ephemeralChan <- ephemeralUpdateMsg{ChatID: chatID, Timer: timer}:
+			default:
+			}
+		})
+		adapter.OnPresence(func(p domain.UserPresence) {
+			select {
+			case m.presenceChan <- p:
+			default:
+			}
+		})
+		adapter.OnReceipt(func(chatID string, msgIDs []string, receiptType string, ts time.Time) {
+			select {
+			case m.receiptChan <- receiptEventMsg{ChatID: chatID, MessageIDs: msgIDs, Type: receiptType, Timestamp: ts}:
+			default:
+			}
+		})
+	}
 
 	return m
 }
@@ -350,6 +390,8 @@ func (m *Model) Init() tea.Cmd {
 		m.waitForStatus(),
 		m.waitForChatDismissed(),
 		m.waitForEphemeralUpdated(),
+		m.waitForPresence(),
+		m.waitForReceipt(),
 		m.loadPersistedUnread(),
 		m.loadContacts(),
 		m.waitForContactsUpdated(),
@@ -620,6 +662,136 @@ func (m *Model) loadContacts() tea.Cmd {
 	}
 }
 
+func (m *Model) waitForPresence() tea.Cmd {
+	return func() tea.Msg {
+		p, ok := <-m.presenceChan
+		if !ok {
+			return nil
+		}
+		return p
+	}
+}
+
+func (m *Model) waitForReceipt() tea.Cmd {
+	return func() tea.Msg {
+		r, ok := <-m.receiptChan
+		if !ok {
+			return nil
+		}
+		return r
+	}
+}
+
+func (m *Model) fetchReceiptDetailsCmd(chatID, messageID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+		defer cancel()
+		details, err := m.adapter.GetMessageReceipts(ctx, chatID, messageID)
+		return receiptDetailsMsg{MessageID: messageID, Details: details, Err: err}
+	}
+}
+
+func (m *Model) subscribePresenceCmd(chatID string) tea.Cmd {
+	if strings.Contains(chatID, "@g.us") || m.adapter == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+		defer cancel()
+		_ = m.adapter.SubscribePresence(ctx, chatID)
+		if p, ok := m.adapter.GetUserPresence(chatID); ok {
+			return p
+		}
+		return nil
+	}
+}
+
+func (m *Model) subscribeChatPresence(chatID string) {
+	if strings.Contains(chatID, "@g.us") || m.adapter == nil {
+		return
+	}
+	go func(cid string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.adapter.SubscribePresence(ctx, cid)
+	}(chatID)
+	if p, ok := m.adapter.GetUserPresence(chatID); ok {
+		if m.presences == nil {
+			m.presences = make(map[string]domain.UserPresence)
+		}
+		m.presences[chatID] = p
+		m.presences[p.JID] = p
+	}
+}
+
+func (m *Model) getUserPresence(chatID string) (domain.UserPresence, bool) {
+	if chatID == "" {
+		return domain.UserPresence{}, false
+	}
+	user := chatID
+	if idx := strings.Index(user, "@"); idx != -1 {
+		user = user[:idx]
+	}
+	if idx := strings.Index(user, ":"); idx != -1 {
+		user = user[:idx]
+	}
+
+	checkMap := func(mp map[string]domain.UserPresence) (domain.UserPresence, bool) {
+		if mp == nil {
+			return domain.UserPresence{}, false
+		}
+		if p, ok := mp[chatID]; ok {
+			return p, true
+		}
+		for k, p := range mp {
+			kUser := k
+			if idx := strings.Index(kUser, "@"); idx != -1 {
+				kUser = kUser[:idx]
+			}
+			if idx := strings.Index(kUser, ":"); idx != -1 {
+				kUser = kUser[:idx]
+			}
+			if kUser == user {
+				return p, true
+			}
+		}
+		return domain.UserPresence{}, false
+	}
+
+	if p, ok := checkMap(m.presences); ok {
+		return p, true
+	}
+	if m.adapter != nil {
+		if p, ok := m.adapter.GetUserPresence(chatID); ok {
+			if m.presences == nil {
+				m.presences = make(map[string]domain.UserPresence)
+			}
+			m.presences[chatID] = p
+			m.presences[p.JID] = p
+			return p, true
+		}
+	}
+	return domain.UserPresence{}, false
+}
+
+func formatLastSeen(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	now := time.Now()
+	locT := t.Local()
+	locNow := now.Local()
+	timeStr := locT.Format("15:04")
+	if locT.Year() == locNow.Year() && locT.YearDay() == locNow.YearDay() {
+		return fmt.Sprintf("last seen today at %s", timeStr)
+	}
+	yesterday := locNow.AddDate(0, 0, -1)
+	if locT.Year() == yesterday.Year() && locT.YearDay() == yesterday.YearDay() {
+		return fmt.Sprintf("last seen yesterday at %s", timeStr)
+	}
+	return fmt.Sprintf("last seen %s at %s", locT.Format("02/01/2006"), timeStr)
+}
+
 // Update handles state transitions and keyboard commands.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -732,6 +904,41 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ephemeralUpdateMsg:
 		cmds = append(cmds, m.waitForEphemeralUpdated())
+
+	case domain.UserPresence:
+		if m.presences == nil {
+			m.presences = make(map[string]domain.UserPresence)
+		}
+		m.presences[msg.JID] = msg
+		cmds = append(cmds, m.waitForPresence())
+
+	case receiptEventMsg:
+		for _, mID := range msg.MessageIDs {
+			for i := range m.activeMsgs {
+				if m.activeMsgs[i].ID == mID {
+					if msg.Type == "read" {
+						m.activeMsgs[i].Status = domain.MessageStatusRead
+					} else if msg.Type == "delivered" && m.activeMsgs[i].Status != domain.MessageStatusRead {
+						m.activeMsgs[i].Status = domain.MessageStatusDelivered
+					}
+				}
+			}
+		}
+		if m.showReceiptModal && m.receiptMsg != nil {
+			for _, mID := range msg.MessageIDs {
+				if mID == m.receiptMsg.ID {
+					cmds = append(cmds, m.fetchReceiptDetailsCmd(m.receiptMsg.ChatID, m.receiptMsg.ID))
+					break
+				}
+			}
+		}
+		cmds = append(cmds, m.waitForReceipt())
+
+	case receiptDetailsMsg:
+		if m.receiptMsg != nil && m.receiptMsg.ID == msg.MessageID {
+			m.receiptLoading = false
+			m.receiptDetails = msg.Details
+		}
 
 	case ephemeralSetResultMsg:
 		if msg.Err != nil {
@@ -2223,6 +2430,7 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			m.input.Focus()
 			m.view = ViewChat
 			m.selectedMsgIdx = -1
+			m.subscribeChatPresence(chatID)
 			m.replyToMsg = nil
 			mediaIndices := m.getChatMediaIndices()
 			m.selectedMediaIdx = len(mediaIndices) - 1
@@ -2252,6 +2460,9 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
 				limit := m.cfg.GetCycleMsgCountPerChat()
 				cmds = append(cmds, m.fetchHistoryCmd(chatID, limit, time.Time{}, true))
+			}
+			if presCmd := m.subscribePresenceCmd(chatID); presCmd != nil {
+				cmds = append(cmds, presCmd)
 			}
 
 			return tea.Batch(cmds...)
@@ -2650,6 +2861,32 @@ func (m *Model) jumpToPrevMedia() bool {
 }
 
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
+	if m.showReceiptModal {
+		switch msg.String() {
+		case "esc", "q", "Q", "i", "I", "alt+i":
+			m.showReceiptModal = false
+			m.receiptMsg = nil
+			m.receiptDetails = nil
+			return nil
+		case "j", "down":
+			m.receiptScrollOffset++
+			return nil
+		case "k", "up":
+			if m.receiptScrollOffset > 0 {
+				m.receiptScrollOffset--
+			}
+			return nil
+		case "pgdown":
+			m.receiptScrollOffset += 5
+			return nil
+		case "pgup":
+			m.receiptScrollOffset = max(0, m.receiptScrollOffset-5)
+			return nil
+		default:
+			return nil
+		}
+	}
+
 	if m.confirmDelete {
 		handled, cmd := m.handleConfirmDelete(msg)
 		if handled {
@@ -2683,6 +2920,27 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.input.Focus()
 			m.previewStatus = ""
 			return textinput.Blink
+
+		case "i", "I", "alt+i":
+			if m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				if !target.IsFromMe {
+					m.previewStatus = "Message info is only available for your sent messages"
+					return nil
+				}
+				chatID := target.ChatID
+				if chatID == "" {
+					chatID = m.activeChatID
+				}
+				target.ChatID = chatID
+				m.showReceiptModal = true
+				m.receiptMsg = &target
+				m.receiptDetails = nil
+				m.receiptLoading = true
+				m.receiptScrollOffset = 0
+				return m.fetchReceiptDetailsCmd(chatID, target.ID)
+			}
+			return nil
 
 		case "r":
 			m.multiSelectedMsgs = make(map[string]struct{})
@@ -3424,6 +3682,7 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.input.Focus()
 			m.view = ViewChat
 			m.selectedMsgIdx = -1
+			m.subscribeChatPresence(contact.JID)
 			m.replyToMsg = nil
 			mediaIndices := m.getChatMediaIndices()
 			m.selectedMediaIdx = len(mediaIndices) - 1
@@ -3436,6 +3695,9 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 					m.mentionCursor = 0
 					cmds = append(cmds, m.fetchGroupParticipantsCmd(contact.JID))
 				}
+				if presCmd := m.subscribePresenceCmd(contact.JID); presCmd != nil {
+					cmds = append(cmds, presCmd)
+				}
 				return tea.Batch(cmds...)
 			}
 			cmds := []tea.Cmd{tea.ClearScreen, textinput.Blink}
@@ -3444,6 +3706,9 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 				m.mentionHints = nil
 				m.mentionCursor = 0
 				cmds = append(cmds, m.fetchGroupParticipantsCmd(contact.JID))
+			}
+			if presCmd := m.subscribePresenceCmd(contact.JID); presCmd != nil {
+				cmds = append(cmds, presCmd)
 			}
 			return tea.Batch(cmds...)
 		}
@@ -3484,6 +3749,7 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.input.Focus()
 			m.view = ViewChat
 			m.selectedMsgIdx = -1
+			m.subscribeChatPresence(targetID)
 			m.replyToMsg = nil
 			mediaIndices := m.getChatMediaIndices()
 			m.selectedMediaIdx = len(mediaIndices) - 1
@@ -3497,6 +3763,9 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			if m.cfg.IsAlwaysLoadHistoryEnabled() && m.cfg.IsHistoryPersistEnabled() {
 				limit := m.cfg.GetCycleMsgCountPerChat()
 				cmds = append(cmds, m.fetchHistoryCmd(targetID, limit, time.Time{}, true))
+			}
+			if presCmd := m.subscribePresenceCmd(targetID); presCmd != nil {
+				cmds = append(cmds, presCmd)
 			}
 			return tea.Batch(cmds...)
 		}
@@ -3967,7 +4236,20 @@ func (m *Model) renderChatView() []string {
 			ephBadge = " " + m.styles.EphemeralBadge.Render(fmt.Sprintf("[⏱ %s]", domain.FormatDisappearingTimer(timer)))
 		}
 	}
-	leftTitle := fmt.Sprintf("%s %s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(m.activeName), ephBadge)
+	presenceBadge := ""
+	if !strings.Contains(m.activeChatID, "@g.us") {
+		if p, ok := m.getUserPresence(m.activeChatID); ok {
+			if p.IsOnline {
+				presenceBadge = " " + m.styles.OnlineBadge.Render("[online]")
+			} else if !p.LastSeen.IsZero() {
+				lastSeenStr := formatLastSeen(p.LastSeen)
+				if lastSeenStr != "" {
+					presenceBadge = " " + m.styles.LastSeenBadge.Render(fmt.Sprintf("[%s]", lastSeenStr))
+				}
+			}
+		}
+	}
+	leftTitle := fmt.Sprintf("%s %s%s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(m.activeName), presenceBadge, ephBadge)
 	escBack := m.styles.Status.Render("· [Esc] Back")
 	leftPart := fmt.Sprintf("%s  %s", leftTitle, escBack)
 
@@ -3985,12 +4267,12 @@ func (m *Model) renderChatView() []string {
 		headerText = leftPart + spaces + rightPart
 	} else if rightPart != "" && rightW+10 < cw {
 		// Truncate name so JID still fits flush to the right
-		availForName := max(3, cw-rightW-len(chatPrefix)-len(" · [Esc] Back")-5)
+		availForName := max(3, cw-rightW-len(chatPrefix)-lipgloss.Width(presenceBadge)-lipgloss.Width(ephBadge)-len(" · [Esc] Back")-5)
 		truncName := m.activeName
 		if len(truncName) > availForName {
 			truncName = truncName[:max(1, availForName-1)] + "…"
 		}
-		leftTitle = fmt.Sprintf("%s %s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(truncName), ephBadge)
+		leftTitle = fmt.Sprintf("%s %s%s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(truncName), presenceBadge, ephBadge)
 		leftPart = fmt.Sprintf("%s  %s", leftTitle, escBack)
 		leftW = lipgloss.Width(leftPart)
 		spaces := strings.Repeat(" ", max(1, cw-leftW-rightW))
@@ -4001,6 +4283,17 @@ func (m *Model) renderChatView() []string {
 
 	divider := m.styles.Divider.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")
+
+	if m.showReceiptModal && m.receiptMsg != nil {
+		availH := max(8, m.maxCanvasHeight()-6)
+		modalLines := m.renderReceiptModal(cw, availH)
+		lines = append(lines, modalLines...)
+		for len(lines) < m.maxCanvasHeight()-2 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, m.styles.Help.Render("[Esc/q/i] Close Message Info · [j/k] Scroll"))
+		return lines
+	}
 
 	var msgLines []string
 	if len(m.activeMsgs) == 0 {
@@ -4333,7 +4626,7 @@ func (m *Model) renderChatView() []string {
 		if len(m.multiSelectedMsgs) > 0 {
 			dynamicHelp = fmt.Sprintf("[%d selected] [Space] Toggle · [y] Copy · [d/D] Delete · [s] Save · [Esc] Clear", len(m.multiSelectedMsgs))
 		} else {
-			dynamicHelp = "[j/k] Msg · [Space] Select · [J/K] Media · [p] Preview · [r] Reply · [e] Edit · [y] Copy · [d/D] Delete · [Esc] Input"
+			dynamicHelp = "[j/k] Msg · [i] Info · [Space] Select · [p] Preview · [r] Reply · [e] Edit · [y] Copy · [d/D] Del · [Esc] Input"
 		}
 	} else if m.editTargetMsg != nil {
 		dynamicHelp = "[Enter] Save Edit · [Esc] Cancel Edit"
@@ -4390,6 +4683,168 @@ func (m *Model) renderChatView() []string {
 	}
 
 	return lines
+}
+
+func (m *Model) renderReceiptModal(cw int, maxH int) []string {
+	if m.receiptMsg == nil {
+		return nil
+	}
+	boxW := min(cw-4, 68)
+	if boxW < 36 {
+		boxW = 36
+	}
+	contentW := boxW - 4
+
+	var inner []string
+
+	// Title
+	inner = append(inner, m.styles.Title.Render("Message Info"))
+	inner = append(inner, m.styles.Divider.Render(strings.Repeat("─", contentW)))
+
+	// Message Summary
+	senderName := "You"
+	if !m.receiptMsg.IsFromMe {
+		senderName = m.resolveMsgSenderName(*m.receiptMsg)
+		if senderName == "" {
+			senderName = "Them"
+		}
+	}
+	inner = append(inner, fmt.Sprintf("%s %s", m.styles.Status.Render("From:"), m.styles.SelectedTitle.Render(senderName)))
+	inner = append(inner, fmt.Sprintf("%s %s", m.styles.Status.Render("Sent:"), m.styles.NormalTitle.Render(formatReceiptTimestamp(m.receiptMsg.Timestamp))))
+
+	bodySnippet := strings.ReplaceAll(m.formatMentions(m.receiptMsg.Body), "\n", " ")
+	if bodySnippet != "" {
+		if len(bodySnippet) > contentW-10 {
+			bodySnippet = bodySnippet[:max(10, contentW-13)] + "..."
+		}
+		inner = append(inner, fmt.Sprintf("%s %s", m.styles.Status.Render("Text:"), m.styles.NormalTitle.Render(bodySnippet)))
+	}
+
+	inner = append(inner, m.styles.Divider.Render(strings.Repeat("─", contentW)))
+
+	// Receipt Breakdown
+	if m.receiptLoading {
+		inner = append(inner, m.styles.Status.Render("Loading receipt information..."))
+	} else if m.receiptDetails == nil {
+		inner = append(inner, m.styles.Status.Render("(No receipt information available)"))
+	} else if !m.receiptDetails.IsGroup {
+		// 1-on-1 Direct Chat
+		delStr := m.styles.Status.Render("Pending")
+		if !m.receiptDetails.DeliveredAt.IsZero() {
+			delStr = formatReceiptTimestamp(m.receiptDetails.DeliveredAt)
+		}
+		readStr := m.styles.Status.Render("Not read yet")
+		if !m.receiptDetails.ReadAt.IsZero() {
+			readStr = formatReceiptTimestamp(m.receiptDetails.ReadAt)
+		}
+
+		inner = append(inner,
+			fmt.Sprintf("  %s %s", m.styles.StatusRead.Render("Read:     "), readStr),
+			fmt.Sprintf("  %s %s", m.styles.StatusDelivered.Render("Delivered:"), delStr),
+		)
+	} else {
+		// Group Chat
+		readCount := len(m.receiptDetails.Read)
+		delCount := len(m.receiptDetails.Delivered)
+
+		inner = append(inner, m.styles.SelectedTitle.Render(fmt.Sprintf("Read by (%d):", readCount)))
+		if readCount == 0 {
+			if m.receiptDetails.Status == domain.MessageStatusRead {
+				inner = append(inner, m.styles.Status.Render("  (Read by participants)"))
+			} else {
+				inner = append(inner, m.styles.Status.Render("  (No one has read yet)"))
+			}
+		} else {
+			for _, r := range m.receiptDetails.Read {
+				name := r.UserName
+				if name == "" {
+					name = r.UserJID
+				}
+				if len(name) > contentW-25 {
+					name = name[:max(10, contentW-28)] + "…"
+				}
+				tStr := formatReceiptTimestamp(r.Timestamp)
+				inner = append(inner, fmt.Sprintf("  %-22s  %s", m.styles.NormalTitle.Render(name), m.styles.Status.Render(tStr)))
+			}
+		}
+
+		inner = append(inner, "")
+		inner = append(inner, m.styles.SelectedTitle.Render(fmt.Sprintf("Delivered to (%d):", delCount)))
+		if delCount == 0 {
+			if m.receiptDetails.Status == domain.MessageStatusRead || m.receiptDetails.Status == domain.MessageStatusDelivered {
+				inner = append(inner, m.styles.Status.Render("  (Delivered to group)"))
+			} else {
+				inner = append(inner, m.styles.Status.Render("  (Pending delivery)"))
+			}
+		} else {
+			for _, r := range m.receiptDetails.Delivered {
+				name := r.UserName
+				if name == "" {
+					name = r.UserJID
+				}
+				if len(name) > contentW-25 {
+					name = name[:max(10, contentW-28)] + "…"
+				}
+				tStr := formatReceiptTimestamp(r.Timestamp)
+				inner = append(inner, fmt.Sprintf("  %-22s  %s", m.styles.NormalTitle.Render(name), m.styles.Status.Render(tStr)))
+			}
+		}
+	}
+
+	// Scrolling inside modal if too long
+	availInnerH := max(6, maxH-4)
+	if len(inner) > availInnerH {
+		maxScroll := len(inner) - availInnerH
+		if m.receiptScrollOffset > maxScroll {
+			m.receiptScrollOffset = maxScroll
+		}
+		if m.receiptScrollOffset < 0 {
+			m.receiptScrollOffset = 0
+		}
+		end := min(len(inner), m.receiptScrollOffset+availInnerH)
+		inner = inner[m.receiptScrollOffset:end]
+	}
+
+	// Border box
+	borderColor := m.styles.ModalBorderColor
+	if borderColor == "" {
+		borderColor = "#89B4FA"
+	}
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Padding(0, 1).
+		Width(boxW)
+
+	renderedBox := boxStyle.Render(strings.Join(inner, "\n"))
+	boxLines := strings.Split(renderedBox, "\n")
+
+	// Center the box horizontally
+	leftPad := max(0, (cw-boxW)/2)
+	prefix := strings.Repeat(" ", leftPad)
+	var res []string
+	for _, l := range boxLines {
+		res = append(res, prefix+l)
+	}
+	return res
+}
+
+func formatReceiptTimestamp(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	now := time.Now()
+	locT := t.Local()
+	locNow := now.Local()
+	timeStr := locT.Format("15:04:05")
+	if locT.Year() == locNow.Year() && locT.YearDay() == locNow.YearDay() {
+		return fmt.Sprintf("Today at %s", timeStr)
+	}
+	yesterday := locNow.AddDate(0, 0, -1)
+	if locT.Year() == yesterday.Year() && locT.YearDay() == yesterday.YearDay() {
+		return fmt.Sprintf("Yesterday at %s", timeStr)
+	}
+	return fmt.Sprintf("%s %s", locT.Format("02/01/2006"), timeStr)
 }
 
 func (m *Model) renderDateDivider(t time.Time, width int) string {
