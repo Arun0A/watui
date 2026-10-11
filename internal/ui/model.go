@@ -25,6 +25,7 @@ import (
 
 	"watui/internal/config"
 	"watui/internal/domain"
+	"watui/internal/emoji"
 	"watui/internal/media"
 )
 
@@ -1573,29 +1574,28 @@ func (m *Model) resolveMsgSenderName(msg domain.Message) string {
 	if msg.IsFromMe {
 		return "You"
 	}
+	name := "Them"
 	if isRealChatName(msg.SenderName, msg.Sender) {
-		return msg.SenderName
-	}
-	if resolved := m.resolveSenderNameByID(msg.Sender); resolved != "" && isRealChatName(resolved, msg.Sender) {
-		return resolved
-	}
-	if isRealChatName(msg.SenderName, "") {
-		return msg.SenderName
-	}
-	cleanSender := msg.Sender
-	if idx := strings.Index(cleanSender, ":"); idx != -1 {
-		if atIdx := strings.Index(cleanSender, "@"); atIdx != -1 {
-			cleanSender = cleanSender[:idx] + cleanSender[atIdx:]
+		name = msg.SenderName
+	} else if resolved := m.resolveSenderNameByID(msg.Sender); resolved != "" && isRealChatName(resolved, msg.Sender) {
+		name = resolved
+	} else if isRealChatName(msg.SenderName, "") {
+		name = msg.SenderName
+	} else {
+		cleanSender := msg.Sender
+		if idx := strings.Index(cleanSender, ":"); idx != -1 {
+			if atIdx := strings.Index(cleanSender, "@"); atIdx != -1 {
+				cleanSender = cleanSender[:idx] + cleanSender[atIdx:]
+			}
+		}
+		baseUser := strings.Split(cleanSender, "@")[0]
+		if baseUser != "" {
+			name = baseUser
+		} else if msg.SenderName != "" {
+			name = msg.SenderName
 		}
 	}
-	baseUser := strings.Split(cleanSender, "@")[0]
-	if baseUser != "" {
-		return baseUser
-	}
-	if msg.SenderName != "" {
-		return msg.SenderName
-	}
-	return "Them"
+	return m.formatEmoji(name)
 }
 
 func (m *Model) resolveChatName(chatID string, msgChatName string, fallback string) (string, bool) {
@@ -1624,25 +1624,20 @@ func (m *Model) resolveChatName(chatID string, msgChatName string, fallback stri
 	if contact == nil && m.contactsByUser != nil {
 		contact = m.contactsByUser[baseUser]
 	}
+	var resName string
 	if contact != nil && isRealChatName(contact.Name, contact.JID) {
-		return contact.Name, contact.IsGroup || isGroup
+		resName = contact.Name
+		isGroup = contact.IsGroup || isGroup
+	} else if isRealChatName(msgChatName, chatID) {
+		resName = msgChatName
+	} else if isGroup {
+		resName = "Group (" + baseUser + ")"
+	} else if isRealChatName(fallback, chatID) {
+		resName = fallback
+	} else {
+		resName = baseUser
 	}
-
-	// 2. If message already had a real group or chat name
-	if isRealChatName(msgChatName, chatID) {
-		return msgChatName, isGroup
-	}
-
-	// 3. Fallback for group:
-	if isGroup {
-		return "Group (" + baseUser + ")", true
-	}
-
-	// 4. Fallback for 1-on-1:
-	if isRealChatName(fallback, chatID) {
-		return fallback, false
-	}
-	return baseUser, false
+	return m.formatEmoji(resName), isGroup
 }
 
 func (m *Model) getChatMatchNames(chatID string, explicitNames ...string) []string {
@@ -3866,7 +3861,15 @@ var (
 	mentionYouRegex = regexp.MustCompile(`(?:^|[^\w@])(@You)\b`)
 )
 
+func (m *Model) formatEmoji(text string) string {
+	if m.cfg != nil && m.cfg.IsDisplayEmojiText() {
+		return emoji.ReplaceWithCLDR(text)
+	}
+	return text
+}
+
 func (m *Model) formatMentions(text string) string {
+	text = m.formatEmoji(text)
 	if text == "" {
 		return text
 	}
@@ -3887,6 +3890,7 @@ func (m *Model) formatMentions(text string) string {
 }
 
 func (m *Model) styleMentionsForDisplay(text string) string {
+	text = m.formatEmoji(text)
 	if text == "" {
 		return text
 	}
@@ -4092,9 +4096,9 @@ func (m *Model) renderUnreadListView() []string {
 				badge = m.styles.PinBadge.Render("PIN")
 			}
 
-			name := chat.Name
+			name := m.formatEmoji(chat.Name)
 			if chat.IsGroup || strings.Contains(chat.ChatID, "@g.us") {
-				name = "[Group] " + chat.Name
+				name = "[Group] " + name
 			}
 			if chat.IsArchived && !m.showArchived {
 				name = "[Archived] " + name
@@ -4249,7 +4253,8 @@ func (m *Model) renderChatView() []string {
 			}
 		}
 	}
-	leftTitle := fmt.Sprintf("%s %s%s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(m.activeName), presenceBadge, ephBadge)
+	activeTitle := m.formatEmoji(m.activeName)
+	leftTitle := fmt.Sprintf("%s %s%s%s", m.styles.Title.Render(chatPrefix), m.styles.SelectedTitle.Render(activeTitle), presenceBadge, ephBadge)
 	escBack := m.styles.Status.Render("· [Esc] Back")
 	leftPart := fmt.Sprintf("%s  %s", leftTitle, escBack)
 
@@ -4268,7 +4273,7 @@ func (m *Model) renderChatView() []string {
 	} else if rightPart != "" && rightW+10 < cw {
 		// Truncate name so JID still fits flush to the right
 		availForName := max(3, cw-rightW-len(chatPrefix)-lipgloss.Width(presenceBadge)-lipgloss.Width(ephBadge)-len(" · [Esc] Back")-5)
-		truncName := m.activeName
+		truncName := activeTitle
 		if len(truncName) > availForName {
 			truncName = truncName[:max(1, availForName-1)] + "…"
 		}
@@ -4924,7 +4929,7 @@ func (m *Model) renderContactPickerView() []string {
 
 		for i := start; i < end; i++ {
 			c := m.filteredList[i]
-			label := c.Name
+			label := m.formatEmoji(c.Name)
 			phone := ""
 			if c.IsGroup {
 				phone = "[Group]"
@@ -4934,7 +4939,7 @@ func (m *Model) renderContactPickerView() []string {
 					phone = phone[:idx]
 				}
 				if c.PushName != "" && c.PushName != c.Name && !strings.HasPrefix(c.Name, "Direct message to ") {
-					label += fmt.Sprintf(" (%s)", c.PushName)
+					label += fmt.Sprintf(" (%s)", m.formatEmoji(c.PushName))
 				}
 			}
 
