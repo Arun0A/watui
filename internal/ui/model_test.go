@@ -569,6 +569,16 @@ func TestViewLineCountNeverExceedsHeight(t *testing.T) {
 			t.Errorf("For terminal height %d, View() produced %d lines (exceeded by %d lines!)",
 				h, len(lines), len(lines)-h)
 		}
+
+		// Also check ViewEmojiPicker
+		model.view = ViewEmojiPicker
+		emojiView := model.View()
+		emojiLines := strings.Split(emojiView, "\n")
+		if len(emojiLines) > h {
+			t.Errorf("For terminal height %d, ViewEmojiPicker produced %d lines (exceeded by %d lines!)",
+				h, len(emojiLines), len(emojiLines)-h)
+		}
+		model.view = ViewUnreadList
 	}
 }
 
@@ -3171,6 +3181,100 @@ func TestDisplayEmojiInChatView(t *testing.T) {
 	}
 	if !strings.Contains(renderedIcon, "[Reaction: 🚀]") {
 		t.Errorf("Expected original reaction emoji in icon mode, got:\n%s", renderedIcon)
+	}
+}
+
+func TestEmojiPickerIntegration(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.activeChatID = "chat1@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.view = ViewChat
+	model.width = 100
+	model.height = 30
+
+	// 1. Typing "!emoji" and pressing enter opens ViewEmojiPicker
+	model.input.SetValue("!emoji")
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewEmojiPicker {
+		t.Fatalf("Expected ViewEmojiPicker after enter on '!emoji', got %v", model.view)
+	}
+
+	// Verify render shows emoji and CLDR name
+	lines := model.renderEmojiPickerView()
+	rendered := strings.Join(lines, "\n")
+	if !strings.Contains(rendered, "Select Emoji") {
+		t.Errorf("Expected 'Select Emoji' header, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "thumbs up") {
+		t.Errorf("Expected popular emoji 'thumbs up' in default view, got:\n%s", rendered)
+	}
+
+	// 2. Typing in search filters by CLDR name
+	for _, r := range "rocket" {
+		model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(model.filteredEmojis) == 0 || model.filteredEmojis[0].Emoji != "🚀" {
+		t.Fatalf("Expected filteredEmojis[0] to be rocket 🚀, got %+v", model.filteredEmojis)
+	}
+
+	// 3. Navigation with ctrl+n and ctrl+p
+	model.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	if len(model.filteredEmojis) > 1 && model.emojiCursor != 1 {
+		t.Errorf("Expected emojiCursor to be 1 after ctrl+n, got %d", model.emojiCursor)
+	}
+	model.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if model.emojiCursor != 0 {
+		t.Errorf("Expected emojiCursor to be 0 after ctrl+p, got %d", model.emojiCursor)
+	}
+
+	// 4. Pressing Enter inserts the emoji in place of "!emoji" in draft box and returns to ViewChat
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat after selecting emoji, got %v", model.view)
+	}
+	if model.input.Value() != "🚀" {
+		t.Errorf("Expected draft box to contain '🚀', got %q", model.input.Value())
+	}
+
+	// 5. Typing "!react" and pressing enter opens ViewEmojiPicker, pressing Esc returns with "!react" intact
+	model.input.SetValue("!react")
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewEmojiPicker {
+		t.Fatalf("Expected ViewEmojiPicker after enter on '!react', got %v", model.view)
+	}
+	model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat after Esc from emoji picker, got %v", model.view)
+	}
+	if model.input.Value() != "!react" {
+		t.Errorf("Expected draft box to still contain '!react' after Esc, got %q", model.input.Value())
+	}
+	// Pressing enter now must treat text normally (sending it) without re-opening ViewEmojiPicker
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat (normal message sending) after Enter on escaped '!react', got %v", model.view)
+	}
+	if model.input.Value() != "" {
+		t.Errorf("Expected draft box to be cleared after sending normal text, got %q", model.input.Value())
+	}
+
+	// 6. Sentence replacement: "Great work !emoji cheers"
+	model.input.SetValue("Great work !emoji cheers")
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewEmojiPicker {
+		t.Fatalf("Expected ViewEmojiPicker, got %v", model.view)
+	}
+	// Select fire 🔥
+	for _, r := range "fire" {
+		model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat, got %v", model.view)
+	}
+	if model.input.Value() != "Great work 🔥 cheers" {
+		t.Errorf("Expected draft box to contain 'Great work 🔥 cheers', got %q", model.input.Value())
 	}
 }
 

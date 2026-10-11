@@ -36,6 +36,7 @@ const (
 	ViewUnreadList ViewState = iota
 	ViewChat
 	ViewContactPicker
+	ViewEmojiPicker
 	ViewKeybindsHelp
 )
 
@@ -117,6 +118,15 @@ type Model struct {
 	contactCursor  int
 	contactOffset  int
 	loadingContact bool
+
+	// Emoji picker state
+	emojiSearch           textinput.Model
+	filteredEmojis        []emoji.Entry
+	emojiCursor           int
+	emojiOffset           int
+	draftBeforeEmoji      string
+	tokenToReplace        string
+	emojiTriggerDismissed bool
 
 	// App state
 	status        domain.ConnectionStatus
@@ -304,6 +314,11 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 	oi.CharLimit = 100
 	oi.Width = 35
 
+	ei := textinput.New()
+	ei.Placeholder = "Search emoji by CLDR name (e.g. smile, heart, thumb, fire)..."
+	ei.CharLimit = 50
+	ei.Width = 50
+
 	m := &Model{
 		adapter:           adapter,
 		ctx:               ctx,
@@ -318,6 +333,8 @@ func NewModel(ctx context.Context, adapter domain.WhatsAppAdapter, cfgs ...*conf
 		selectedMsgIdx:    -1,
 		contactSearch:     si,
 		openWithInput:     oi,
+		emojiSearch:       ei,
+		filteredEmojis:    emoji.AllList(),
 		status:            domain.StatusConnecting,
 		msgChan:           make(chan domain.Message, 200),
 		statusChan:        make(chan domain.ConnectionStatus, 10),
@@ -804,6 +821,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cw := m.contentWidth()
 		m.input.SetWidth(max(20, cw-6))
 		m.contactSearch.Width = max(20, cw-6)
+		m.emojiSearch.Width = max(20, cw-6)
 		return m, nil
 
 	case statusChangeMsg:
@@ -1428,6 +1446,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.updateChat(msg))
 		case ViewContactPicker:
 			cmds = append(cmds, m.updateContactPicker(msg))
+		case ViewEmojiPicker:
+			cmds = append(cmds, m.updateEmojiPicker(msg))
 		case ViewKeybindsHelp:
 			cmds = append(cmds, m.updateKeybindsHelp(msg))
 		}
@@ -3307,6 +3327,7 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	// 2. Focused on message input box
 	switch msg.String() {
 	case "esc":
+		m.emojiTriggerDismissed = false
 		if len(m.mentionHints) > 0 {
 			m.mentionHints = nil
 			m.mentionCursor = 0
@@ -3488,6 +3509,12 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.applyMentionHint()
 			return nil
 		}
+		if !m.emojiTriggerDismissed {
+			if hasTrigger, token, query := parseEmojiTrigger(m.input.Value()); hasTrigger {
+				return m.openEmojiPicker(token, query)
+			}
+		}
+		m.emojiTriggerDismissed = false
 		if m.editTargetMsg != nil {
 			text := strings.TrimSpace(m.input.Value())
 			if strings.HasPrefix(text, "file://") {
@@ -3778,6 +3805,171 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
+func parseEmojiTrigger(text string) (bool, string, string) {
+	lower := strings.ToLower(text)
+	triggers := []string{"!emoji", "!react"}
+
+	trimmed := strings.TrimSpace(text)
+	lowerTrimmed := strings.ToLower(trimmed)
+	for _, trig := range triggers {
+		if lowerTrimmed == trig {
+			return true, trimmed, ""
+		}
+		if strings.HasPrefix(lowerTrimmed, trig+" ") {
+			query := strings.TrimSpace(trimmed[len(trig)+1:])
+			return true, trimmed, query
+		}
+	}
+
+	for _, trig := range triggers {
+		idx := 0
+		for {
+			found := strings.Index(lower[idx:], trig)
+			if found == -1 {
+				break
+			}
+			pos := idx + found
+			if pos > 0 && lower[pos-1] == '\\' {
+				idx = pos + len(trig)
+				continue
+			}
+			token := text[pos : pos+len(trig)]
+			return true, token, ""
+		}
+	}
+
+	return false, "", ""
+}
+
+func (m *Model) openEmojiPicker(token, query string) tea.Cmd {
+	m.draftBeforeEmoji = m.input.Value()
+	m.tokenToReplace = token
+	m.emojiTriggerDismissed = false
+	m.emojiSearch.Reset()
+	if query != "" {
+		m.emojiSearch.SetValue(query)
+	}
+	m.emojiSearch.Focus()
+	m.filterEmojis(query)
+	m.emojiCursor = 0
+	m.emojiOffset = 0
+	m.view = ViewEmojiPicker
+	return textinput.Blink
+}
+
+func (m *Model) filterEmojis(query string) {
+	m.filteredEmojis = emoji.Filter(query)
+	m.emojiCursor = 0
+	m.emojiOffset = 0
+}
+
+func (m *Model) applyEmojiSelection(chosen string) {
+	orig := m.draftBeforeEmoji
+	token := m.tokenToReplace
+	if token == "" {
+		token = "!emoji"
+	}
+
+	var newDraft string
+	if orig == token || strings.TrimSpace(orig) == token {
+		newDraft = chosen
+	} else if idx := strings.Index(strings.ToLower(orig), strings.ToLower(token)); idx != -1 {
+		newDraft = orig[:idx] + chosen + orig[idx+len(token):]
+	} else {
+		replaced := false
+		for _, tok := range []string{"!emoji", "!react"} {
+			if idx := strings.Index(strings.ToLower(orig), tok); idx != -1 {
+				newDraft = orig[:idx] + chosen + orig[idx+len(tok):]
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			if orig == "" {
+				newDraft = chosen
+			} else {
+				newDraft = orig + " " + chosen
+			}
+		}
+	}
+
+	m.input.SetValue(newDraft)
+	m.input.SetCursor(len(newDraft))
+	m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+}
+
+func (m *Model) updateEmojiPicker(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.view = ViewChat
+		m.emojiTriggerDismissed = true
+		m.input.SetValue(m.draftBeforeEmoji)
+		m.input.Focus()
+		return textinput.Blink
+
+	case "ctrl+c":
+		m.stopActiveViewer()
+		m.CleanupOnExit()
+		return tea.Quit
+
+	case "down", "ctrl+n", "tab":
+		if m.emojiCursor < len(m.filteredEmojis)-1 {
+			m.emojiCursor++
+			maxItems := m.maxVisibleEmojis()
+			if m.emojiCursor >= m.emojiOffset+maxItems {
+				m.emojiOffset = m.emojiCursor - maxItems + 1
+			}
+		}
+		return nil
+
+	case "up", "ctrl+p", "shift+tab":
+		if m.emojiCursor > 0 {
+			m.emojiCursor--
+			if m.emojiCursor < m.emojiOffset {
+				m.emojiOffset = m.emojiCursor
+			}
+		}
+		return nil
+
+	case "pgdown":
+		maxItems := m.maxVisibleEmojis()
+		m.emojiCursor = min(len(m.filteredEmojis)-1, m.emojiCursor+maxItems)
+		if m.emojiCursor >= m.emojiOffset+maxItems {
+			m.emojiOffset = min(len(m.filteredEmojis)-maxItems, m.emojiCursor-maxItems+1)
+			if m.emojiOffset < 0 {
+				m.emojiOffset = 0
+			}
+		}
+		return nil
+
+	case "pgup":
+		maxItems := m.maxVisibleEmojis()
+		m.emojiCursor = max(0, m.emojiCursor-maxItems)
+		if m.emojiCursor < m.emojiOffset {
+			m.emojiOffset = max(0, m.emojiCursor)
+		}
+		return nil
+
+	case "enter":
+		if len(m.filteredEmojis) > 0 && m.emojiCursor < len(m.filteredEmojis) {
+			chosen := m.filteredEmojis[m.emojiCursor].Emoji
+			m.applyEmojiSelection(chosen)
+			m.view = ViewChat
+			m.input.Focus()
+			return textinput.Blink
+		}
+		return nil
+	}
+
+	var cmd tea.Cmd
+	oldVal := m.emojiSearch.Value()
+	m.emojiSearch, cmd = m.emojiSearch.Update(msg)
+	if m.emojiSearch.Value() != oldVal {
+		m.filterEmojis(m.emojiSearch.Value())
+	}
+	return cmd
+}
+
 func (m *Model) filterContacts(query string) {
 	trimmed := strings.TrimSpace(query)
 	q := strings.ToLower(trimmed)
@@ -3971,6 +4163,8 @@ func (m *Model) View() string {
 		lines = m.renderChatView()
 	case ViewContactPicker:
 		lines = m.renderContactPickerView()
+	case ViewEmojiPicker:
+		lines = m.renderEmojiPickerView()
 	case ViewKeybindsHelp:
 		lines = m.renderKeybindsHelpView()
 	default:
@@ -4981,6 +5175,82 @@ func (m *Model) renderContactPickerView() []string {
 	lines = append(lines, "")
 	lines = append(lines, "")
 
+	return lines
+}
+
+func (m *Model) maxVisibleEmojis() int {
+	ch := m.maxCanvasHeight()
+	return max(4, ch-7)
+}
+
+func (m *Model) renderEmojiPickerView() []string {
+	cw := m.contentWidth()
+	var lines []string
+
+	headerText := fmt.Sprintf("%s  %s",
+		m.styles.Title.Render("Select Emoji"),
+		m.styles.Status.Render("· Enter to insert · Esc to cancel · Ctrl+N/P to navigate"),
+	)
+	divider := m.styles.Divider.Render(strings.Repeat("─", cw))
+	lines = append(lines, headerText, divider, "")
+
+	lines = append(lines, m.emojiSearch.View())
+	lines = append(lines, "")
+
+	maxItems := m.maxVisibleEmojis()
+
+	if len(m.filteredEmojis) == 0 {
+		query := m.emojiSearch.Value()
+		lines = append(lines, m.styles.Status.Render(fmt.Sprintf("  No emojis found matching %q", query)))
+		for k := 1; k < maxItems; k++ {
+			lines = append(lines, "")
+		}
+	} else {
+		start := m.emojiOffset
+		if start < 0 {
+			start = 0
+		}
+		if start >= len(m.filteredEmojis) {
+			start = max(0, len(m.filteredEmojis)-1)
+		}
+		end := min(len(m.filteredEmojis), start+maxItems)
+
+		for i := start; i < end; i++ {
+			e := m.filteredEmojis[i]
+			isSelected := (i == m.emojiCursor)
+
+			prefix := "  "
+			if isSelected {
+				prefix = "> "
+			}
+
+			emojiIcon := e.Emoji
+			name := e.Name
+
+			var styledIcon string
+			var styledName string
+			if isSelected {
+				styledIcon = m.styles.SelectedTitle.Render(emojiIcon)
+				styledName = m.styles.SelectedTitle.Render(name)
+			} else {
+				styledIcon = m.styles.NormalTitle.Render(emojiIcon)
+				styledName = m.styles.NormalTitle.Render(name)
+			}
+
+			iconW := lipgloss.Width(emojiIcon)
+			colGap := strings.Repeat(" ", max(1, 5-iconW))
+
+			lines = append(lines, prefix+styledIcon+colGap+styledName)
+		}
+
+		rendered := end - start
+		for k := rendered; k < maxItems; k++ {
+			lines = append(lines, "")
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "")
 	return lines
 }
 

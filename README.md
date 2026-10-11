@@ -168,6 +168,7 @@ nix develop github:Arun0A/watui
 | <kbd>Ctrl</kbd> + <kbd>u</kbd> | Fetch 5 older messages on demand (when `persist_chat_history` is enabled) / Scroll up |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd> (or <kbd>Ctrl</kbd>+<kbd>y</kbd> / <kbd>e</kbd>) | Scroll conversation history up / down |
 | <kbd>Alt</kbd> + <kbd>Enter</kbd> / <kbd>Ctrl</kbd>+<kbd>j</kbd> | Insert newline (multi-line message) |
+| `!emoji` / `!react` | Open emoji picker window (search by CLDR name <kbd>Enter</kbd> to insert in draft, <kbd>Esc</kbd> to cancel) |
 
 ---
 
