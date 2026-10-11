@@ -31,6 +31,9 @@ type mockAdapter struct {
 	lastEditedID          string
 	lastEditedText        string
 	editErr               error
+	lastReactedID         string
+	lastReactedEmoji      string
+	reactErr              error
 	dismissedChats        []string
 	historyMessages       map[string][]domain.Message
 	participants          []domain.Contact
@@ -219,6 +222,15 @@ func (m *mockAdapter) EditMessage(ctx context.Context, chatID string, messageID 
 	m.lastEditedText = newText
 	if m.editErr != nil {
 		return m.editErr
+	}
+	return nil
+}
+
+func (m *mockAdapter) ReactMessage(ctx context.Context, chatID string, messageID string, emoji string, sender ...string) error {
+	m.lastReactedID = messageID
+	m.lastReactedEmoji = emoji
+	if m.reactErr != nil {
+		return m.reactErr
 	}
 	return nil
 }
@@ -3275,6 +3287,135 @@ func TestEmojiPickerIntegration(t *testing.T) {
 	}
 	if model.input.Value() != "Great work 🔥 cheers" {
 		t.Errorf("Expected draft box to contain 'Great work 🔥 cheers', got %q", model.input.Value())
+	}
+}
+
+func TestReactToMessageFlow(t *testing.T) {
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter)
+	model.activeChatID = "chat1@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.view = ViewChat
+	model.width = 100
+	model.height = 30
+
+	msg1 := domain.Message{
+		ID:         "msg-1",
+		ChatID:     "chat1@s.whatsapp.net",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Timestamp:  time.Now().Add(-1 * time.Minute),
+		Body:       "Awesome project!",
+		Type:       domain.MessageTypeText,
+	}
+	model.activeMsgs = []domain.Message{msg1}
+
+	// 1. Enter hover mode on msg-1
+	model.selectedMsgIdx = 0
+
+	// 2. Press "Shift+R" to open reaction picker
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	if cmd == nil {
+		t.Errorf("Expected blink command when opening reaction picker")
+	}
+	if model.view != ViewEmojiPicker {
+		t.Fatalf("Expected ViewEmojiPicker after Shift+R, got %v", model.view)
+	}
+	if model.reactTargetMsg == nil || model.reactTargetMsg.ID != "msg-1" {
+		t.Fatalf("Expected reactTargetMsg to be msg-1, got %+v", model.reactTargetMsg)
+	}
+
+	// Top option must be the cancel / remove option
+	if len(model.filteredEmojis) == 0 || model.filteredEmojis[0].Name != "Remove reaction" {
+		t.Fatalf("Expected top option to be 'Remove reaction', got %+v", model.filteredEmojis[0])
+	}
+
+	// Header should state 'React to Message'
+	renderedLines := model.renderEmojiPickerView()
+	rendered := strings.Join(renderedLines, "\n")
+	if !strings.Contains(rendered, "React to Message") {
+		t.Errorf("Expected 'React to Message' header, got:\n%s", rendered)
+	}
+
+	// 3. Pressing Esc cancels: does nothing, returns to ViewChat with hover mode disabled
+	model.updateEmojiPicker(tea.KeyMsg{Type: tea.KeyEsc})
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat after Esc, got %v", model.view)
+	}
+	if model.reactTargetMsg != nil {
+		t.Errorf("Expected reactTargetMsg to be cleared after Esc")
+	}
+	if model.selectedMsgIdx != -1 {
+		t.Errorf("Expected selectedMsgIdx to be -1 (hover mode exited, bottom hints disabled), got %d", model.selectedMsgIdx)
+	}
+	if adapter.lastReactedID != "" {
+		t.Errorf("Expected no reaction sent on Esc, got %q", adapter.lastReactedID)
+	}
+
+	// 4. Re-open reaction picker, filter to "fire", and press Enter to react 🔥
+	model.selectedMsgIdx = 0
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	for _, r := range "fire" {
+		model.updateEmojiPicker(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	reactCmd := model.updateEmojiPicker(tea.KeyMsg{Type: tea.KeyEnter})
+	if reactCmd == nil {
+		t.Fatalf("Expected reactCmd to be returned")
+	}
+	// Execute the returned cmd
+	resMsg := reactCmd()
+	model.Update(resMsg)
+
+	if model.view != ViewChat {
+		t.Fatalf("Expected ViewChat after reacting, got %v", model.view)
+	}
+	if adapter.lastReactedID != "msg-1" || adapter.lastReactedEmoji != "🔥" {
+		t.Errorf("Expected adapter to receive reaction 🔥 on msg-1, got id=%q emoji=%q",
+			adapter.lastReactedID, adapter.lastReactedEmoji)
+	}
+	if !strings.Contains(model.previewStatus, "Reacted 🔥") {
+		t.Errorf("Expected previewStatus to show 'Reacted 🔥', got %q", model.previewStatus)
+	}
+
+	// Check that local activeMsgs has the reaction message
+	hasReaction := false
+	for _, m := range model.activeMsgs {
+		if m.Type == domain.MessageTypeReaction && m.QuotedID == "msg-1" && strings.Contains(m.Body, "🔥") {
+			hasReaction = true
+			break
+		}
+	}
+	if !hasReaction {
+		t.Errorf("Expected local activeMsgs to reflect reaction 🔥, got %+v", model.activeMsgs)
+	}
+
+	// 5. Re-open reaction picker and select the top Cancel / Remove option (cursor 0)
+	model.selectedMsgIdx = 0
+	model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	if model.emojiCursor != 0 || model.filteredEmojis[0].Name != "Remove reaction" {
+		t.Fatalf("Expected cursor 0 on 'Remove reaction', cursor=%d name=%q",
+			model.emojiCursor, model.filteredEmojis[0].Name)
+	}
+	removeCmd := model.updateEmojiPicker(tea.KeyMsg{Type: tea.KeyEnter})
+	if removeCmd == nil {
+		t.Fatalf("Expected removeCmd to be returned")
+	}
+	resRemoveMsg := removeCmd()
+	model.Update(resRemoveMsg)
+
+	if adapter.lastReactedID != "msg-1" || adapter.lastReactedEmoji != "" {
+		t.Errorf("Expected adapter to receive empty reaction on msg-1 for removal, got id=%q emoji=%q",
+			adapter.lastReactedID, adapter.lastReactedEmoji)
+	}
+	if model.previewStatus != "Reaction removed" {
+		t.Errorf("Expected previewStatus 'Reaction removed', got %q", model.previewStatus)
+	}
+
+	// Check that reaction message from user was removed in activeMsgs
+	for _, m := range model.activeMsgs {
+		if m.Type == domain.MessageTypeReaction && m.QuotedID == "msg-1" && m.IsFromMe {
+			t.Errorf("Expected reaction to be removed from activeMsgs, but found %+v", m)
+		}
 	}
 }
 

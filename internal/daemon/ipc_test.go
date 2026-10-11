@@ -72,6 +72,9 @@ func (m *mockAdapter) DeleteMessage(ctx context.Context, chatID string, messageI
 func (m *mockAdapter) EditMessage(ctx context.Context, chatID string, messageID string, newText string) error {
 	return nil
 }
+func (m *mockAdapter) ReactMessage(ctx context.Context, chatID string, messageID string, emoji string, sender ...string) error {
+	return nil
+}
 func (m *mockAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
 	return []domain.Message{{ID: "HIST1", ChatID: chatID, Body: "History message"}}, nil
 }

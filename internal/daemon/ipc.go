@@ -72,6 +72,13 @@ type EditMessageParams struct {
 	NewText   string `json:"new_text"`
 }
 
+type ReactMessageParams struct {
+	ChatID    string `json:"chat_id"`
+	MessageID string `json:"message_id"`
+	Emoji     string `json:"emoji"`
+	Sender    string `json:"sender,omitempty"`
+}
+
 type DownloadMediaParams struct {
 	Message domain.Message `json:"message"`
 }

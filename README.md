@@ -150,6 +150,7 @@ nix develop github:Arun0A/watui
 | <kbd>J</kbd> / <kbd>K</kbd> *(while hovering)* | Jump to next / previous media message |
 | <kbd>Alt</kbd> + <kbd>m</kbd> | Jump to media messages from message box |
 | <kbd>r</kbd> *(while hovering)* | Reply to selected message (focuses message box) |
+| <kbd>Shift</kbd> + <kbd>r</kbd> *(while hovering)* | React to selected message with emoji (or remove reaction) |
 | <kbd>e</kbd> *(while hovering)* | Edit hovered sent message in message box |
 | <kbd>i</kbd> *(while hovering)* | View message info (read receipts & delivery details for sent messages) |
 | <kbd>y</kbd> *(while hovering / multi-select)* | Copy hovered or selected messages (text only) to clipboard |

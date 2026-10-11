@@ -388,6 +388,21 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			}
 		}
 
+	case "react_message":
+		var p ReactMessageParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			var sender []string
+			if p.Sender != "" {
+				sender = []string{p.Sender}
+			}
+			err := s.adapter.ReactMessage(reqCtx, p.ChatID, p.MessageID, p.Emoji, sender...)
+			if err != nil {
+				resp.Error = err.Error()
+			}
+		}
+
 	case "download_media":
 		var p DownloadMediaParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {

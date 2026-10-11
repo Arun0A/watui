@@ -574,6 +574,19 @@ func (r *RemoteAdapter) EditMessage(ctx context.Context, chatID string, messageI
 	}, nil)
 }
 
+func (r *RemoteAdapter) ReactMessage(ctx context.Context, chatID string, messageID string, emoji string, sender ...string) error {
+	var s string
+	if len(sender) > 0 {
+		s = sender[0]
+	}
+	return r.call(ctx, "react_message", ReactMessageParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Emoji:     emoji,
+		Sender:    s,
+	}, nil)
+}
+
 func (r *RemoteAdapter) GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]domain.Message, error) {
 	var msgs []domain.Message
 	err := r.call(ctx, "get_chat_history", GetChatHistoryParams{

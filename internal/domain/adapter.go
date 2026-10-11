@@ -106,6 +106,10 @@ type WhatsAppAdapter interface {
 	// EditMessage edits an already sent message on WhatsApp servers and updates local cache.
 	EditMessage(ctx context.Context, chatID string, messageID string, newText string) error
 
+	// ReactMessage adds or removes an emoji reaction on a message in WhatsApp.
+	// An empty emoji string removes the reaction.
+	ReactMessage(ctx context.Context, chatID string, messageID string, emoji string, sender ...string) error
+
 	// GetChatHistory fetches up to limit historical messages for the given chat from local storage,
 	// returning messages strictly older than beforeTimestamp (if non-zero) or the latest if beforeTimestamp is zero.
 	GetChatHistory(ctx context.Context, chatID string, limit int, beforeTimestamp time.Time) ([]Message, error)

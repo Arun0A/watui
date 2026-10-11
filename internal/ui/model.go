@@ -127,6 +127,7 @@ type Model struct {
 	draftBeforeEmoji      string
 	tokenToReplace        string
 	emojiTriggerDismissed bool
+	reactTargetMsg        *domain.Message
 
 	// App state
 	status        domain.ConnectionStatus
@@ -1051,6 +1052,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.updateMessageBody(msg.ChatID, msg.MessageID, msg.NewText)
 		m.previewStatus = "Message edited"
+		return m, nil
+
+	case reactResultMsg:
+		if msg.Err != nil {
+			m.previewStatus = fmt.Sprintf("Failed to react: %v", msg.Err)
+		}
 		return m, nil
 
 	case mediaPreviewErrMsg:
@@ -2969,6 +2976,14 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.previewStatus = ""
 			return textinput.Blink
 
+		case "shift+r", "R":
+			m.multiSelectedMsgs = make(map[string]struct{})
+			if m.selectedMsgIdx >= 0 && m.selectedMsgIdx < len(m.activeMsgs) {
+				target := m.activeMsgs[m.selectedMsgIdx]
+				return m.openReactionPicker(target)
+			}
+			return nil
+
 		case "e":
 			m.multiSelectedMsgs = make(map[string]struct{})
 			if m.selectedMsgIdx < len(m.activeMsgs) {
@@ -3842,6 +3857,7 @@ func parseEmojiTrigger(text string) (bool, string, string) {
 }
 
 func (m *Model) openEmojiPicker(token, query string) tea.Cmd {
+	m.reactTargetMsg = nil
 	m.draftBeforeEmoji = m.input.Value()
 	m.tokenToReplace = token
 	m.emojiTriggerDismissed = false
@@ -3857,8 +3873,46 @@ func (m *Model) openEmojiPicker(token, query string) tea.Cmd {
 	return textinput.Blink
 }
 
+func (m *Model) openReactionPicker(target domain.Message) tea.Cmd {
+	if target.Type == domain.MessageTypeReaction && target.QuotedID != "" {
+		for _, msg := range m.activeMsgs {
+			if msg.ID == target.QuotedID {
+				target = msg
+				break
+			}
+		}
+		if target.Type == domain.MessageTypeReaction {
+			target.ID = target.QuotedID
+		}
+	}
+	m.reactTargetMsg = &target
+	m.emojiSearch.Reset()
+	m.emojiSearch.Focus()
+	m.filterEmojis("")
+	m.emojiCursor = 0
+	m.emojiOffset = 0
+	m.view = ViewEmojiPicker
+	return textinput.Blink
+}
+
 func (m *Model) filterEmojis(query string) {
-	m.filteredEmojis = emoji.Filter(query)
+	if m.reactTargetMsg != nil {
+		cancelEntry := emoji.Entry{Emoji: "--", Name: "Remove reaction"}
+		trimmed := strings.TrimSpace(query)
+		if trimmed == "" {
+			m.filteredEmojis = append([]emoji.Entry{cancelEntry}, emoji.AllList()...)
+		} else {
+			results := emoji.Filter(query)
+			q := strings.ToLower(trimmed)
+			if strings.Contains("remove reaction cancel clear delete", q) {
+				m.filteredEmojis = append([]emoji.Entry{cancelEntry}, results...)
+			} else {
+				m.filteredEmojis = results
+			}
+		}
+	} else {
+		m.filteredEmojis = emoji.Filter(query)
+	}
 	m.emojiCursor = 0
 	m.emojiOffset = 0
 }
@@ -3901,6 +3955,15 @@ func (m *Model) applyEmojiSelection(chosen string) {
 func (m *Model) updateEmojiPicker(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
+		if m.reactTargetMsg != nil {
+			m.reactTargetMsg = nil
+			m.selectedMsgIdx = -1
+			m.multiSelectedMsgs = make(map[string]struct{})
+			m.view = ViewChat
+			m.previewStatus = ""
+			m.input.Focus()
+			return textinput.Blink
+		}
 		m.view = ViewChat
 		m.emojiTriggerDismissed = true
 		m.input.SetValue(m.draftBeforeEmoji)
@@ -3952,7 +4015,21 @@ func (m *Model) updateEmojiPicker(msg tea.KeyMsg) tea.Cmd {
 
 	case "enter":
 		if len(m.filteredEmojis) > 0 && m.emojiCursor < len(m.filteredEmojis) {
-			chosen := m.filteredEmojis[m.emojiCursor].Emoji
+			chosenEntry := m.filteredEmojis[m.emojiCursor]
+			if m.reactTargetMsg != nil {
+				target := *m.reactTargetMsg
+				m.reactTargetMsg = nil
+				m.selectedMsgIdx = -1
+				m.multiSelectedMsgs = make(map[string]struct{})
+				m.view = ViewChat
+				m.input.Focus()
+				reaction := chosenEntry.Emoji
+				if chosenEntry.Name == "Remove reaction" {
+					reaction = ""
+				}
+				return m.reactMessageCmd(target, reaction)
+			}
+			chosen := chosenEntry.Emoji
 			m.applyEmojiSelection(chosen)
 			m.view = ViewChat
 			m.input.Focus()
@@ -3968,6 +4045,77 @@ func (m *Model) updateEmojiPicker(msg tea.KeyMsg) tea.Cmd {
 		m.filterEmojis(m.emojiSearch.Value())
 	}
 	return cmd
+}
+
+type reactResultMsg struct {
+	ChatID    string
+	MessageID string
+	Emoji     string
+	Err       error
+}
+
+func (m *Model) reactMessageCmd(target domain.Message, reactionEmoji string) tea.Cmd {
+	chatID := target.ChatID
+	if chatID == "" {
+		chatID = m.activeChatID
+	}
+	sender := target.Sender
+	if target.IsFromMe {
+		sender = ""
+	}
+
+	if reactionEmoji == "" {
+		m.previewStatus = "Reaction removed"
+		var updated []domain.Message
+		for _, msg := range m.activeMsgs {
+			if msg.Type == domain.MessageTypeReaction && msg.QuotedID == target.ID && msg.IsFromMe {
+				continue
+			}
+			updated = append(updated, msg)
+		}
+		m.activeMsgs = updated
+	} else {
+		m.previewStatus = fmt.Sprintf("Reacted %s", reactionEmoji)
+		found := false
+		for i, msg := range m.activeMsgs {
+			if msg.Type == domain.MessageTypeReaction && msg.QuotedID == target.ID && msg.IsFromMe {
+				m.activeMsgs[i].Body = fmt.Sprintf("[Reaction: %s]", reactionEmoji)
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.activeMsgs = append(m.activeMsgs, domain.Message{
+				ID:           fmt.Sprintf("react-%d", time.Now().UnixNano()),
+				ChatID:       chatID,
+				Sender:       "You",
+				SenderName:   "You",
+				IsFromMe:     true,
+				Type:         domain.MessageTypeReaction,
+				Body:         fmt.Sprintf("[Reaction: %s]", reactionEmoji),
+				QuotedID:     target.ID,
+				QuotedText:   target.Body,
+				QuotedSender: target.SenderName,
+				Timestamp:    time.Now(),
+			})
+		}
+	}
+
+	m.mu.Lock()
+	if chat, exists := m.unreadChats[chatID]; exists {
+		chat.Messages = append([]domain.Message(nil), m.activeMsgs...)
+	}
+	m.mu.Unlock()
+
+	return func() tea.Msg {
+		err := m.adapter.ReactMessage(m.ctx, chatID, target.ID, reactionEmoji, sender)
+		return reactResultMsg{
+			ChatID:    chatID,
+			MessageID: target.ID,
+			Emoji:     reactionEmoji,
+			Err:       err,
+		}
+	}
 }
 
 func (m *Model) filterContacts(query string) {
@@ -5187,9 +5335,17 @@ func (m *Model) renderEmojiPickerView() []string {
 	cw := m.contentWidth()
 	var lines []string
 
+	var headerTitle, headerSubtitle string
+	if m.reactTargetMsg != nil {
+		headerTitle = "React to Message"
+		headerSubtitle = "· Enter to react · '-' to remove reaction · Esc to cancel"
+	} else {
+		headerTitle = "Select Emoji"
+		headerSubtitle = "· Enter to insert · Esc to cancel · Ctrl+N/P to navigate"
+	}
 	headerText := fmt.Sprintf("%s  %s",
-		m.styles.Title.Render("Select Emoji"),
-		m.styles.Status.Render("· Enter to insert · Esc to cancel · Ctrl+N/P to navigate"),
+		m.styles.Title.Render(headerTitle),
+		m.styles.Status.Render(headerSubtitle),
 	)
 	divider := m.styles.Divider.Render(strings.Repeat("─", cw))
 	lines = append(lines, headerText, divider, "")

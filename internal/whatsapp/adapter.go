@@ -1665,6 +1665,79 @@ func (a *Adapter) EditMessage(ctx context.Context, chatID string, messageID stri
 	return nil
 }
 
+// ReactMessage adds or removes an emoji reaction on a message in WhatsApp.
+// An empty reactionEmoji removes the reaction.
+func (a *Adapter) ReactMessage(ctx context.Context, chatID string, messageID string, reactionEmoji string, sender ...string) error {
+	if a.client == nil {
+		return errors.New("whatsapp client not initialized")
+	}
+	if !a.client.IsConnected() {
+		if !a.client.WaitForConnection(4 * time.Second) {
+			go func() { _ = a.client.Connect() }()
+			return errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+		}
+	}
+
+	chatJID, err := NormalizeJID(chatID)
+	if err != nil {
+		return fmt.Errorf("invalid recipient %q: %w", chatID, err)
+	}
+
+	var senderJID types.JID
+	if len(sender) > 0 && sender[0] != "" && sender[0] != "You" {
+		sJID, err := NormalizeJID(sender[0])
+		if err == nil {
+			senderJID = sJID
+		}
+	}
+
+	reactMsg := a.client.BuildReaction(chatJID, senderJID, types.MessageID(messageID), reactionEmoji)
+	_, err = a.client.SendMessage(ctx, chatJID, reactMsg)
+	if err != nil {
+		return fmt.Errorf("failed to send reaction: %w", err)
+	}
+
+	a.updateLocalReaction(ctx, chatID, messageID, reactionEmoji)
+	return nil
+}
+
+func (a *Adapter) updateLocalReaction(ctx context.Context, chatID string, messageID string, reactionEmoji string) {
+	if a.localDB == nil {
+		return
+	}
+	nonAD := chatID
+	if parsed, err := NormalizeJID(chatID); err == nil {
+		nonAD = parsed.ToNonAD().String()
+	}
+	if reactionEmoji == "" {
+		// Remove reaction from me for this message in history
+		_, _ = a.localDB.ExecContext(ctx, `DELETE FROM watui_messages 
+			WHERE (chat_id = ? OR chat_id = ?) AND quoted_id = ? AND is_from_me = 1 AND type = 'reaction'`,
+			chatID, nonAD, messageID,
+		)
+		_, _ = a.localDB.ExecContext(ctx, `DELETE FROM watui_unread_messages 
+			WHERE (chat_id = ? OR chat_id = ?) AND quoted_id = ? AND is_from_me = 1 AND type = 'reaction'`,
+			chatID, nonAD, messageID,
+		)
+	} else {
+		// Remove any previous reaction from me for this message to prevent duplicate reaction rows
+		_, _ = a.localDB.ExecContext(ctx, `DELETE FROM watui_messages 
+			WHERE (chat_id = ? OR chat_id = ?) AND quoted_id = ? AND is_from_me = 1 AND type = 'reaction'`,
+			chatID, nonAD, messageID,
+		)
+		var targetBody, targetSender, targetChatName sql.NullString
+		_ = a.localDB.QueryRowContext(ctx, `SELECT body, sender_name, chat_name FROM watui_messages WHERE id = ?`, messageID).Scan(&targetBody, &targetSender, &targetChatName)
+
+		reactMsgID := fmt.Sprintf("react-%s-%d", messageID, time.Now().UnixNano())
+		bodyText := fmt.Sprintf("[Reaction: %s]", reactionEmoji)
+		_, _ = a.localDB.ExecContext(ctx, `INSERT INTO watui_messages
+			(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, status)
+			VALUES (?, ?, ?, 'You', 'You', ?, ?, 'reaction', 1, ?, ?, ?, 'sent')`,
+			reactMsgID, chatID, targetChatName.String, time.Now().Unix(), bodyText, messageID, targetBody.String, targetSender.String,
+		)
+	}
+}
+
 // SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number, optionally quoting a message.
 func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text string, quotedMsg ...string) (domain.Message, error) {
 	recipientJID, err := NormalizeJID(chatID)

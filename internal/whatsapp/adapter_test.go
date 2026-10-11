@@ -620,6 +620,96 @@ func TestReactionQuotedAssociation(t *testing.T) {
 	}
 }
 
+func TestReactMessageHistoryPersistence(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS watui_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT NOT NULL,
+		type TEXT NOT NULL,
+		is_from_me BOOLEAN NOT NULL,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		is_edit BOOLEAN,
+		raw_message BLOB,
+		status TEXT
+	);`)
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS watui_unread_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		quoted_id TEXT,
+		is_from_me BOOLEAN NOT NULL,
+		type TEXT NOT NULL
+	);`)
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+
+	adapter := &Adapter{
+		localDB:   db,
+		appConfig: &config.Config{},
+	}
+
+	chatID := "123456789@s.whatsapp.net"
+	msgID := "MSG_TO_REACT"
+
+	// 1. Initial message exists in chat
+	_, _ = db.Exec(`INSERT INTO watui_messages (id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, status)
+		VALUES (?, ?, 'Alice', '123456789@s.whatsapp.net', 'Alice', ?, 'Hello world!', 'text', 0, 'delivered')`,
+		msgID, chatID, time.Now().Add(-5*time.Minute).Unix(),
+	)
+
+	// 2. React with 🔥
+	adapter.updateLocalReaction(context.Background(), chatID, msgID, "🔥")
+
+	// Verify history contains reaction
+	history, err := adapter.GetChatHistory(context.Background(), chatID, 10, time.Time{})
+	if err != nil {
+		t.Fatalf("GetChatHistory failed: %v", err)
+	}
+
+	foundReaction := false
+	for _, m := range history {
+		if m.Type == domain.MessageTypeReaction && m.QuotedID == msgID && m.Body == "[Reaction: 🔥]" && m.IsFromMe {
+			foundReaction = true
+			if m.QuotedText != "Hello world!" {
+				t.Errorf("Expected QuotedText 'Hello world!', got %q", m.QuotedText)
+			}
+			break
+		}
+	}
+	if !foundReaction {
+		t.Fatalf("Expected reaction 🔥 in history, got %+v", history)
+	}
+
+	// 3. Remove reaction
+	adapter.updateLocalReaction(context.Background(), chatID, msgID, "")
+
+	// Verify history no longer contains reaction
+	historyAfterRemove, err := adapter.GetChatHistory(context.Background(), chatID, 10, time.Time{})
+	if err != nil {
+		t.Fatalf("GetChatHistory failed: %v", err)
+	}
+	for _, m := range historyAfterRemove {
+		if m.Type == domain.MessageTypeReaction && m.QuotedID == msgID && m.IsFromMe {
+			t.Errorf("Expected reaction to be deleted from history, found %+v", m)
+		}
+	}
+}
+
 func TestConvertGifToMp4(t *testing.T) {
 	// Create sample animated GIF in memory (odd dimensions to test padding scale)
 	rect := image.Rect(0, 0, 61, 61)
