@@ -102,6 +102,19 @@ func NewServer(adapter domain.WhatsAppAdapter, dbPath string) (*Server, error) {
 		s.BroadcastEvent("ephemeral", SetChatEphemeralParams{ChatID: chatID, Timer: timer})
 	})
 
+	adapter.OnPresence(func(presence domain.UserPresence) {
+		s.BroadcastEvent("presence", presence)
+	})
+
+	adapter.OnReceipt(func(chatID string, messageIDs []string, receiptType string, ts time.Time) {
+		s.BroadcastEvent("receipt", ReceiptEvent{
+			ChatID:     chatID,
+			MessageIDs: messageIDs,
+			Type:       receiptType,
+			Timestamp:  ts,
+		})
+	})
+
 	go s.acceptLoop()
 
 	return s, nil
@@ -482,6 +495,32 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 				resp.Error = err.Error()
 			} else {
 				resp.Result, _ = json.Marshal(participants)
+			}
+		}
+
+	case "get_message_receipts":
+		var p GetMessageReceiptsParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			details, err := s.adapter.GetMessageReceipts(reqCtx, p.ChatID, p.MessageID)
+			if err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.Result, _ = json.Marshal(details)
+			}
+		}
+
+	case "subscribe_presence":
+		var p SubscribePresenceParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp.Error = err.Error()
+		} else {
+			if err := s.adapter.SubscribePresence(reqCtx, p.JID); err != nil {
+				resp.Error = err.Error()
+			}
+			if pres, ok := s.adapter.GetUserPresence(p.JID); ok {
+				resp.Result, _ = json.Marshal(pres)
 			}
 		}
 

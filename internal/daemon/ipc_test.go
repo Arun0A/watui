@@ -91,6 +91,21 @@ func (m *mockAdapter) OnChatEphemeral(h func(string, uint32)) {}
 func (m *mockAdapter) SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error {
 	return nil
 }
+func (m *mockAdapter) GetMessageReceipts(ctx context.Context, chatID string, messageID string) (*domain.MessageReceiptDetails, error) {
+	return &domain.MessageReceiptDetails{
+		MessageID: messageID,
+		ChatID:    chatID,
+		Status:    domain.MessageStatusRead,
+		SentAt:    time.Now().Add(-5 * time.Minute),
+		ReadAt:    time.Now(),
+	}, nil
+}
+func (m *mockAdapter) SubscribePresence(ctx context.Context, jid string) error { return nil }
+func (m *mockAdapter) GetUserPresence(jid string) (domain.UserPresence, bool) {
+	return domain.UserPresence{JID: jid, IsOnline: true}, true
+}
+func (m *mockAdapter) OnPresence(h domain.PresenceHandler) {}
+func (m *mockAdapter) OnReceipt(h domain.ReceiptHandler)   {}
 
 func TestIPCEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()

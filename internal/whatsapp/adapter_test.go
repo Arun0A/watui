@@ -219,7 +219,8 @@ func TestChatHistoryStorageAndCyclicPruning(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
-		raw_message BLOB
+		raw_message BLOB,
+		status TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);
 	CREATE TABLE IF NOT EXISTS watui_media_cache (
@@ -320,7 +321,8 @@ func TestMediaCachePersistence(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
-		raw_message BLOB
+		raw_message BLOB,
+		status TEXT
 	);
 	CREATE TABLE IF NOT EXISTS watui_unread_messages (
 		id TEXT PRIMARY KEY,
@@ -428,7 +430,8 @@ func TestUnreadReplyRetention(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
-		raw_message BLOB
+		raw_message BLOB,
+		status TEXT
 	);
 	CREATE TABLE IF NOT EXISTS watui_unread_messages (
 		id TEXT PRIMARY KEY,
@@ -1277,5 +1280,125 @@ func TestEphemeralLIDPhoneResolutionAndHistoryFallback(t *testing.T) {
 	// Verify it auto-populated memory and SQLite
 	if timerMem := adapter.ephemeralTimers[phoneJID]; timerMem != 86400 {
 		t.Errorf("Expected timer to be cached in memory, got %d", timerMem)
+	}
+}
+
+func TestMessageReceiptsAndPresence(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open memory db: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE watui_messages (
+			id TEXT PRIMARY KEY,
+			chat_id TEXT NOT NULL,
+			chat_name TEXT,
+			sender TEXT NOT NULL,
+			sender_name TEXT,
+			timestamp INTEGER NOT NULL,
+			body TEXT,
+			type TEXT,
+			is_from_me BOOLEAN,
+			quoted_id TEXT,
+			quoted_text TEXT,
+			quoted_sender TEXT,
+			is_edit BOOLEAN,
+			raw_message BLOB,
+			status TEXT
+		);
+		CREATE TABLE watui_message_receipts (
+			message_id TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			user_jid TEXT NOT NULL,
+			user_name TEXT,
+			receipt_type TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			PRIMARY KEY (message_id, user_jid, receipt_type)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("failed to create tables: %v", err)
+	}
+
+	adapter := &Adapter{
+		localDB:   db,
+		presences: make(map[string]domain.UserPresence),
+	}
+
+	// 1. Test presence caching and notifyPresence
+	var presenceEvt domain.UserPresence
+	adapter.OnPresence(func(p domain.UserPresence) {
+		presenceEvt = p
+	})
+
+	now := time.Now().Truncate(time.Second)
+	adapter.notifyPresence(domain.UserPresence{
+		JID:      "alice@s.whatsapp.net",
+		IsOnline: true,
+	})
+
+	p, ok := adapter.GetUserPresence("alice@s.whatsapp.net")
+	if !ok || !p.IsOnline {
+		t.Errorf("Expected alice to be online, got %+v", p)
+	}
+	if presenceEvt.JID != "alice@s.whatsapp.net" || !presenceEvt.IsOnline {
+		t.Errorf("Expected presence event for alice, got %+v", presenceEvt)
+	}
+
+	// Offline presence with last seen
+	adapter.notifyPresence(domain.UserPresence{
+		JID:      "alice@s.whatsapp.net",
+		IsOnline: false,
+		LastSeen: now,
+	})
+	p, _ = adapter.GetUserPresence("alice@s.whatsapp.net")
+	if p.IsOnline || !p.LastSeen.Equal(now) {
+		t.Errorf("Expected alice to be offline with last seen %v, got %+v", now, p)
+	}
+
+	// 2. Test receipts recording and GetMessageReceipts
+	var receiptEvtMsgIDs []string
+	adapter.OnReceipt(func(chatID string, msgIDs []string, receiptType string, ts time.Time) {
+		receiptEvtMsgIDs = msgIDs
+	})
+
+	t1 := now.Add(-10 * time.Second)
+	t2 := now
+
+	// Insert sent message into watui_messages
+	_, err = db.Exec("INSERT INTO watui_messages (id, chat_id, sender, timestamp, status, is_from_me) VALUES (?, ?, ?, ?, ?, ?)",
+		"M1", "group@g.us", "me@s.whatsapp.net", t1.Unix(), "sent", 1)
+	if err != nil {
+		t.Fatalf("failed to insert test message: %v", err)
+	}
+
+	// Record delivery to Bob
+	adapter.recordMessageReceipt("M1", "group@g.us", "bob@s.whatsapp.net", "Bob", "delivered", t1)
+	adapter.notifyReceipt("group@g.us", []string{"M1"}, "delivered", t1)
+	if len(receiptEvtMsgIDs) == 0 || receiptEvtMsgIDs[0] != "M1" {
+		t.Errorf("Expected receipt listener called for M1, got %v", receiptEvtMsgIDs)
+	}
+
+	// Record read by Bob
+	adapter.recordMessageReceipt("M1", "group@g.us", "bob@s.whatsapp.net", "Bob", "read", t2)
+
+	// Record delivery to Charlie
+	adapter.recordMessageReceipt("M1", "group@g.us", "charlie@s.whatsapp.net", "Charlie", "delivered", t2)
+
+	details, err := adapter.GetMessageReceipts(context.Background(), "group@g.us", "M1")
+	if err != nil {
+		t.Fatalf("GetMessageReceipts failed: %v", err)
+	}
+
+	if details.MessageID != "M1" {
+		t.Errorf("Expected MessageID M1, got %s", details.MessageID)
+	}
+	if len(details.Read) != 1 || details.Read[0].UserName != "Bob" {
+		t.Errorf("Expected 1 read recipient (Bob), got %+v", details.Read)
+	}
+	if len(details.Delivered) != 2 {
+		t.Errorf("Expected 2 delivered recipients, got %d (%+v)", len(details.Delivered), details.Delivered)
 	}
 }

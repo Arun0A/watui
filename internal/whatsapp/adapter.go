@@ -98,6 +98,13 @@ type Adapter struct {
 	ephemeralSettingTS map[string]int64
 	ephemeralHandlers  []func(chatID string, timer uint32)
 
+	presenceMu       sync.RWMutex
+	presences        map[string]domain.UserPresence
+	presenceHandlers []domain.PresenceHandler
+
+	receiptMu       sync.RWMutex
+	receiptHandlers []domain.ReceiptHandler
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -669,20 +676,33 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			quoted_text TEXT,
 			quoted_sender TEXT,
 			is_edit BOOLEAN,
-			raw_message BLOB
+			raw_message BLOB,
+			status TEXT
 		);
-		CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);`)
+		CREATE INDEX IF NOT EXISTS idx_watui_messages_chat_ts ON watui_messages(chat_id, timestamp DESC);
+		CREATE TABLE IF NOT EXISTS watui_message_receipts (
+			message_id TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			user_jid TEXT NOT NULL,
+			user_name TEXT,
+			receipt_type TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			PRIMARY KEY (message_id, user_jid, receipt_type)
+		);
+		CREATE INDEX IF NOT EXISTS idx_watui_receipts_msg ON watui_message_receipts(message_id);`)
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN chat_name TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN raw_message BLOB;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_id TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_text TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_sender TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN is_edit BOOLEAN;")
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN status TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_id TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_text TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_sender TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN is_edit BOOLEAN;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN raw_message BLOB;")
+		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN status TEXT;")
 
 		// Only run LID migration if there are actually @lid chats present in watui_unread_messages
 		var hasLID int
@@ -737,6 +757,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		groupParticipants:  make(map[string][]domain.Contact),
 		ephemeralTimers:    make(map[string]uint32),
 		ephemeralSettingTS: make(map[string]int64),
+		presences:          make(map[string]domain.UserPresence),
 		ctx:                adapterCtx,
 		cancel:             cancel,
 	}
@@ -2820,10 +2841,29 @@ func (a *Adapter) saveHistoryMessage(msg domain.Message, raw ...*waE2E.Message) 
 		rawBytes, _ = proto.Marshal(raw[0])
 	}
 
+	statusVal := string(msg.Status)
+	if statusVal == "" {
+		if msg.IsFromMe {
+			statusVal = string(domain.MessageStatusSent)
+		} else {
+			statusVal = string(domain.MessageStatusDelivered)
+		}
+	}
+
+	// Preserve existing higher status (e.g. read / delivered) if already present in DB
+	var existingStatus sql.NullString
+	if err := a.localDB.QueryRow("SELECT status FROM watui_messages WHERE id = ?", msg.ID).Scan(&existingStatus); err == nil && existingStatus.Valid && existingStatus.String != "" {
+		if existingStatus.String == string(domain.MessageStatusRead) {
+			statusVal = string(domain.MessageStatusRead)
+		} else if existingStatus.String == string(domain.MessageStatusDelivered) && statusVal == string(domain.MessageStatusSent) {
+			statusVal = string(domain.MessageStatusDelivered)
+		}
+	}
+
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, raw_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, rawBytes,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, raw_message, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, rawBytes, statusVal,
 	)
 
 	// Keep history table strictly bounded per chat according to cyclic limit (default: 30)
@@ -2866,13 +2906,13 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 	var query string
 	var args []interface{}
 	if beforeTimestamp.IsZero() {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, status 
 			FROM watui_messages 
 			WHERE chat_id = ? OR chat_id = ? OR chat_id = ? 
 			ORDER BY timestamp DESC LIMIT ?`
 		args = []interface{}{chatID, nonAD, altTarget, limit}
 	} else {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, status 
 			FROM watui_messages 
 			WHERE (chat_id = ? OR chat_id = ? OR chat_id = ?) AND timestamp < ? 
 			ORDER BY timestamp DESC LIMIT ?`
@@ -2889,12 +2929,19 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 	for rows.Next() {
 		var m domain.Message
 		var ts int64
-		var chatName, senderName, body, qID, qText, qSender sql.NullString
+		var chatName, senderName, body, qID, qText, qSender, status sql.NullString
 		var msgType string
 		var isFromMe bool
 		var isEdit sql.NullBool
-		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe, &qID, &qText, &qSender, &isEdit); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe, &qID, &qText, &qSender, &isEdit, &status); err != nil {
 			continue
+		}
+		if status.Valid && status.String != "" {
+			m.Status = domain.MessageStatus(status.String)
+		} else if isFromMe {
+			m.Status = domain.MessageStatusSent
+		} else {
+			m.Status = domain.MessageStatusDelivered
 		}
 		m.ChatName = chatName.String
 		m.SenderName = senderName.String
@@ -3147,6 +3194,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			a.loadArchivedChats()
 			a.loadMutedChats()
 			a.loadEphemeralChats()
+			_ = a.client.SendPresence(a.ctx, types.PresenceAvailable)
 		}()
 
 	case *events.Disconnected:
@@ -3186,19 +3234,146 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 	case *events.LoggedOut:
 		a.setStatus(domain.StatusLoggedOut)
 
+	case *events.Presence:
+		nonAD := evt.From.ToNonAD().String()
+		p := domain.UserPresence{
+			JID:      nonAD,
+			IsOnline: !evt.Unavailable,
+			LastSeen: evt.LastSeen,
+		}
+		a.presenceMu.Lock()
+		if a.presences == nil {
+			a.presences = make(map[string]domain.UserPresence)
+		}
+		a.presences[nonAD] = p
+		a.presences[evt.From.String()] = p
+		var aliases []string
+		if strings.HasSuffix(nonAD, "@s.whatsapp.net") {
+			user := strings.TrimSuffix(nonAD, "@s.whatsapp.net")
+			if lid := a.ResolvePhoneToLID(user); lid != "" {
+				a.presences[lid+"@lid"] = p
+				aliases = append(aliases, lid+"@lid")
+			}
+		} else if strings.HasSuffix(nonAD, "@lid") {
+			user := strings.TrimSuffix(nonAD, "@lid")
+			if pn := a.ResolveLIDToPhone(user); pn != "" {
+				a.presences[pn+"@s.whatsapp.net"] = p
+				aliases = append(aliases, pn+"@s.whatsapp.net")
+			}
+		}
+		a.presenceMu.Unlock()
+		a.notifyPresence(p)
+		for _, aliasJID := range aliases {
+			aliasP := p
+			aliasP.JID = aliasJID
+			a.notifyPresence(aliasP)
+		}
+
+	case *events.ChatPresence:
+		chatUser := evt.Sender.ToNonAD().String()
+		if chatUser == "" {
+			chatUser = evt.Chat.ToNonAD().String()
+		}
+		if chatUser != "" && !strings.Contains(chatUser, "@g.us") {
+			p := domain.UserPresence{
+				JID:      chatUser,
+				IsOnline: true,
+			}
+			a.presenceMu.Lock()
+			if a.presences == nil {
+				a.presences = make(map[string]domain.UserPresence)
+			}
+			a.presences[chatUser] = p
+			var aliases []string
+			if strings.HasSuffix(chatUser, "@s.whatsapp.net") {
+				user := strings.TrimSuffix(chatUser, "@s.whatsapp.net")
+				if lid := a.ResolvePhoneToLID(user); lid != "" {
+					a.presences[lid+"@lid"] = p
+					aliases = append(aliases, lid+"@lid")
+				}
+			} else if strings.HasSuffix(chatUser, "@lid") {
+				user := strings.TrimSuffix(chatUser, "@lid")
+				if pn := a.ResolveLIDToPhone(user); pn != "" {
+					a.presences[pn+"@s.whatsapp.net"] = p
+					aliases = append(aliases, pn+"@s.whatsapp.net")
+				}
+			}
+			a.presenceMu.Unlock()
+			a.notifyPresence(p)
+			for _, aliasJID := range aliases {
+				aliasP := p
+				aliasP.JID = aliasJID
+				a.notifyPresence(aliasP)
+			}
+		}
+
 	case *events.Receipt:
+		// 1. Live receipt persistence and notification
+		var rType string
+		if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf ||
+			evt.Type == types.ReceiptTypePlayed || evt.Type == types.ReceiptTypePlayedSelf {
+			rType = "read"
+		} else if evt.Type == types.ReceiptTypeDelivered || evt.Type == types.ReceiptTypeSender || evt.Type == "" {
+			rType = "delivered"
+		}
+
+		chatID := evt.Chat.ToNonAD().String()
+		userJID := evt.Sender.ToNonAD().String()
+		if userJID == "" && !evt.SenderAlt.IsEmpty() {
+			userJID = evt.SenderAlt.ToNonAD().String()
+		}
+		if userJID == "" && !evt.MessageSender.IsEmpty() {
+			userJID = evt.MessageSender.ToNonAD().String()
+		}
+
+		if (chatID == "" || chatID == "<nil>") && len(evt.MessageIDs) > 0 && a.localDB != nil {
+			var dbChat string
+			_ = a.localDB.QueryRow("SELECT chat_id FROM watui_messages WHERE id = ?", string(evt.MessageIDs[0])).Scan(&dbChat)
+			if dbChat != "" {
+				chatID = dbChat
+			}
+		}
+
+		if (userJID == "" || userJID == "<nil>") && chatID != "" && !strings.Contains(chatID, "@g.us") {
+			userJID = chatID
+		}
+
+		userName := a.ResolveContactName(userJID)
+		if userName == "" {
+			userName = userJID
+		}
+		ts := evt.Timestamp
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+
+		if rType != "" && len(evt.MessageIDs) > 0 {
+			var strIDs []string
+			for _, mID := range evt.MessageIDs {
+				idStr := string(mID)
+				if idStr == "" {
+					continue
+				}
+				strIDs = append(strIDs, idStr)
+				a.recordMessageReceipt(idStr, chatID, userJID, userName, rType, ts)
+			}
+			if len(strIDs) > 0 {
+				a.notifyReceipt(chatID, strIDs, rType, ts)
+			}
+		}
+
 		// When read on phone or companion, delete those messages from unread persistence
 		if evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypeReadSelf {
 			affectedChats := a.deleteUnreadMessageIDs(evt.MessageIDs)
-			for _, chatID := range affectedChats {
-				if !a.isChatUnread(chatID) {
-					a.notifyChatDismissed(chatID)
+			for _, cID := range affectedChats {
+				if !a.isChatUnread(cID) {
+					a.notifyChatDismissed(cID)
 				}
 			}
 			if !evt.Chat.IsEmpty() {
-				chatID := evt.Chat.ToNonAD().String()
-				if !a.isChatUnread(chatID) {
-					a.notifyChatDismissed(chatID)
+				cID := evt.Chat.ToNonAD().String()
+				if !a.isChatUnread(cID) {
+					a.notifyChatDismissed(cID)
 				}
 			}
 		}
@@ -3255,6 +3430,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 							a.cacheMediaMessage(domainMsg.ID, chatID, webMsg.Message, domainMsg.Timestamp)
 						}
 						a.saveHistoryMessage(domainMsg, webMsg.Message)
+						a.recordWebMessageReceipts(domainMsg.ID, chatID, webMsg)
 					}
 				}
 				continue
@@ -3266,17 +3442,20 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 					continue
 				}
 				webMsg := hMsg.Message
-				if webMsg.Key == nil || webMsg.Key.GetFromMe() {
-					continue
-				}
+				isFromMe := webMsg.Key != nil && webMsg.Key.GetFromMe()
 				domainMsg, ok := a.extractWebMessage(chatID, webMsg)
 				if ok {
 					if webMsg.Message != nil {
 						a.cacheMediaMessage(domainMsg.ID, chatID, webMsg.Message, domainMsg.Timestamp)
 					}
-					a.saveUnreadMessage(domainMsg, webMsg.Message)
+					if !isFromMe {
+						a.saveUnreadMessage(domainMsg, webMsg.Message)
+					}
 					a.saveHistoryMessage(domainMsg, webMsg.Message)
-					a.notifyMessage(domainMsg)
+					a.recordWebMessageReceipts(domainMsg.ID, chatID, webMsg)
+					if !isFromMe {
+						a.notifyMessage(domainMsg)
+					}
 				}
 			}
 		}
@@ -3459,6 +3638,21 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 
 		if !domainMsg.IsFromMe {
 			a.saveUnreadMessage(domainMsg, evt.Message)
+
+			// If this incoming message quotes or reacts to an earlier message,
+			// record verified read and delivery receipts for the quoted message.
+			if domainMsg.QuotedID != "" {
+				a.recordMessageReceipt(domainMsg.QuotedID, domainMsg.ChatID, domainMsg.Sender, domainMsg.SenderName, "read", domainMsg.Timestamp)
+				a.recordMessageReceipt(domainMsg.QuotedID, domainMsg.ChatID, domainMsg.Sender, domainMsg.SenderName, "delivered", domainMsg.Timestamp)
+				a.notifyReceipt(domainMsg.ChatID, []string{domainMsg.QuotedID}, "read", domainMsg.Timestamp)
+			}
+
+			// Any prior message sent by 'Me' in this chat was definitely delivered before this incoming message.
+			if a.localDB != nil {
+				_, _ = a.localDB.Exec(`UPDATE watui_messages SET status = 'delivered' 
+					WHERE chat_id = ? AND is_from_me = 1 AND timestamp <= ? AND status = 'sent'`,
+					domainMsg.ChatID, domainMsg.Timestamp.Unix())
+			}
 		}
 		a.saveHistoryMessage(domainMsg, evt.Message)
 
@@ -3664,6 +3858,24 @@ func (a *Adapter) resolveParticipantName(participant string, pushName ...string)
 	return pJID.User
 }
 
+// ResolveContactName resolves a user or participant JID into a friendly contact name if known.
+func (a *Adapter) ResolveContactName(jidStr string) string {
+	if jidStr == "" {
+		return ""
+	}
+	name := a.resolveParticipantName(jidStr)
+	if name != "" && name != jidStr {
+		return name
+	}
+	parsed, err := types.ParseJID(jidStr)
+	if err == nil {
+		if resolved := a.resolveChatName(parsed); resolved != "" {
+			return resolved
+		}
+	}
+	return jidStr
+}
+
 func extractContextInfo(m *waE2E.Message) *waE2E.ContextInfo {
 	m = unwrapMessage(m)
 	if m == nil {
@@ -3844,6 +4056,11 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 		isMentioned = true
 	}
 
+	msgStatus := domain.MessageStatusDelivered
+	if evt.Info.IsFromMe {
+		msgStatus = domain.MessageStatusSent
+	}
+
 	return domain.Message{
 		ID:            evt.Info.ID,
 		ChatID:        chatJID.String(),
@@ -3854,7 +4071,7 @@ func (a *Adapter) extractDomainMessage(evt *events.Message) (domain.Message, boo
 		IsFromMe:      evt.Info.IsFromMe,
 		Type:          msgType,
 		Body:          body,
-		Status:        domain.MessageStatusDelivered,
+		Status:        msgStatus,
 		QuotedID:      qID,
 		QuotedText:    qText,
 		QuotedSender:  qSenderName,
@@ -3962,6 +4179,25 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 		isMentioned = true
 	}
 
+	fromMe := false
+	if webMsg.Key != nil && webMsg.Key.GetFromMe() {
+		fromMe = true
+	}
+	webStatus := domain.MessageStatusDelivered
+	if fromMe {
+		webStatus = domain.MessageStatusSent
+		if webMsg.Status != nil {
+			switch *webMsg.Status {
+			case waWeb.WebMessageInfo_READ, waWeb.WebMessageInfo_PLAYED:
+				webStatus = domain.MessageStatusRead
+			case waWeb.WebMessageInfo_DELIVERY_ACK:
+				webStatus = domain.MessageStatusDelivered
+			case waWeb.WebMessageInfo_SERVER_ACK:
+				webStatus = domain.MessageStatusSent
+			}
+		}
+	}
+
 	return domain.Message{
 		ID:            msgID,
 		ChatID:        chatID,
@@ -3969,10 +4205,10 @@ func (a *Adapter) extractWebMessage(chatID string, webMsg *waWeb.WebMessageInfo)
 		Sender:        sender,
 		SenderName:    senderName,
 		Timestamp:     ts,
-		IsFromMe:      false,
+		IsFromMe:      fromMe,
 		Type:          msgType,
 		Body:          body,
-		Status:        domain.MessageStatusDelivered,
+		Status:        webStatus,
 		QuotedID:      qID,
 		QuotedText:    qText,
 		QuotedSender:  qSenderName,
@@ -4104,4 +4340,419 @@ func (a *Adapter) DownloadMedia(ctx context.Context, msg domain.Message) (string
 	_ = media.TouchMediaFile(filePath)
 
 	return filePath, nil
+}
+
+func (a *Adapter) recordMessageReceipt(messageID, chatID, userJID, userName, receiptType string, ts time.Time) {
+	if a.localDB == nil || messageID == "" {
+		return
+	}
+	tsUnix := ts.Unix()
+	if tsUnix <= 0 {
+		tsUnix = time.Now().Unix()
+	}
+
+	if chatID == "" || chatID == "<nil>" {
+		var dbChat string
+		_ = a.localDB.QueryRow("SELECT chat_id FROM watui_messages WHERE id = ?", messageID).Scan(&dbChat)
+		if dbChat != "" {
+			chatID = dbChat
+		}
+	}
+
+	if (userJID == "" || userJID == "<nil>") && chatID != "" && !strings.Contains(chatID, "@g.us") {
+		userJID = chatID
+	}
+
+	if userJID == "" || userJID == "<nil>" {
+		if receiptType == "read" {
+			_, _ = a.localDB.Exec(`UPDATE watui_messages SET status = 'read' WHERE id = ?`, messageID)
+		} else if receiptType == "delivered" {
+			_, _ = a.localDB.Exec(`UPDATE watui_messages SET status = 'delivered' WHERE id = ? AND (status IS NULL OR status != 'read')`, messageID)
+		}
+		return
+	}
+
+	if userName == "" || userName == userJID {
+		userName = a.ResolveContactName(userJID)
+	}
+
+	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_message_receipts 
+		(message_id, chat_id, user_jid, user_name, receipt_type, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		messageID, chatID, userJID, userName, receiptType, tsUnix,
+	)
+
+	// If read, also ensure delivered is recorded
+	if receiptType == "read" {
+		_, _ = a.localDB.Exec(`INSERT OR IGNORE INTO watui_message_receipts
+			(message_id, chat_id, user_jid, user_name, receipt_type, timestamp)
+			VALUES (?, ?, ?, ?, 'delivered', ?)`,
+			messageID, chatID, userJID, userName, tsUnix,
+		)
+		_, _ = a.localDB.Exec(`UPDATE watui_messages SET status = 'read' WHERE id = ?`, messageID)
+	} else if receiptType == "delivered" {
+		_, _ = a.localDB.Exec(`UPDATE watui_messages SET status = 'delivered' WHERE id = ? AND (status IS NULL OR status != 'read')`, messageID)
+	}
+}
+
+func (a *Adapter) recordWebMessageReceipts(messageID, chatID string, webMsg *waWeb.WebMessageInfo) {
+	if a.localDB == nil || messageID == "" || webMsg == nil {
+		return
+	}
+	for _, ur := range webMsg.GetUserReceipt() {
+		if ur == nil {
+			continue
+		}
+		uJID := ur.GetUserJID()
+		if uJID == "" {
+			continue
+		}
+		uName := a.ResolveContactName(uJID)
+		if readTS := ur.GetReadTimestamp(); readTS > 0 {
+			a.recordMessageReceipt(messageID, chatID, uJID, uName, "read", time.Unix(readTS, 0))
+		}
+		if delTS := ur.GetReceiptTimestamp(); delTS > 0 {
+			a.recordMessageReceipt(messageID, chatID, uJID, uName, "delivered", time.Unix(delTS, 0))
+		}
+		if playedTS := ur.GetPlayedTimestamp(); playedTS > 0 {
+			a.recordMessageReceipt(messageID, chatID, uJID, uName, "read", time.Unix(playedTS, 0))
+		}
+	}
+}
+
+// GetMessageReceipts retrieves read and delivery receipts for a message.
+func (a *Adapter) GetMessageReceipts(ctx context.Context, chatID string, messageID string) (*domain.MessageReceiptDetails, error) {
+	details := &domain.MessageReceiptDetails{
+		MessageID: messageID,
+		ChatID:    chatID,
+		IsGroup:   strings.Contains(chatID, "@g.us"),
+		SentAt:    time.Now(),
+		Status:    domain.MessageStatusSent,
+	}
+
+	if a.localDB == nil {
+		return details, nil
+	}
+
+	// 1. Check message details from watui_messages
+	var ts int64
+	var isFromMe bool
+	var status sql.NullString
+	err := a.localDB.QueryRowContext(ctx, `SELECT timestamp, is_from_me, status FROM watui_messages WHERE id = ?`, messageID).Scan(&ts, &isFromMe, &status)
+	if err == nil {
+		details.SentAt = time.Unix(ts, 0)
+		details.IsFromMe = isFromMe
+		if status.Valid && status.String != "" {
+			details.Status = domain.MessageStatus(status.String)
+		}
+	} else {
+		// Fallback: check unread messages table
+		var uTS int64
+		var uFromMe bool
+		if uErr := a.localDB.QueryRowContext(ctx, `SELECT timestamp, is_from_me FROM watui_unread_messages WHERE id = ?`, messageID).Scan(&uTS, &uFromMe); uErr == nil {
+			details.SentAt = time.Unix(uTS, 0)
+			details.IsFromMe = uFromMe
+		}
+	}
+
+	myJID := ""
+	myLID := ""
+	if a.client != nil && a.client.Store != nil {
+		if a.client.Store.ID != nil {
+			myJID = a.client.Store.ID.ToNonAD().String()
+		}
+		if a.client.Store.LID.User != "" {
+			myLID = a.client.Store.LID.ToNonAD().String()
+		}
+	}
+
+	// 2. Fetch all recorded receipts for this message
+	rows, err := a.localDB.QueryContext(ctx, `SELECT user_jid, user_name, receipt_type, timestamp FROM watui_message_receipts WHERE message_id = ? ORDER BY timestamp ASC`, messageID)
+	if err == nil {
+		defer rows.Close()
+		readMap := make(map[string]domain.MessageReceipt)
+		deliveredMap := make(map[string]domain.MessageReceipt)
+
+		for rows.Next() {
+			var uJID, uName, rType string
+			var rTS int64
+			if err := rows.Scan(&uJID, &uName, &rType, &rTS); err != nil {
+				continue
+			}
+			t := time.Unix(rTS, 0)
+			name := uName
+			if name == "" || name == uJID {
+				if resolved := a.ResolveContactName(uJID); resolved != "" && resolved != uJID {
+					name = resolved
+				}
+			}
+
+			// In group chats, skip self receipts on messages sent by me
+			if details.IsGroup && details.IsFromMe {
+				if name == "You" || (myJID != "" && (uJID == myJID || strings.HasPrefix(uJID, myJID+":"))) ||
+					(myLID != "" && (uJID == myLID || strings.HasPrefix(uJID, myLID+":"))) {
+					continue
+				}
+			}
+
+			rcpt := domain.MessageReceipt{
+				UserJID:   uJID,
+				UserName:  name,
+				Status:    domain.MessageStatus(rType),
+				Timestamp: t,
+			}
+
+			if rType == "read" {
+				readMap[uJID] = rcpt
+				if details.ReadAt.IsZero() || t.Before(details.ReadAt) {
+					details.ReadAt = t
+				}
+			} else if rType == "delivered" {
+				deliveredMap[uJID] = rcpt
+				if details.DeliveredAt.IsZero() || t.Before(details.DeliveredAt) {
+					details.DeliveredAt = t
+				}
+			}
+		}
+
+		for _, r := range readMap {
+			details.Read = append(details.Read, r)
+		}
+		sort.Slice(details.Read, func(i, j int) bool {
+			return details.Read[i].Timestamp.Before(details.Read[j].Timestamp)
+		})
+
+		for _, r := range deliveredMap {
+			details.Delivered = append(details.Delivered, r)
+		}
+		sort.Slice(details.Delivered, func(i, j int) bool {
+			return details.Delivered[i].Timestamp.Before(details.Delivered[j].Timestamp)
+		})
+
+		// 3. Incorporate reactions and quote-replies to this message from other participants
+		qRows, qErr := a.localDB.QueryContext(ctx, `SELECT sender, sender_name, timestamp FROM watui_messages WHERE quoted_id = ? AND sender != '' AND is_from_me = 0`, messageID)
+		if qErr == nil {
+			for qRows.Next() {
+				var qSender, qSenderName string
+				var qTS int64
+				if err := qRows.Scan(&qSender, &qSenderName, &qTS); err != nil {
+					continue
+				}
+				name := qSenderName
+				if name == "" || name == qSender {
+					if resolved := a.ResolveContactName(qSender); resolved != "" && resolved != qSender {
+						name = resolved
+					}
+				}
+				if details.IsGroup && details.IsFromMe {
+					if name == "You" || (myJID != "" && (qSender == myJID || strings.HasPrefix(qSender, myJID+":"))) ||
+						(myLID != "" && (qSender == myLID || strings.HasPrefix(qSender, myLID+":"))) {
+						continue
+					}
+				}
+				t := time.Unix(qTS, 0)
+				if existing, ok := readMap[qSender]; !ok || t.Before(existing.Timestamp) {
+					rcpt := domain.MessageReceipt{
+						UserJID:   qSender,
+						UserName:  name,
+						Status:    domain.MessageStatusRead,
+						Timestamp: t,
+					}
+					readMap[qSender] = rcpt
+					details.Read = append(details.Read, rcpt)
+					if details.ReadAt.IsZero() || t.Before(details.ReadAt) {
+						details.ReadAt = t
+					}
+				}
+				if existing, ok := deliveredMap[qSender]; !ok || t.Before(existing.Timestamp) {
+					rcpt := domain.MessageReceipt{
+						UserJID:   qSender,
+						UserName:  name,
+						Status:    domain.MessageStatusDelivered,
+						Timestamp: t,
+					}
+					deliveredMap[qSender] = rcpt
+					details.Delivered = append(details.Delivered, rcpt)
+					if details.DeliveredAt.IsZero() || t.Before(details.DeliveredAt) {
+						details.DeliveredAt = t
+					}
+				}
+			}
+			qRows.Close()
+
+			sort.Slice(details.Read, func(i, j int) bool {
+				return details.Read[i].Timestamp.Before(details.Read[j].Timestamp)
+			})
+			sort.Slice(details.Delivered, func(i, j int) bool {
+				return details.Delivered[i].Timestamp.Before(details.Delivered[j].Timestamp)
+			})
+		}
+
+		// 4. If this is a sent message in a chat with newer incoming activity from others, it was definitely delivered
+		if details.IsFromMe && !details.SentAt.IsZero() {
+			var newerIncoming int
+			_ = a.localDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM watui_messages WHERE chat_id = ? AND timestamp >= ? AND is_from_me = 0`, details.ChatID, details.SentAt.Unix()).Scan(&newerIncoming)
+			if newerIncoming > 0 && details.Status == domain.MessageStatusSent {
+				details.Status = domain.MessageStatusDelivered
+				if details.DeliveredAt.IsZero() {
+					details.DeliveredAt = details.SentAt
+				}
+				_, _ = a.localDB.ExecContext(ctx, `UPDATE watui_messages SET status = 'delivered' WHERE id = ? AND status = 'sent'`, messageID)
+			}
+		}
+	}
+
+	// For 1-on-1 chats:
+	if !details.IsGroup {
+		if !details.ReadAt.IsZero() {
+			details.Status = domain.MessageStatusRead
+			if details.DeliveredAt.IsZero() {
+				details.DeliveredAt = details.ReadAt
+			}
+		} else if !details.DeliveredAt.IsZero() {
+			details.Status = domain.MessageStatusDelivered
+		} else if details.Status == domain.MessageStatusRead {
+			details.ReadAt = details.SentAt
+			details.DeliveredAt = details.SentAt
+		} else if details.Status == domain.MessageStatusDelivered {
+			details.DeliveredAt = details.SentAt
+		}
+	} else {
+		// Group chats:
+		if len(details.Read) > 0 {
+			details.Status = domain.MessageStatusRead
+		} else if len(details.Delivered) > 0 {
+			if details.Status != domain.MessageStatusRead {
+				details.Status = domain.MessageStatusDelivered
+			}
+		}
+		if details.Status == domain.MessageStatusRead {
+			if details.ReadAt.IsZero() {
+				details.ReadAt = details.SentAt
+			}
+			if details.DeliveredAt.IsZero() {
+				details.DeliveredAt = details.SentAt
+			}
+		} else if details.Status == domain.MessageStatusDelivered {
+			if details.DeliveredAt.IsZero() {
+				details.DeliveredAt = details.SentAt
+			}
+		}
+	}
+
+	return details, nil
+}
+
+// SubscribePresence requests presence updates from WhatsApp for a specific user JID.
+func (a *Adapter) SubscribePresence(ctx context.Context, jid string) error {
+	if a.client == nil || !a.client.IsConnected() {
+		return errors.New("client not connected")
+	}
+	parsed, err := NormalizeJID(jid)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(parsed.String(), "@g.us") {
+		return nil
+	}
+	go func() {
+		subCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = a.client.SendPresence(subCtx, types.PresenceAvailable)
+		err := a.client.SubscribePresence(subCtx, parsed)
+		if err != nil {
+			_ = a.client.SubscribePresence(subCtx, parsed.ToNonAD())
+		}
+		nonAD := parsed.ToNonAD().String()
+		if strings.HasSuffix(nonAD, "@s.whatsapp.net") {
+			user := strings.TrimSuffix(nonAD, "@s.whatsapp.net")
+			if lid := a.ResolvePhoneToLID(user); lid != "" {
+				if lidJID, lErr := NormalizeJID(lid + "@lid"); lErr == nil {
+					_ = a.client.SubscribePresence(subCtx, lidJID)
+				}
+			}
+		} else if strings.HasSuffix(nonAD, "@lid") {
+			user := strings.TrimSuffix(nonAD, "@lid")
+			if pn := a.ResolveLIDToPhone(user); pn != "" {
+				if pnJID, pErr := NormalizeJID(pn + "@s.whatsapp.net"); pErr == nil {
+					_ = a.client.SubscribePresence(subCtx, pnJID)
+				}
+			}
+		}
+	}()
+	return nil
+}
+
+// GetUserPresence retrieves the cached presence information for a given user JID.
+func (a *Adapter) GetUserPresence(jid string) (domain.UserPresence, bool) {
+	a.presenceMu.RLock()
+	defer a.presenceMu.RUnlock()
+	if a.presences == nil {
+		return domain.UserPresence{}, false
+	}
+	parsed, err := NormalizeJID(jid)
+	if err == nil {
+		nonAD := parsed.ToNonAD().String()
+		if p, ok := a.presences[nonAD]; ok {
+			return p, true
+		}
+		if p, ok := a.presences[parsed.String()]; ok {
+			return p, true
+		}
+		if strings.HasSuffix(nonAD, "@s.whatsapp.net") {
+			user := strings.TrimSuffix(nonAD, "@s.whatsapp.net")
+			if lid := a.ResolvePhoneToLID(user); lid != "" {
+				if p, ok := a.presences[lid+"@lid"]; ok {
+					return p, true
+				}
+			}
+		} else if strings.HasSuffix(nonAD, "@lid") {
+			user := strings.TrimSuffix(nonAD, "@lid")
+			if pn := a.ResolveLIDToPhone(user); pn != "" {
+				if p, ok := a.presences[pn+"@s.whatsapp.net"]; ok {
+					return p, true
+				}
+			}
+		}
+	}
+	if p, ok := a.presences[jid]; ok {
+		return p, true
+	}
+	return domain.UserPresence{}, false
+}
+
+// OnPresence registers a listener for live presence updates.
+func (a *Adapter) OnPresence(handler domain.PresenceHandler) {
+	a.presenceMu.Lock()
+	defer a.presenceMu.Unlock()
+	a.presenceHandlers = append(a.presenceHandlers, handler)
+}
+
+// OnReceipt registers a listener for incoming live receipts.
+func (a *Adapter) OnReceipt(handler domain.ReceiptHandler) {
+	a.receiptMu.Lock()
+	defer a.receiptMu.Unlock()
+	a.receiptHandlers = append(a.receiptHandlers, handler)
+}
+
+func (a *Adapter) notifyPresence(p domain.UserPresence) {
+	a.presenceMu.Lock()
+	if a.presences == nil {
+		a.presences = make(map[string]domain.UserPresence)
+	}
+	a.presences[p.JID] = p
+	handlers := append([]domain.PresenceHandler(nil), a.presenceHandlers...)
+	a.presenceMu.Unlock()
+	for _, h := range handlers {
+		h(p)
+	}
+}
+
+func (a *Adapter) notifyReceipt(chatID string, msgIDs []string, receiptType string, ts time.Time) {
+	a.receiptMu.RLock()
+	handlers := append([]domain.ReceiptHandler(nil), a.receiptHandlers...)
+	a.receiptMu.RUnlock()
+	for _, h := range handlers {
+		h(chatID, msgIDs, receiptType, ts)
+	}
 }

@@ -76,3 +76,32 @@ func (m Message) MentionsMe() bool {
 	}
 	return false
 }
+
+// MessageReceipt represents an individual delivery or read confirmation.
+type MessageReceipt struct {
+	UserJID   string        `json:"user_jid"`
+	UserName  string        `json:"user_name,omitempty"`
+	Status    MessageStatus `json:"status"` // delivered, read
+	Timestamp time.Time     `json:"timestamp"`
+}
+
+// MessageReceiptDetails holds all receipt timestamps and participant breakdown for a message.
+type MessageReceiptDetails struct {
+	MessageID   string           `json:"message_id"`
+	ChatID      string           `json:"chat_id"`
+	IsGroup     bool             `json:"is_group"`
+	IsFromMe    bool             `json:"is_from_me"`
+	Status      MessageStatus    `json:"status"`
+	SentAt      time.Time        `json:"sent_at"`
+	DeliveredAt time.Time        `json:"delivered_at,omitempty"`
+	ReadAt      time.Time        `json:"read_at,omitempty"`
+	Delivered   []MessageReceipt `json:"delivered,omitempty"`
+	Read        []MessageReceipt `json:"read,omitempty"`
+}
+
+// UserPresence represents the online or last-seen status of a WhatsApp user.
+type UserPresence struct {
+	JID      string    `json:"jid"`
+	IsOnline bool      `json:"is_online"`
+	LastSeen time.Time `json:"last_seen,omitempty"`
+}

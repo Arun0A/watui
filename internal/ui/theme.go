@@ -61,6 +61,14 @@ type Theme struct {
 	KeybindGroup string `json:"keybind_group" yaml:"keybind_group"`
 	KeybindKey   string `json:"keybind_key" yaml:"keybind_key"`
 	KeybindDesc  string `json:"keybind_desc" yaml:"keybind_desc"`
+
+	// Message Status, Presence & Modal
+	StatusSent      string `json:"status_sent" yaml:"status_sent"`
+	StatusDelivered string `json:"status_delivered" yaml:"status_delivered"`
+	StatusRead      string `json:"status_read" yaml:"status_read"`
+	OnlineBadge     string `json:"online_badge" yaml:"online_badge"`
+	LastSeenBadge   string `json:"last_seen_badge" yaml:"last_seen_badge"`
+	ModalBorder     string `json:"modal_border" yaml:"modal_border"`
 }
 
 // DefaultTheme returns the default built-in Catppuccin Mocha color scheme.
@@ -106,6 +114,13 @@ func DefaultTheme() Theme {
 		KeybindGroup: "#FAB387",
 		KeybindKey:   "#89DCEB",
 		KeybindDesc:  "#CDD6F4",
+
+		StatusSent:      "#6C7086",
+		StatusDelivered: "#A6ADC8",
+		StatusRead:      "#89DCEB",
+		OnlineBadge:     "#A6E3A1",
+		LastSeenBadge:   "#6C7086",
+		ModalBorder:     "#89B4FA",
 	}
 }
 
@@ -157,6 +172,12 @@ type Styles struct {
 	KeybindGroupTitle   lipgloss.Style
 	KeybindKey          lipgloss.Style
 	KeybindDesc         lipgloss.Style
+	StatusSent          lipgloss.Style
+	StatusDelivered     lipgloss.Style
+	StatusRead          lipgloss.Style
+	OnlineBadge         lipgloss.Style
+	LastSeenBadge       lipgloss.Style
+	ModalBorderColor    string
 }
 
 // MakeStyles compiles a Theme into lipgloss styles.
@@ -332,6 +353,25 @@ func MakeStyles(t Theme) Styles {
 
 		KeybindDesc: lipgloss.NewStyle().
 			Foreground(lipgloss.Color(t.KeybindDesc)),
+
+		StatusSent: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(t.StatusSent)),
+
+		StatusDelivered: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(t.StatusDelivered)),
+
+		StatusRead: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color(t.StatusRead)),
+
+		OnlineBadge: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color(t.OnlineBadge)),
+
+		LastSeenBadge: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(t.LastSeenBadge)),
+
+		ModalBorderColor: t.ModalBorder,
 	}
 }
 
@@ -506,6 +546,14 @@ func LoadTheme(cfg *config.Config) (Theme, string) {
 	assign(&theme.KeybindGroup, "keybind_group")
 	assign(&theme.KeybindKey, "keybind_key")
 	assign(&theme.KeybindDesc, "keybind_desc")
+
+	// Message Status, Presence & Modal
+	assign(&theme.StatusSent, "status_sent")
+	assign(&theme.StatusDelivered, "status_delivered")
+	assign(&theme.StatusRead, "status_read")
+	assign(&theme.OnlineBadge, "online_badge")
+	assign(&theme.LastSeenBadge, "last_seen_badge")
+	assign(&theme.ModalBorder, "modal_border")
 
 	return theme, themePath
 }

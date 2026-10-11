@@ -74,6 +74,7 @@ var allKeybindGroups = []keybindGroup{
 			{key: "k / Up / Ctrl+P", desc: "Hover previous message up"},
 			{key: "J / K (or m / M)", desc: "Jump to next / previous media message"},
 			{key: "r", desc: "Reply to hovered message (focuses input box)"},
+			{key: "i", desc: "View message read receipt and delivery info"},
 			{key: "e", desc: "Edit hovered sent text message in message input box"},
 			{key: "y", desc: "Copy hovered message text to system clipboard"},
 			{key: "Ctrl+V / Alt+V", desc: "Paste from clipboard into input (focuses input)"},

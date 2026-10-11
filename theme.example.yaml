@@ -67,3 +67,11 @@ mention_other: "#89B4FA"       # Mention @Other tag in message text
 keybind_group: "#FAB387"       # Help screen category header
 keybind_key: "#89DCEB"         # Key combination name
 keybind_desc: "#CDD6F4"        # Action description
+
+# --- Message Status, Presence & Receipt Info Modal ---
+status_sent: "#6C7086"         # Sent status label in message info modal
+status_delivered: "#A6ADC8"    # Delivered status label in message info modal
+status_read: "#89DCEB"         # Read status label in message info modal
+online_badge: "#A6E3A1"        # [online] presence indicator in chat header
+last_seen_badge: "#6C7086"     # [last seen ...] presence indicator in chat header
+modal_border: "#89B4FA"        # Border of Message Info modal ('i' in hover mode)
