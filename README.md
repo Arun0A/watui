@@ -285,6 +285,12 @@ notifications:
 # 12. Media Cache Expiration & Cleanup (Optional)
 # expire_media: 72       # Cache lifetime in hours (default: 72 hours / 3 days; 0 to disable expiration)
 # clear_on_exit: false   # Set to true to clear all cached media on TUI exit (default: false)
+
+# 13. Emoji & Reaction Display Mode (Optional)
+# Controls how emojis/reactions are displayed in the terminal:
+#   "icon" (default) - Native Unicode emoji glyphs
+#   "text"           - Unicode CLDR short name (e.g. :thumbs up:, :grinning face:), ideal for Linux TTY/consoles
+# display_emoji: icon
 ```
 
 ### Theme Customization (`theme.yaml`)

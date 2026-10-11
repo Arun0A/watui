@@ -934,3 +934,41 @@ func TestAddAndRemovePinChat(t *testing.T) {
 		t.Errorf("Expected chat to be unpinned on disk")
 	}
 }
+
+func TestDisplayEmojiConfig(t *testing.T) {
+	// Default: icon
+	var cfg Config
+	if cfg.GetDisplayEmoji() != "icon" {
+		t.Errorf("GetDisplayEmoji() = %q; want 'icon'", cfg.GetDisplayEmoji())
+	}
+	if cfg.IsDisplayEmojiText() {
+		t.Errorf("IsDisplayEmojiText() should be false by default")
+	}
+
+	// Text mode
+	cfg.DisplayEmoji = "text"
+	if cfg.GetDisplayEmoji() != "text" {
+		t.Errorf("GetDisplayEmoji() = %q; want 'text'", cfg.GetDisplayEmoji())
+	}
+	if !cfg.IsDisplayEmojiText() {
+		t.Errorf("IsDisplayEmojiText() should be true when set to 'text'")
+	}
+
+	// Case-insensitive
+	cfg.DisplayEmoji = "TEXT"
+	if !cfg.IsDisplayEmojiText() {
+		t.Errorf("IsDisplayEmojiText() should be true for 'TEXT'")
+	}
+
+	// Loading from YAML
+	tmpDir := t.TempDir()
+	yamlFile := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(yamlFile, []byte("display_emoji: text\n"), 0644)
+	loaded, err := Load(yamlFile)
+	if err != nil {
+		t.Fatalf("Load err: %v", err)
+	}
+	if !loaded.IsDisplayEmojiText() {
+		t.Errorf("Expected loaded config to have IsDisplayEmojiText true")
+	}
+}

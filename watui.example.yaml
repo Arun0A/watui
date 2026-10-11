@@ -169,3 +169,12 @@
 # Optionally, specify an explicit path to a custom theme file here:
 #
 # theme: "theme.yaml"
+
+# 18. Emoji & Reaction Display Mode
+# Controls how emojis and reactions are displayed in the terminal.
+#   - "icon": Uses native Unicode emoji glyphs (default).
+#   - "text": Displays the official CLDR short name (e.g. :thumbs up:, :grinning face:, :red heart:)
+#             instead of icons, ideal for Linux virtual console / TTY environments where emojis
+#             cannot render properly.
+#
+# display_emoji: icon

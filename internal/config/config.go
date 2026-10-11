@@ -160,6 +160,9 @@ type Config struct {
 	// Theme specifies an optional custom theme file path (e.g. "theme.yaml").
 	Theme string `json:"theme" yaml:"theme"`
 
+	// DisplayEmoji controls how emojis and reactions are displayed ("icon" for native glyphs, "text" for CLDR short names). Default: "icon".
+	DisplayEmoji string `json:"display_emoji" yaml:"display_emoji"`
+
 	// SourcePath stores the path of the file this config was loaded from (if any).
 	SourcePath string `json:"-" yaml:"-"`
 }
@@ -411,6 +414,22 @@ func (c *Config) IsClipboardPasteEnabled() bool {
 		return *c.ClipboardPaste
 	}
 	return true
+}
+
+// IsDisplayEmojiText reports whether emojis and reactions should be displayed as CLDR short names instead of icons (default: false).
+func (c *Config) IsDisplayEmojiText() bool {
+	if c == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(c.DisplayEmoji), "text")
+}
+
+// GetDisplayEmoji returns the display_emoji configuration value ("icon" or "text"). Defaults to "icon".
+func (c *Config) GetDisplayEmoji() string {
+	if c == nil || strings.TrimSpace(c.DisplayEmoji) == "" {
+		return "icon"
+	}
+	return strings.ToLower(strings.TrimSpace(c.DisplayEmoji))
 }
 
 // DefaultDBPath returns the appropriate default path for the database file.

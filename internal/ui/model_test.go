@@ -3111,6 +3111,69 @@ func TestDisableReactionsInChat(t *testing.T) {
 	}
 }
 
+func TestDisplayEmojiInChatView(t *testing.T) {
+	adapter := &mockAdapter{}
+	cfg := &config.Config{
+		DisplayEmoji: "text",
+	}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.activeChatID = "chat1@s.whatsapp.net"
+	model.activeName = "Alice"
+	model.view = ViewChat
+	model.width = 100
+	model.height = 30
+
+	msg1 := domain.Message{
+		ID:         "msg-1",
+		ChatID:     "chat1@s.whatsapp.net",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice 😀",
+		Timestamp:  time.Now().Add(-1 * time.Minute),
+		Body:       "Hello world! 👍❤️",
+		Type:       domain.MessageTypeText,
+	}
+	reactMsg := domain.Message{
+		ID:           "react-1",
+		ChatID:       "chat1@s.whatsapp.net",
+		Sender:       "bob@s.whatsapp.net",
+		SenderName:   "Bob",
+		Timestamp:    time.Now(),
+		Body:         "[Reaction: 🚀]",
+		Type:         domain.MessageTypeReaction,
+		QuotedID:     "msg-1",
+		QuotedText:   "Hello world! 👍❤️",
+		QuotedSender: "Alice 😀",
+	}
+	model.activeMsgs = []domain.Message{msg1, reactMsg}
+
+	lines := model.renderChatView()
+	rendered := strings.Join(lines, "\n")
+
+	// Message body should have CLDR names
+	if !strings.Contains(rendered, "Hello world! :thumbs up::red heart:") {
+		t.Errorf("Expected emoji replaced in body, got:\n%s", rendered)
+	}
+	// Reaction should have CLDR name
+	if !strings.Contains(rendered, "[Reaction: :rocket:]") {
+		t.Errorf("Expected emoji replaced in reaction, got:\n%s", rendered)
+	}
+	// Sender name should have CLDR name
+	if !strings.Contains(rendered, "Alice :grinning face:") {
+		t.Errorf("Expected emoji replaced in sender name, got:\n%s", rendered)
+	}
+
+	// Switch back to icon mode
+	model.cfg.DisplayEmoji = "icon"
+	linesIcon := model.renderChatView()
+	renderedIcon := strings.Join(linesIcon, "\n")
+	if !strings.Contains(renderedIcon, "Hello world! 👍❤️") {
+		t.Errorf("Expected original emoji in icon mode, got:\n%s", renderedIcon)
+	}
+	if !strings.Contains(renderedIcon, "[Reaction: 🚀]") {
+		t.Errorf("Expected original reaction emoji in icon mode, got:\n%s", renderedIcon)
+	}
+}
+
 func TestClipboardPasteHandling(t *testing.T) {
 	adapter := &mockAdapter{}
 	model := NewModel(context.Background(), adapter)
