@@ -14,26 +14,22 @@ A minimal WhatsApp TUI, specifically designed to reduce dependency on a browser 
 
 So WA-TUI, just shows you the unread messages with message context persisting only for your active session. Although, you can start a new chat with any contact on demand. It is however a stripped down version of WhatsApp.
 
-### What you dont get:
-- No read-receipts (be honest, do you really care?)
-- Your 5 years chat history is not loaded
-- You don't get to see their profile picture
-
-idk, probably much more... but i dont really see the need for them.
-However, if you really feel that you would not want to compromise on these, you should be using the official web or desktop version for such tasks.
-
-I must repeat, WATUI is not a replacement to the official WhatsApp, it's just what you need most of the time.
-
-### What you get:
+### What you can do:
 - Media and document preview (and saving them ofc)
 - View statuses of your contacts
-- Read-receipts are updated realtime (if you wish to bypass, you must be smart enough)
+- Read-receipts supported
+- Load chat history on-demand
 - Attach files without leaving the terminal emulator
 - Initiate a message to a WA number
 - Ghost your nemesis by adding them in your config
 - Desktop notification
 
-If you are concerned about security, the db is only accessible in your machine, encrypted with a key and your machine-id (guid).
+idk, probably there are stuff that you can't do... but i dont really see the need for them, point them out if you disagree.
+However, if you really feel that you would not want to compromise on these, you should be using the official web or desktop version for such tasks.
+
+I must repeat, WATUI is not a replacement to the official WhatsApp, it's just what you need most of the time.
+
+If you are concerned about security, the db is only accessible in your machine, encrypted with a key and your machine-id (guid). I would rather trust my local machine than a google's server.
 
 ---
 
