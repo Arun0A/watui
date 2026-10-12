@@ -39,6 +39,9 @@ type Server struct {
 
 	unreadsMu     sync.RWMutex
 	cachedUnreads []domain.Message
+
+	reloadMu       sync.RWMutex
+	onReloadConfig func() error
 }
 
 // NewServer creates a new daemon IPC server for the given adapter.
@@ -539,11 +542,39 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			}
 		}
 
+	case "reload_config":
+		s.reloadMu.RLock()
+		fn := s.onReloadConfig
+		s.reloadMu.RUnlock()
+
+		if fn != nil {
+			if err := fn(); err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.Result = []byte(`"ok"`)
+			}
+		} else if s.adapter != nil {
+			if err := s.adapter.ReloadConfig(reqCtx); err != nil {
+				resp.Error = err.Error()
+			} else {
+				resp.Result = []byte(`"ok"`)
+			}
+		} else {
+			resp.Result = []byte(`"ok"`)
+		}
+
 	default:
 		resp.Error = fmt.Sprintf("unknown method: %s", req.Method)
 	}
 
 	return resp
+}
+
+// SetOnReloadConfig registers a handler called when a client triggers reload_config.
+func (s *Server) SetOnReloadConfig(fn func() error) {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	s.onReloadConfig = fn
 }
 
 // BroadcastEvent sends a push event to all currently connected clients.

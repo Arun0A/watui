@@ -143,6 +143,9 @@ type WhatsAppAdapter interface {
 
 	// OnReceipt registers a listener for incoming live receipts.
 	OnReceipt(handler ReceiptHandler)
+
+	// ReloadConfig reloads configuration dynamically in the background without restarting the session.
+	ReloadConfig(ctx context.Context) error
 }
 
 // FormatDisappearingTimer formats a duration in seconds into a friendly string like "24h", "7d", "90d".

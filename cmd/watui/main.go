@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -60,7 +61,7 @@ func main() {
 		fmt.Fprintf(out, "  --no-tui <jid> <msg>\n    \tSend a message directly via CLI without launching TUI\n")
 		fmt.Fprintf(out, "  -cli\n    \tRun in headless CLI stream mode instead of interactive TUI\n")
 		fmt.Fprintf(out, "  -config string\n    \t%s\n", configHelp)
-		fmt.Fprintf(out, "  -d -daemon\n    \tRun in background notification daemon mode (start, stop, status, restart)\n")
+		fmt.Fprintf(out, "  -d -daemon\n    \tRun in background notification daemon mode (start, stop, status, restart, reload)\n")
 		fmt.Fprintf(out, "  -db string\n    \tPath to SQLite session and cache database (default: %s)\n", defaultDB)
 		fmt.Fprintf(out, "  -json\n    \tPrint output as raw JSON (used with -cli and --no-tui)\n")
 		fmt.Fprintf(out, "  -log string\n    \tProtocol log level (DEBUG, INFO, WARN, ERROR) (default \"WARN\")\n")
@@ -119,7 +120,7 @@ func main() {
 			} else {
 				subcommand = "start"
 			}
-		case "start", "stop", "status", "restart":
+		case "start", "stop", "status", "restart", "reload":
 			*daemonMode = true
 			subcommand = args[0]
 		case "send":
@@ -131,7 +132,7 @@ func main() {
 		sendArgs = args
 	}
 	if *daemonMode && subcommand == "" {
-		if len(args) > 0 && (args[0] == "start" || args[0] == "stop" || args[0] == "status" || args[0] == "restart") {
+		if len(args) > 0 && (args[0] == "start" || args[0] == "stop" || args[0] == "status" || args[0] == "restart" || args[0] == "reload") {
 			subcommand = args[0]
 		} else {
 			subcommand = "start"
@@ -150,7 +151,7 @@ func main() {
 		return
 	}
 
-	// 2. Daemon Management: start, stop, status, restart
+	// 2. Daemon Management: start, stop, status, restart, reload
 	if *daemonMode {
 		switch subcommand {
 		case "start":
@@ -171,8 +172,29 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "reload":
+			pidFile := daemon.PIDFilePath(finalDBPath)
+			if running, pid := daemon.IsRunning(pidFile); running {
+				remote, err := daemon.ConnectRemote(finalDBPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error connecting to daemon: %v\n", err)
+					os.Exit(1)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				err = remote.ReloadConfig(ctx)
+				cancel()
+				remote.Disconnect()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error reloading daemon config: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Printf("Status: RELOADED (PID %d)\n", pid)
+				return
+			}
+			fmt.Println("Status: STOPPED (daemon is not running)")
+			return
 		default:
-			fmt.Printf("Unknown daemon action: '%s'. Valid actions: start, stop, status, restart\n", subcommand)
+			fmt.Printf("Unknown daemon action: '%s'. Valid actions: start, stop, status, restart, reload\n", subcommand)
 			os.Exit(1)
 		}
 	}
@@ -375,15 +397,10 @@ func main() {
 	}()
 
 	finalModel, err := p.Run()
-	if uiModel != nil {
-		uiModel.CleanupOnExit()
-	}
-	toggledLocalMute := false
 	if finalM, ok := finalModel.(*ui.Model); ok && finalM != nil {
 		finalM.CleanupOnExit()
-		toggledLocalMute = finalM.LocalMuteToggled()
 	} else if uiModel != nil {
-		toggledLocalMute = uiModel.LocalMuteToggled()
+		uiModel.CleanupOnExit()
 	}
 
 	if err != nil {
@@ -393,14 +410,6 @@ func main() {
 
 	cancel()
 	adapter.Disconnect()
-
-	// If local mute was toggled during this session, refresh background daemon if running
-	if toggledLocalMute {
-		pidFile := daemon.PIDFilePath(finalDBPath)
-		if running, _ := daemon.IsRunning(pidFile); running {
-			_ = restartDaemon(finalDBPath, appCfg, *configFile, *logFile)
-		}
-	}
 }
 
 func startDaemon(dbPath string, appCfg *config.Config, configFile, customLog string) error {
@@ -602,11 +611,46 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 		defer ipcServer.Close()
 	}
 
+	var appCfgMu sync.RWMutex
+	currentAppCfg := appCfg
+
+	if ipcServer != nil {
+		ipcServer.SetOnReloadConfig(func() error {
+			appCfgMu.RLock()
+			srcPath := ""
+			if currentAppCfg != nil {
+				srcPath = currentAppCfg.SourcePath
+			}
+			appCfgMu.RUnlock()
+
+			newCfg, err := config.Load(srcPath)
+			if err != nil {
+				if loggingEnabled {
+					log.Printf("[watui daemon] Failed to reload config from %s: %v\n", srcPath, err)
+				}
+				return err
+			}
+			appCfgMu.Lock()
+			currentAppCfg = newCfg
+			appCfgMu.Unlock()
+
+			adapter.SetAppConfig(newCfg)
+			if loggingEnabled {
+				log.Printf("[watui daemon] Config reloaded successfully from %s\n", newCfg.SourcePath)
+			}
+			return nil
+		})
+	}
+
 	adapter.OnMessage(func(msg domain.Message) {
+		appCfgMu.RLock()
+		activeCfg := currentAppCfg
+		appCfgMu.RUnlock()
+
 		if adapter.IsChatMuted(msg.ChatID) {
 			return
 		}
-		if appCfg.IsHidden(msg.ChatID, msg.ChatName, msg.SenderName) || appCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
+		if activeCfg.IsHidden(msg.ChatID, msg.ChatName, msg.SenderName) || activeCfg.IsMuted(msg.ChatID, msg.ChatName, msg.SenderName) {
 			return
 		}
 		if adapter.IsChatArchived(msg.ChatID) && !msg.MentionsMe() {
@@ -617,7 +661,7 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 		}
 		// Silence desktop notifications and sounds while TUI client is connected!
 		if ipcServer == nil || !ipcServer.HasActiveClients() {
-			notify.Dispatch(appCfg, msg)
+			notify.Dispatch(activeCfg, msg)
 		}
 	})
 

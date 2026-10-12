@@ -2927,6 +2927,22 @@ func (a *Adapter) SetAppConfig(cfg *config.Config) {
 	a.appConfig = cfg
 }
 
+// ReloadConfig dynamically reloads configuration from disk if a config file is configured.
+func (a *Adapter) ReloadConfig(ctx context.Context) error {
+	a.mu.Lock()
+	cfg := a.appConfig
+	a.mu.Unlock()
+	if cfg == nil || cfg.SourcePath == "" {
+		return nil
+	}
+	newCfg, err := config.Load(cfg.SourcePath)
+	if err != nil {
+		return err
+	}
+	a.SetAppConfig(newCfg)
+	return nil
+}
+
 func (a *Adapter) saveHistoryMessage(msg domain.Message, raw ...*waE2E.Message) {
 	if a.localDB == nil || a.appConfig == nil || !a.appConfig.IsHistoryPersistEnabled() {
 		return

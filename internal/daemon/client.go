@@ -790,3 +790,9 @@ func (r *RemoteAdapter) notifyReceipt(chatID string, messageIDs []string, receip
 		h(chatID, messageIDs, receiptType, ts)
 	}
 }
+
+// ReloadConfig requests the background daemon to reload its configuration from disk.
+func (r *RemoteAdapter) ReloadConfig(ctx context.Context) error {
+	return r.call(ctx, "reload_config", nil, nil)
+}
+

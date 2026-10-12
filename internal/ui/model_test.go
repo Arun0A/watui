@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,7 @@ type mockAdapter struct {
 	presences             map[string]domain.UserPresence
 	presenceHandler       domain.PresenceHandler
 	receiptHandler        domain.ReceiptHandler
+	reloadConfigCalls     int32
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -262,6 +264,11 @@ func (m *mockAdapter) OnPresence(h domain.PresenceHandler) {
 
 func (m *mockAdapter) OnReceipt(h domain.ReceiptHandler) {
 	m.receiptHandler = h
+}
+
+func (m *mockAdapter) ReloadConfig(ctx context.Context) error {
+	atomic.AddInt32(&m.reloadConfigCalls, 1)
+	return nil
 }
 
 func TestUnreadModelLifecycle(t *testing.T) {
@@ -5121,6 +5128,44 @@ theme: dark
 	}
 	if strings.Contains(string(diskContent), testChatID) {
 		t.Errorf("Expected yaml on disk to not contain %s, got:\n%s", testChatID, string(diskContent))
+	}
+}
+
+func TestLocalPinAndMuteTriggersReloadConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "watui.yaml")
+	cfg := &config.Config{
+		SourcePath: yamlPath,
+	}
+
+	adapter := &mockAdapter{}
+	model := NewModel(context.Background(), adapter, cfg)
+
+	testChatID := "123456789@s.whatsapp.net"
+	model.handleIncomingMessage(domain.Message{
+		ID:         "msg1",
+		ChatID:     testChatID,
+		ChatName:   "Bob",
+		Sender:     testChatID,
+		SenderName: "Bob",
+		Body:       "Hello",
+		Timestamp:  time.Now(),
+	})
+
+	// 1. Press 'm' to mute
+	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+
+	// Give the async goroutine time to run
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&adapter.reloadConfigCalls) == 0 {
+		t.Errorf("Expected ReloadConfig to be called after toggling mute")
+	}
+
+	// 2. CleanupOnExit should also invoke ReloadConfig if localMuteToggled is true
+	adapter.reloadConfigCalls = 0
+	model.CleanupOnExit()
+	if atomic.LoadInt32(&adapter.reloadConfigCalls) == 0 {
+		t.Errorf("Expected ReloadConfig to be called on CleanupOnExit when local mute was toggled")
 	}
 }
 

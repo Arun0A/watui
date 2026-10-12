@@ -2365,6 +2365,13 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 						m.previewStatus = fmt.Sprintf("Muted %s in watui.yaml", chat.Name)
 					}
 				}
+				if m.adapter != nil {
+					go func(ad domain.WhatsAppAdapter) {
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						defer cancel()
+						_ = ad.ReloadConfig(ctx)
+					}(m.adapter)
+				}
 			}
 		}
 		return nil
@@ -2422,6 +2429,13 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 						m.mu.Unlock()
 						m.previewStatus = fmt.Sprintf("Pinned %s in watui.yaml", chat.Name)
 					}
+				}
+				if m.adapter != nil {
+					go func(ad domain.WhatsAppAdapter) {
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						defer cancel()
+						_ = ad.ReloadConfig(ctx)
+					}(m.adapter)
 				}
 			}
 		}
@@ -2715,6 +2729,9 @@ func (m *Model) CleanupOnExit() {
 		case <-done:
 		case <-cleanupCtx.Done():
 		}
+	}
+	if m.localMuteToggled && m.adapter != nil {
+		_ = m.adapter.ReloadConfig(cleanupCtx)
 	}
 	_ = ClearClipboardCache()
 	if m.cfg != nil && m.cfg.IsClearOnExitEnabled() {

@@ -109,6 +109,7 @@ func (m *mockAdapter) GetUserPresence(jid string) (domain.UserPresence, bool) {
 }
 func (m *mockAdapter) OnPresence(h domain.PresenceHandler) {}
 func (m *mockAdapter) OnReceipt(h domain.ReceiptHandler)   {}
+func (m *mockAdapter) ReloadConfig(ctx context.Context) error { return nil }
 
 func TestIPCEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -260,5 +261,40 @@ func TestConcurrentIPCExecution(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatal("Timeout waiting for concurrent calls")
 		}
+	}
+}
+
+func TestIPCReloadConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "watui.db")
+
+	mock := &mockAdapter{}
+	server, err := NewServer(mock, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	reloaded := false
+	server.SetOnReloadConfig(func() error {
+		reloaded = true
+		return nil
+	})
+
+	client, err := ConnectRemote(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.Disconnect()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := client.ReloadConfig(ctx); err != nil {
+		t.Fatalf("ReloadConfig failed: %v", err)
+	}
+
+	if !reloaded {
+		t.Errorf("Expected reloaded to be true, got false")
 	}
 }
