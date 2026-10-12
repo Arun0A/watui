@@ -15,6 +15,9 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"go.mau.fi/whatsmeow/util/gcmutil"
@@ -1490,5 +1493,173 @@ func TestMessageReceiptsAndPresence(t *testing.T) {
 	}
 	if len(details.Delivered) != 2 {
 		t.Errorf("Expected 2 delivered recipients, got %d (%+v)", len(details.Delivered), details.Delivered)
+	}
+}
+
+func TestHistorySyncArchivedChats(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS whatsmeow_chat_settings (
+		our_jid TEXT,
+		chat_jid TEXT,
+		muted_until INTEGER,
+		pinned BOOLEAN,
+		archived BOOLEAN,
+		PRIMARY KEY (our_jid, chat_jid)
+	);`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS watui_unread_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT NOT NULL,
+		type TEXT NOT NULL,
+		is_from_me BOOLEAN NOT NULL,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		is_edit BOOLEAN,
+		raw_message BLOB
+	);`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS watui_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT NOT NULL,
+		type TEXT NOT NULL,
+		is_from_me BOOLEAN NOT NULL,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		is_edit BOOLEAN,
+		raw_message BLOB,
+		status TEXT
+	);`)
+
+	adapter := &Adapter{
+		localDB:       db,
+		appConfig:     &config.Config{},
+		archivedChats: make(map[string]bool),
+	}
+
+	archivedChatID := "123456789@s.whatsapp.net"
+	normalChatID := "987654321@s.whatsapp.net"
+
+	var unreadNotified []string
+	adapter.OnMessage(func(m domain.Message) {
+		unreadNotified = append(unreadNotified, m.ChatID)
+	})
+
+	// Construct HistorySync event with an archived chat and a normal chat
+	evt := &events.HistorySync{
+		Data: &waHistorySync.HistorySync{
+			Conversations: []*waHistorySync.Conversation{
+				{
+					ID:       proto.String(archivedChatID),
+					Archived: proto.Bool(true),
+					Messages: []*waHistorySync.HistorySyncMsg{
+						{
+							Message: &waWeb.WebMessageInfo{
+								Message: &waE2E.Message{
+									Conversation: proto.String("Secret archived message"),
+								},
+							},
+						},
+					},
+				},
+				{
+					ID:       proto.String(normalChatID),
+					Archived: proto.Bool(false),
+					Messages: []*waHistorySync.HistorySyncMsg{
+						{
+							Message: &waWeb.WebMessageInfo{
+								Message: &waE2E.Message{
+									Conversation: proto.String("Normal unread message"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	adapter.handleEvent(evt)
+
+	// Check IsChatArchived
+	if !adapter.IsChatArchived(archivedChatID) {
+		t.Errorf("Expected archivedChatID %s to be archived, got false", archivedChatID)
+	}
+	if adapter.IsChatArchived(normalChatID) {
+		t.Errorf("Expected normalChatID %s to NOT be archived, got true", normalChatID)
+	}
+}
+
+func TestEventsArchiveHandling(t *testing.T) {
+	adapter := &Adapter{
+		archivedChats: make(map[string]bool),
+	}
+
+	targetJID := types.NewJID("111222333", "s.whatsapp.net")
+
+	// 1. Archive event (true)
+	evtTrue := &events.Archive{
+		JID: targetJID,
+		Action: &waSyncAction.ArchiveChatAction{
+			Archived: proto.Bool(true),
+		},
+	}
+	adapter.handleEvent(evtTrue)
+
+	if !adapter.IsChatArchived(targetJID.String()) {
+		t.Errorf("Expected %s to be archived after Archive(true) event", targetJID.String())
+	}
+
+	// 2. Archive event (false)
+	evtFalse := &events.Archive{
+		JID: targetJID,
+		Action: &waSyncAction.ArchiveChatAction{
+			Archived: proto.Bool(false),
+		},
+	}
+	adapter.handleEvent(evtFalse)
+
+	if adapter.IsChatArchived(targetJID.String()) {
+		t.Errorf("Expected %s to NOT be archived after Archive(false) event", targetJID.String())
+	}
+}
+
+func TestBiDirectionalLIDArchiveLookup(t *testing.T) {
+	adapter := &Adapter{
+		archivedChats: make(map[string]bool),
+		lidMapCache: map[string]string{
+			"lid_user_99": "919999999999",
+		},
+		lidMapCachedAt: time.Now(),
+	}
+
+	phoneChat := "919999999999@s.whatsapp.net"
+	lidChat := "lid_user_99@lid"
+
+	// Archive via phone JID
+	adapter.archivedMu.Lock()
+	adapter.archivedChats[phoneChat] = true
+	adapter.archivedMu.Unlock()
+
+	// Should be recognized by both phone and LID
+	if !adapter.IsChatArchived(phoneChat) {
+		t.Errorf("Expected phoneChat %s to be archived", phoneChat)
+	}
+	if !adapter.IsChatArchived(lidChat) {
+		t.Errorf("Expected lidChat %s to be archived via reverse lookup", lidChat)
 	}
 }

@@ -979,13 +979,23 @@ func (a *Adapter) loadArchivedChats() {
 				if pn, ok := lidMap[lidUser]; ok && pn != "" {
 					archived[pn+"@s.whatsapp.net"] = true
 				}
+			} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+				phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+				if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+					archived[lid+"@lid"] = true
+				}
 			}
 		}
 	}
 	_ = rows.Err()
 
 	a.archivedMu.Lock()
-	a.archivedChats = archived
+	if a.archivedChats == nil {
+		a.archivedChats = make(map[string]bool)
+	}
+	for k, v := range archived {
+		a.archivedChats[k] = v
+	}
 	a.archivedMu.Unlock()
 }
 
@@ -1006,6 +1016,23 @@ func (a *Adapter) IsChatArchived(chatID string) bool {
 	if a.archivedChats != nil {
 		if a.archivedChats[chatID] || a.archivedChats[clean] {
 			return true
+		}
+		if strings.HasSuffix(clean, "@lid") {
+			lidUser := strings.TrimSuffix(clean, "@lid")
+			lidMap := a.getLIDMap()
+			if pn, ok := lidMap[lidUser]; ok && pn != "" {
+				if a.archivedChats[pn+"@s.whatsapp.net"] {
+					return true
+				}
+			}
+		} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+			phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+			lid := a.ResolvePhoneToLID(phoneUser)
+			if lid != "" {
+				if a.archivedChats[lid+"@lid"] {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -3267,6 +3294,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			a.loadArchivedChats()
 			a.loadMutedChats()
 			a.loadEphemeralChats()
+			go a.refreshContactsCache(a.ctx)
 			_ = a.client.SendPresence(a.ctx, types.PresenceAvailable)
 		}()
 
@@ -3277,6 +3305,74 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		go a.loadArchivedChats()
 		go a.loadMutedChats()
 		go a.loadEphemeralChats()
+		go a.refreshContactsCache(a.ctx)
+
+	case *events.AppStateSyncComplete:
+		go a.loadArchivedChats()
+		go a.loadMutedChats()
+		go a.loadEphemeralChats()
+		go a.refreshContactsCache(a.ctx)
+
+	case *events.Archive:
+		if evt.Action != nil {
+			isArchived := evt.Action.GetArchived()
+			rawJID := evt.JID.String()
+			chatID := evt.JID.ToNonAD().String()
+			clean := chatID
+			if idx := strings.Index(clean, ":"); idx != -1 {
+				if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+					clean = clean[:idx] + clean[atIdx:]
+				}
+			}
+			a.archivedMu.Lock()
+			if a.archivedChats == nil {
+				a.archivedChats = make(map[string]bool)
+			}
+			if isArchived {
+				a.archivedChats[chatID] = true
+				a.archivedChats[rawJID] = true
+				a.archivedChats[clean] = true
+				if strings.HasSuffix(clean, "@lid") {
+					lidUser := strings.TrimSuffix(clean, "@lid")
+					if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+						a.archivedChats[pn+"@s.whatsapp.net"] = true
+					}
+				} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+					phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+					if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+						a.archivedChats[lid+"@lid"] = true
+					}
+				}
+			} else {
+				delete(a.archivedChats, chatID)
+				delete(a.archivedChats, rawJID)
+				delete(a.archivedChats, clean)
+				if strings.HasSuffix(clean, "@lid") {
+					lidUser := strings.TrimSuffix(clean, "@lid")
+					if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+						delete(a.archivedChats, pn+"@s.whatsapp.net")
+					}
+				} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+					phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+					if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+						delete(a.archivedChats, lid+"@lid")
+					}
+				}
+			}
+			a.archivedMu.Unlock()
+
+			if a.client != nil && a.client.Store != nil && a.client.Store.ChatSettings != nil {
+				_ = a.client.Store.ChatSettings.PutArchived(a.ctx, evt.JID, isArchived)
+			}
+			if a.localDB != nil {
+				archivedVal := 0
+				if isArchived {
+					archivedVal = 1
+				}
+				_, _ = a.localDB.Exec(`UPDATE whatsmeow_chat_settings SET archived = ? WHERE chat_jid = ? OR chat_jid = ?`, archivedVal, chatID, rawJID)
+			}
+			go a.refreshContactsCache(a.ctx)
+		}
 
 	case *events.Mute:
 		if evt.Action != nil {
@@ -3477,6 +3573,102 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				chatID = rawJID
 			}
 
+			clean := chatID
+			if idx := strings.Index(clean, ":"); idx != -1 {
+				if atIdx := strings.Index(clean, "@"); atIdx != -1 {
+					clean = clean[:idx] + clean[atIdx:]
+				}
+			}
+
+			// Capture archive status from HistorySync conversation
+			if conv.Archived != nil {
+				isArchived := conv.GetArchived()
+				a.archivedMu.Lock()
+				if a.archivedChats == nil {
+					a.archivedChats = make(map[string]bool)
+				}
+				if isArchived {
+					a.archivedChats[chatID] = true
+					a.archivedChats[rawJID] = true
+					a.archivedChats[clean] = true
+					if conv.GetPnJID() != "" {
+						a.archivedChats[conv.GetPnJID()] = true
+					}
+					if conv.GetLidJID() != "" {
+						a.archivedChats[conv.GetLidJID()] = true
+					}
+					if strings.HasSuffix(clean, "@lid") {
+						lidUser := strings.TrimSuffix(clean, "@lid")
+						if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+							a.archivedChats[pn+"@s.whatsapp.net"] = true
+						}
+					} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+						phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+						if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+							a.archivedChats[lid+"@lid"] = true
+						}
+					}
+				} else {
+					delete(a.archivedChats, chatID)
+					delete(a.archivedChats, rawJID)
+					delete(a.archivedChats, clean)
+					if conv.GetPnJID() != "" {
+						delete(a.archivedChats, conv.GetPnJID())
+					}
+					if conv.GetLidJID() != "" {
+						delete(a.archivedChats, conv.GetLidJID())
+					}
+					if strings.HasSuffix(clean, "@lid") {
+						lidUser := strings.TrimSuffix(clean, "@lid")
+						if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+							delete(a.archivedChats, pn+"@s.whatsapp.net")
+						}
+					} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+						phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+						if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+							delete(a.archivedChats, lid+"@lid")
+						}
+					}
+				}
+				a.archivedMu.Unlock()
+
+				if a.client != nil && a.client.Store != nil && a.client.Store.ChatSettings != nil && err == nil {
+					_ = a.client.Store.ChatSettings.PutArchived(a.ctx, parsedJID, isArchived)
+					if conv.GetPnJID() != "" {
+						if pnJID, pErr := types.ParseJID(conv.GetPnJID()); pErr == nil {
+							_ = a.client.Store.ChatSettings.PutArchived(a.ctx, pnJID, isArchived)
+						}
+					}
+					if conv.GetLidJID() != "" {
+						if lidJID, lErr := types.ParseJID(conv.GetLidJID()); lErr == nil {
+							_ = a.client.Store.ChatSettings.PutArchived(a.ctx, lidJID, isArchived)
+						}
+					}
+				}
+				if a.localDB != nil {
+					archivedVal := 0
+					if isArchived {
+						archivedVal = 1
+					}
+					_, _ = a.localDB.Exec(`UPDATE whatsmeow_chat_settings SET archived = ? WHERE chat_jid = ? OR chat_jid = ?`, archivedVal, chatID, rawJID)
+					if isArchived {
+						var count int
+						_ = a.localDB.QueryRow(`SELECT COUNT(*) FROM whatsmeow_chat_settings WHERE chat_jid = ?`, chatID).Scan(&count)
+						if count == 0 {
+							var ourJID string
+							if a.client != nil && a.client.Store != nil && a.client.Store.ID != nil {
+								ourJID = a.client.Store.ID.ToNonAD().String()
+							} else {
+								_ = a.localDB.QueryRow(`SELECT our_jid FROM whatsmeow_chat_settings LIMIT 1`).Scan(&ourJID)
+							}
+							if ourJID != "" {
+								_, _ = a.localDB.Exec(`INSERT OR IGNORE INTO whatsmeow_chat_settings (our_jid, chat_jid, archived) VALUES (?, ?, 1)`, ourJID, chatID)
+							}
+						}
+					}
+				}
+			}
+
 			if conv.EphemeralExpiration != nil {
 				var ts int64
 				if conv.EphemeralSettingTimestamp != nil {
@@ -3532,6 +3724,7 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				}
 			}
 		}
+		go a.refreshContactsCache(a.ctx)
 
 	case *events.Message:
 		if targetID, isRevoke := extractRevokeProtocolInfo(evt); isRevoke && targetID != "" {
