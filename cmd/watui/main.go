@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,11 +24,14 @@ import (
 	"watui/internal/media"
 	"watui/internal/notify"
 	"watui/internal/ui"
+	"watui/internal/version"
 	"watui/internal/whatsapp"
 )
 
 func main() {
 	defaultDB := config.DefaultDBPath()
+	versionFlag := flag.Bool("version", false, "Print watui version and exit")
+	flag.BoolVar(versionFlag, "v", false, "Print watui version and exit (shorthand)")
 	dbPath := flag.String("db", "", "Path to SQLite session and cache database (default: "+defaultDB+")")
 	logFile := flag.String("log-file", "", "File to write protocol and network logs to (disabled by default)")
 	logLevel := flag.String("log", "WARN", "Protocol log level (DEBUG, INFO, WARN, ERROR)")
@@ -51,6 +55,7 @@ func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+		fmt.Fprintf(out, "  -v, --version\n    \tPrint watui version and exit\n")
 		fmt.Fprintf(out, "  --clear-clipboard\n    \tClear all cached clipboard files and exit\n")
 		fmt.Fprintf(out, "  --no-tui <jid> <msg>\n    \tSend a message directly via CLI without launching TUI\n")
 		fmt.Fprintf(out, "  -cli\n    \tRun in headless CLI stream mode instead of interactive TUI\n")
@@ -62,6 +67,11 @@ func main() {
 		fmt.Fprintf(out, "  -log-file string\n    \tFile to write protocol and network logs to (disabled by default)\n")
 	}
 	flag.Parse()
+
+	if *versionFlag || (len(flag.Args()) > 0 && flag.Args()[0] == "version") {
+		fmt.Printf("watui %s\n", strings.TrimPrefix(version.Version, "v"))
+		os.Exit(0)
+	}
 
 	// Load declarative configuration
 	appCfg, err := config.Load(*configFile)

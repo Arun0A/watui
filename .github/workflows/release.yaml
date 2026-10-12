@@ -69,7 +69,9 @@ jobs:
       - name: Build binary
         shell: bash
         run: |
-          go build -trimpath -ldflags="-s -w" -o "${{ matrix.binary_name }}" ./cmd/watui
+          VERSION="${{ steps.version.outputs.tag }}"
+          VERSION="${VERSION#v}"
+          go build -trimpath -ldflags="-s -w -X watui/internal/version.Version=${VERSION}" -o "${{ matrix.binary_name }}" ./cmd/watui
 
       # -----------------------------------------------------------
       # Linux Packaging (.tar.gz)
