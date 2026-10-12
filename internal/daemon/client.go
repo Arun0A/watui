@@ -795,4 +795,3 @@ func (r *RemoteAdapter) notifyReceipt(chatID string, messageIDs []string, receip
 func (r *RemoteAdapter) ReloadConfig(ctx context.Context) error {
 	return r.call(ctx, "reload_config", nil, nil)
 }
-

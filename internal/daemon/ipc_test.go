@@ -107,8 +107,8 @@ func (m *mockAdapter) SubscribePresence(ctx context.Context, jid string) error {
 func (m *mockAdapter) GetUserPresence(jid string) (domain.UserPresence, bool) {
 	return domain.UserPresence{JID: jid, IsOnline: true}, true
 }
-func (m *mockAdapter) OnPresence(h domain.PresenceHandler) {}
-func (m *mockAdapter) OnReceipt(h domain.ReceiptHandler)   {}
+func (m *mockAdapter) OnPresence(h domain.PresenceHandler)    {}
+func (m *mockAdapter) OnReceipt(h domain.ReceiptHandler)      {}
 func (m *mockAdapter) ReloadConfig(ctx context.Context) error { return nil }
 
 func TestIPCEndToEnd(t *testing.T) {
