@@ -21,6 +21,12 @@
 # Config
 watui.yaml
 *theme.yaml
+!themes/default-theme.yaml
+!themes/amber-theme.yaml
+!themes/nocturne-theme.yaml
+!themes/outrun-theme.yaml
+!themes/swiss-theme.yaml
+!themes/ukiyoe-theme.yaml
 
 # Nix build outputs
 result

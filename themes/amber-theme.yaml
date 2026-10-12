@@ -1,0 +1,58 @@
+# ============================================================
+# RETRO CRT / AMBER TERMINAL
+# Warm phosphor • burnt plastic • monochrome CRT • 1980s
+# ============================================================
+
+# --- Header & General ---
+title: "#FFB000"               # Classic amber CRT phosphor
+divider: "#3A2810"             # Dark brown CRT divider
+status: "#9A6A18"              # Dimmed amber status
+notice: "#D6A84A"              # Warm highlighted phosphor
+error: "#C84B31"               # Old red warning LED
+prompt: "#FFD166"              # Bright amber prompt
+
+# --- Chat List & Inbox ---
+chat_selected: "#FFB000"       # Selected line under amber phosphor
+chat_normal: "#D6A84A"         # Warm phosphor text
+snippet: "#805B20"             # Dim secondary terminal text
+help: "#4A3518"                # Barely-visible CRT text
+
+# --- Badges ---
+badge_unread_bg: "#FFB000"     # Bright amber notification
+badge_unread_fg: "#171008"     # Almost-black terminal text
+
+badge_pin_bg: "#D6A84A"        # Muted amber pin
+badge_pin_fg: "#171008"
+
+badge_mention_bg: "#E07A3F"    # Burnt orange alert
+badge_mention_fg: "#171008"
+
+badge_media_bg: "#FFD166"      # Bright yellow/amber media indicator
+badge_media_fg: "#171008"
+
+badge_ephemeral: "#C84B31"     # Red-orange countdown
+
+# --- Message View ---
+cursor: "#FFD166"              # CRT cursor / focus beam
+select: "#E07A3F"              # Warm selection highlight
+
+msg_you: "#FFB000"             # Local operator / terminal user
+msg_them: "#C89B3C"            # Remote transmission
+msg_text: "#E6C875"            # Main phosphor text
+text_muted: "#705322"          # Dimmed CRT text / timestamps
+
+quote_prefix: "#805B20"        # Old wire / reference marker
+edit_tag: "#FFD166"             # [EDIT] warning
+
+# --- Input Box & Mentions ---
+input_text: "#FFB000"          # Typing phosphor
+input_prompt: "#FFD166"        # "> " command prompt
+input_placeholder: "#594016"   # Very dim inactive prompt
+
+mention_you: "#FFD166"         # Local mention
+mention_other: "#C89B3C"       # Remote mention
+
+# --- Keybinds Help Screen (F1 / ?) ---
+keybind_group: "#FFB000"       # Section header
+keybind_key: "#FFD166"         # Shortcut key
+keybind_desc: "#D6A84A"        # Description

@@ -31,7 +31,17 @@ I must repeat, WATUI is not a replacement to the official WhatsApp, it's just wh
 
 If you are concerned about security, the db is only accessible in your machine, encrypted with a key and your machine-id (guid). I would rather trust my local machine than a google's server.
 
----
+## Themes
+
+|    |    |    |
+|:-------:|:-------:|:---------:|
+|<img src="/themes/default.gif" width="247">|<img src="/themes/nocturne.gif" width="247">|<img src="/themes/swiss.gif" width="247">|
+|[**Default**](https://github.com/Arun0A/watui/blob/master/themes/default-theme.yaml)|[**Nocturne**](https://github.com/Arun0A/watui/blob/master/themes/nocturne-theme.yaml)|[**Swiss**](https://github.com/Arun0A/watui/blob/master/themes/swiss-theme.yaml)|
+|    |    |    |
+|<img src="/themes/outrun.gif" width="247">|<img src="/themes/ukiyoe.gif" width="247">|<img src="/themes/amber.gif" width="247">|
+|[**Outrun**](https://github.com/Arun0A/watui/blob/master/themes/outrun-theme.yaml)|[**Ukiyo-e**](https://github.com/Arun0A/watui/blob/master/themes/ukiyoe-theme.yaml)|[**Amber**](https://github.com/Arun0A/watui/blob/master/themes/amber-theme.yaml)|
+
+Copy the yaml file and point the theme file in your config to apply.
 
 ## Installation
 
