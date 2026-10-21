@@ -579,7 +579,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			}
 		}
 	}
-	dbKey, err := security.DeriveDatabaseKey(dbDir)
+	dbKey, err := security.ResolveDatabaseKey(cfg.DBPath, dbDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive database encryption key: %w", err)
 	}
@@ -612,7 +612,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	if err := container.Upgrade(ctx); err != nil {
 		_ = sharedDB.Close()
 		if strings.Contains(err.Error(), "file is not a database") {
-			return nil, fmt.Errorf("failed to open encrypted database %q: encryption key mismatch or file corrupted (is this database from another machine or user?): %w", cfg.DBPath, err)
+			return nil, fmt.Errorf("failed to open encrypted database %q: encryption key mismatch or file corrupted (is this database from another machine or user? If your machine-id or hostname changed across reboot, set WATUI_MACHINE_ID or check %s): %w", cfg.DBPath, filepath.Join(dbDir, security.MachineIDFileName), err)
 		}
 		return nil, fmt.Errorf("failed to upgrade session store: %w", err)
 	}

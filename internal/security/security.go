@@ -22,6 +22,8 @@ const (
 	SQLiteHeaderPrefix = "SQLite format 3"
 	// KeyFileName is the local salt/key stored with 0600 permissions.
 	KeyFileName = ".key"
+	// MachineIDFileName is the local persistent machine ID token stored with 0600 permissions.
+	MachineIDFileName = ".machine-id"
 	// HKDFInfoContext is domain-separated info for key derivation.
 	HKDFInfoContext = "watui-database-v1"
 )
@@ -104,26 +106,194 @@ func GetOrCreateLocalSalt(keyDir string) ([]byte, error) {
 	return salt, nil
 }
 
-// DeriveDatabaseKey computes a 32-byte machine-bound AES key using HKDF-SHA256.
-// It combines the host machine-id, user identifier, and the local secret salt.
-// Returns a 64-character hex string suitable for SQLCipher.
-func DeriveDatabaseKey(keyDir string) (string, error) {
-	salt, err := GetOrCreateLocalSalt(keyDir)
-	if err != nil {
-		return "", err
-	}
-
-	machineID := GetMachineID()
-	userIdentifier := GetUserIdentifier()
+// DeriveKeyWithMachineID derives a 32-byte AES key given salt, machineID, and userIdentifier.
+func DeriveKeyWithMachineID(salt []byte, machineID, userIdentifier string) (string, error) {
 	ikm := fmt.Appendf(nil, "%s:%s", machineID, userIdentifier)
-
 	hkdfReader := hkdf.New(sha256.New, ikm, salt, []byte(HKDFInfoContext))
 	keyBytes := make([]byte, 32)
 	if _, err := io.ReadFull(hkdfReader, keyBytes); err != nil {
 		return "", fmt.Errorf("failed to derive database key: %w", err)
 	}
-
 	return hex.EncodeToString(keyBytes), nil
+}
+
+// VerifyDatabaseKey checks if hexKey can successfully open and read sqlite_master from dbPath.
+func VerifyDatabaseKey(dbPath, hexKey string) bool {
+	dsn := fmt.Sprintf("file:%s?_pragma_key=%s&mode=ro&_busy_timeout=3000", dbPath, hexKey)
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = db.Close() }()
+
+	var count int
+	err = db.QueryRow("SELECT count(*) FROM sqlite_master;").Scan(&count)
+	return err == nil
+}
+
+func saveLocalMachineID(keyDir, machineID string) {
+	if keyDir == "" || machineID == "" {
+		return
+	}
+	_ = os.MkdirAll(keyDir, 0700)
+	midFilePath := filepath.Join(keyDir, MachineIDFileName)
+	_ = os.WriteFile(midFilePath, []byte(machineID), 0600)
+}
+
+func getMachineIDCandidates(keyDir, currentMID string) []string {
+	seen := make(map[string]bool)
+	var list []string
+	add := func(id string) {
+		trimmed := strings.TrimSpace(id)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			list = append(list, trimmed)
+		}
+	}
+
+	// 1. Current GetMachineID()
+	add(currentMID)
+	add(GetMachineID())
+
+	// 2. Saved .machine-id file
+	if data, err := os.ReadFile(filepath.Join(keyDir, MachineIDFileName)); err == nil {
+		add(string(data))
+	}
+
+	// 3. Platform machine IDs from common files on Linux
+	linuxPaths := []string{
+		"/etc/machine-id",
+		"/var/lib/dbus/machine-id",
+		"/run/machine-id",
+		"/run/systemd/machine-id",
+		"/sys/class/dmi/id/product_uuid",
+		"/sys/devices/virtual/dmi/id/product_uuid",
+	}
+	for _, p := range linuxPaths {
+		if data, err := os.ReadFile(p); err == nil {
+			val := strings.TrimSpace(string(data))
+			if val != "uninitialized" && val != "00000000-0000-0000-0000-000000000000" {
+				add(val)
+				add(strings.ToLower(val))
+			}
+		}
+	}
+
+	// 4. Hostname variations
+	if h, err := os.Hostname(); err == nil && h != "" {
+		add("fallback-" + h)
+		add(h)
+		if idx := strings.Index(h, "."); idx > 0 {
+			short := h[:idx]
+			add("fallback-" + short)
+			add(short)
+		}
+	}
+	add("fallback-watui-host")
+	add("watui-host")
+	add("fallback-localhost")
+	add("localhost")
+
+	return list
+}
+
+// ResolveDatabaseKey computes or recovers the 32-byte AES key for the database.
+// If dbPath exists, it verifies the key against the database, automatically attempting
+// candidate recovery if machine-id or hostname changed across reboots or network changes.
+func ResolveDatabaseKey(dbPath, keyDir string) (string, error) {
+	// 1. Explicit direct database hex key override
+	if envKey := strings.TrimSpace(os.Getenv("WATUI_DB_KEY")); len(envKey) == 64 {
+		if _, err := hex.DecodeString(envKey); err == nil {
+			return envKey, nil
+		}
+	}
+
+	salt, err := GetOrCreateLocalSalt(keyDir)
+	if err != nil {
+		return "", err
+	}
+
+	userIdentifier := GetUserIdentifier()
+
+	// Determine base machine ID
+	var machineID string
+	if envMID := strings.TrimSpace(os.Getenv("WATUI_MACHINE_ID")); envMID != "" {
+		machineID = envMID
+	} else {
+		// Check for locally persisted machine ID first
+		midFilePath := filepath.Join(keyDir, MachineIDFileName)
+		if data, err := os.ReadFile(midFilePath); err == nil {
+			saved := strings.TrimSpace(string(data))
+			if len(saved) > 0 {
+				machineID = saved
+			}
+		}
+		if machineID == "" {
+			machineID = GetMachineID()
+		}
+	}
+
+	primaryKey, err := DeriveKeyWithMachineID(salt, machineID, userIdentifier)
+	if err != nil {
+		return "", err
+	}
+
+	// If no dbPath provided or file doesn't exist yet, save machineID and return primaryKey
+	if dbPath == "" {
+		saveLocalMachineID(keyDir, machineID)
+		return primaryKey, nil
+	}
+
+	fi, err := os.Stat(dbPath)
+	if err != nil || fi.IsDir() || fi.Size() == 0 || IsPlaintextSQLite(dbPath) {
+		// New or plaintext database
+		saveLocalMachineID(keyDir, machineID)
+		return primaryKey, nil
+	}
+
+	// Verify primary key against the existing database
+	if VerifyDatabaseKey(dbPath, primaryKey) {
+		saveLocalMachineID(keyDir, machineID)
+		return primaryKey, nil
+	}
+
+	// Primary key failed! Generate candidate machine IDs to recover the database.
+	candidates := getMachineIDCandidates(keyDir, machineID)
+	for _, candMID := range candidates {
+		// Test with userIdentifier
+		if candKey, err := DeriveKeyWithMachineID(salt, candMID, userIdentifier); err == nil {
+			if VerifyDatabaseKey(dbPath, candKey) {
+				saveLocalMachineID(keyDir, candMID)
+				return candKey, nil
+			}
+		}
+		// Test with root/0 (in case previously run with sudo)
+		if userIdentifier != "0" {
+			if candKey, err := DeriveKeyWithMachineID(salt, candMID, "0"); err == nil {
+				if VerifyDatabaseKey(dbPath, candKey) {
+					saveLocalMachineID(keyDir, candMID)
+					return candKey, nil
+				}
+			}
+		}
+		// Test without userIdentifier
+		if candKey, err := DeriveKeyWithMachineID(salt, candMID, ""); err == nil {
+			if VerifyDatabaseKey(dbPath, candKey) {
+				saveLocalMachineID(keyDir, candMID)
+				return candKey, nil
+			}
+		}
+	}
+
+	// Fallback to primaryKey so caller receives standard SQLCipher error if none matched
+	return primaryKey, nil
+}
+
+// DeriveDatabaseKey computes a 32-byte machine-bound AES key using HKDF-SHA256.
+// It combines the host machine-id, user identifier, and the local secret salt.
+// Returns a 64-character hex string suitable for SQLCipher.
+func DeriveDatabaseKey(keyDir string) (string, error) {
+	return ResolveDatabaseKey("", keyDir)
 }
 
 // IsPlaintextSQLite checks if a database file exists and begins with the unencrypted SQLite header.

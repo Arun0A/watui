@@ -355,6 +355,19 @@ func TestResolveDBPath(t *testing.T) {
 	if p3 != filepath.Clean("/tmp/custom.db") {
 		t.Errorf("Expected direct file path, got %s", p3)
 	}
+
+	// 4. Relative .local/ path
+	home, _ := os.UserHomeDir()
+	p4 := ResolveDBPath(".local/share/watui/watui.db")
+	if home != "" && !strings.HasPrefix(p4, home) {
+		t.Errorf("Expected .local/ to expand to home dir %s, got %s", home, p4)
+	}
+
+	// 5. Relative file path is made absolute
+	p5 := ResolveDBPath("custom_local.db")
+	if !filepath.IsAbs(p5) {
+		t.Errorf("Expected relative path to be resolved as absolute, got %s", p5)
+	}
 }
 
 func TestDaemonConfig(t *testing.T) {

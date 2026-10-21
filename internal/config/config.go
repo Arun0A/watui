@@ -604,12 +604,23 @@ func ResolveDBPath(path string) string {
 	if trimmed == "" {
 		return ""
 	}
+	// Expand relative .local/ paths (e.g. .local/share/watui/watui.db) to $HOME/.local/...
+	if strings.HasPrefix(trimmed, ".local/") || trimmed == ".local" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			trimmed = filepath.Join(home, trimmed)
+		}
+	}
 	expanded := ExpandHome(trimmed)
 	if strings.HasSuffix(trimmed, "/") || strings.HasSuffix(trimmed, "\\") {
 		return filepath.Join(expanded, "watui.db")
 	}
 	if fi, err := os.Stat(expanded); err == nil && fi.IsDir() {
 		return filepath.Join(expanded, "watui.db")
+	}
+	if !filepath.IsAbs(expanded) {
+		if abs, err := filepath.Abs(expanded); err == nil {
+			return filepath.Clean(abs)
+		}
 	}
 	return filepath.Clean(expanded)
 }
