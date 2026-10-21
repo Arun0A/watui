@@ -5,4 +5,4 @@ package version
 // It can also be overridden at build time via:
 //
 //	go build -ldflags="-X watui/internal/version.Version=0.3.1" ./cmd/watui
-var Version = "0.3.1"
+var Version = "0.3.2"
