@@ -795,3 +795,13 @@ func (r *RemoteAdapter) notifyReceipt(chatID string, messageIDs []string, receip
 func (r *RemoteAdapter) ReloadConfig(ctx context.Context) error {
 	return r.call(ctx, "reload_config", nil, nil)
 }
+
+// ResetConnection requests the background daemon to reset its WhatsApp socket and reconnect.
+func (r *RemoteAdapter) ResetConnection() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.call(ctx, "reset_connection", nil, nil)
+	}()
+}
+

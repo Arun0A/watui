@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/mutecomm/go-sqlcipher/v4"
@@ -26,6 +27,7 @@ import (
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -104,6 +106,10 @@ type Adapter struct {
 
 	receiptMu       sync.RWMutex
 	receiptHandlers []domain.ReceiptHandler
+
+	resetMu       sync.Mutex
+	lastResetTime time.Time
+	resuming      atomic.Bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -623,7 +629,10 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		return nil, fmt.Errorf("failed to get device store: %w", err)
 	}
 
+	whatsmeow.KeepAliveMaxFailTime = 15 * time.Second
 	client := whatsmeow.NewClient(deviceStore, clientLog)
+	client.InitialAutoReconnect = true
+	client.EnableAutoReconnect = true
 	localDB := sharedDB
 
 	security.EnsureSecurePermissions(cfg.DBPath)
@@ -781,6 +790,8 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		}
 	}
 
+	go adapter.startSleepWakeMonitor(adapterCtx)
+
 	return adapter, nil
 }
 
@@ -894,6 +905,67 @@ func (a *Adapter) Disconnect() {
 	}
 
 	a.setStatus(domain.StatusDisconnected)
+}
+
+// ResetConnection disconnects the current socket and forces an immediate reconnection.
+func (a *Adapter) ResetConnection() {
+	if a.client == nil || !a.IsLoggedIn() {
+		return
+	}
+	a.resetMu.Lock()
+	now := time.Now()
+	if now.Sub(a.lastResetTime) < 3*time.Second {
+		a.resetMu.Unlock()
+		return
+	}
+	a.lastResetTime = now
+	a.resetMu.Unlock()
+
+	a.setStatus(domain.StatusConnecting)
+	if a.client.IsConnected() {
+		a.client.ResetConnection()
+	} else {
+		go func() {
+			_ = a.client.Connect()
+		}()
+	}
+}
+
+func (a *Adapter) startSleepWakeMonitor(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	lastWall := time.Now().UnixMilli()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			nowWall := time.Now().UnixMilli()
+			elapsed := nowWall - lastWall
+			lastWall = nowWall
+			// If more than 5 seconds elapsed between 2-second ticks, system was suspended (slept).
+			if elapsed > 5000 {
+				a.handleSystemResume(elapsed)
+			}
+		}
+	}
+}
+
+func (a *Adapter) handleSystemResume(elapsedMs int64) {
+	if a.client == nil || !a.IsLoggedIn() {
+		return
+	}
+	if !a.resuming.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer a.resuming.Store(false)
+		a.setStatus(domain.StatusConnecting)
+		// Give local OS network stack a moment (1.5s) to re-establish Wi-Fi / DHCP routes
+		time.Sleep(1500 * time.Millisecond)
+		a.ResetConnection()
+	}()
 }
 
 // NormalizeJID parses or normalizes a raw chat target (full JID, phone number with +, etc.)
@@ -1634,7 +1706,7 @@ func (a *Adapter) DeleteMessage(ctx context.Context, chatID string, messageID st
 		}
 
 		revokeMsg := a.client.BuildRevoke(chatJID, senderJID, types.MessageID(messageID))
-		_, err = a.client.SendMessage(ctx, chatJID, revokeMsg)
+		_, err = a.sendMessageWithRetry(ctx, chatJID, revokeMsg)
 		if err != nil {
 			return fmt.Errorf("failed to delete for everyone: %w", err)
 		}
@@ -1679,7 +1751,7 @@ func (a *Adapter) EditMessage(ctx context.Context, chatID string, messageID stri
 	editMsg := a.client.BuildEdit(chatJID, types.MessageID(messageID), &waE2E.Message{
 		Conversation: proto.String(newText),
 	})
-	_, err = a.client.SendMessage(ctx, chatJID, editMsg)
+	_, err = a.sendMessageWithRetry(ctx, chatJID, editMsg)
 	if err != nil {
 		return fmt.Errorf("failed to send edited message: %w", err)
 	}
@@ -1719,7 +1791,7 @@ func (a *Adapter) ReactMessage(ctx context.Context, chatID string, messageID str
 	}
 
 	reactMsg := a.client.BuildReaction(chatJID, senderJID, types.MessageID(messageID), reactionEmoji)
-	_, err = a.client.SendMessage(ctx, chatJID, reactMsg)
+	_, err = a.sendMessageWithRetry(ctx, chatJID, reactMsg)
 	if err != nil {
 		return fmt.Errorf("failed to send reaction: %w", err)
 	}
@@ -1763,6 +1835,73 @@ func (a *Adapter) updateLocalReaction(ctx context.Context, chatID string, messag
 			reactMsgID, chatID, targetChatName.String, time.Now().Unix(), bodyText, messageID, targetBody.String, targetSender.String,
 		)
 	}
+}
+
+func isConnectionOrTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, whatsmeow.ErrMessageTimedOut) ||
+		errors.Is(err, whatsmeow.ErrNotConnected) ||
+		errors.Is(err, socket.ErrSocketClosed) ||
+		errors.Is(err, socket.ErrDialFailed) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timed out") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection lost") ||
+		strings.Contains(msg, "not connected") ||
+		strings.Contains(msg, "closed network connection") ||
+		strings.Contains(msg, "socket closed") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable")
+}
+
+func (a *Adapter) sendMessageWithRetry(ctx context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+	if a.client == nil {
+		return whatsmeow.SendResponse{}, errors.New("whatsapp client not initialized")
+	}
+
+	var reqExtra whatsmeow.SendRequestExtra
+	if len(extra) > 0 {
+		reqExtra = extra[0]
+	}
+	if reqExtra.Timeout == 0 {
+		reqExtra.Timeout = 15 * time.Second
+	}
+
+	// If client is not currently connected, wait briefly for connection or auto-reconnect
+	if !a.client.IsConnected() {
+		if !a.client.WaitForConnection(4 * time.Second) {
+			a.ResetConnection()
+			if !a.client.WaitForConnection(4 * time.Second) {
+				return whatsmeow.SendResponse{}, errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+			}
+		}
+	}
+
+	msg = a.prepareOutgoingMessage(ctx, to, msg)
+	resp, err := a.client.SendMessage(ctx, to, msg, reqExtra)
+	if err == nil {
+		return resp, nil
+	}
+
+	// If sending failed due to a dead socket, timeout, or dropped connection, reset connection and retry ONCE
+	if isConnectionOrTimeoutError(err) {
+		a.ResetConnection()
+		if a.client.WaitForConnection(5 * time.Second) {
+			resp, retryErr := a.client.SendMessage(ctx, to, msg, reqExtra)
+			if retryErr == nil {
+				return resp, nil
+			}
+			err = retryErr
+		}
+	}
+
+	return whatsmeow.SendResponse{}, err
 }
 
 // SendTextMessage sends a basic text message to a WhatsApp chat JID or raw phone number, optionally quoting a message.
@@ -1876,19 +2015,7 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 		}
 	}
 
-	if a.client == nil {
-		return domain.Message{}, errors.New("whatsapp client not initialized")
-	}
-
-	if !a.client.IsConnected() {
-		if !a.client.WaitForConnection(4 * time.Second) {
-			go func() { _ = a.client.Connect() }()
-			return domain.Message{}, errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
-		}
-	}
-
-	msg = a.prepareOutgoingMessage(ctx, recipientJID, msg)
-	resp, err := a.client.SendMessage(ctx, recipientJID, msg)
+	resp, err := a.sendMessageWithRetry(ctx, recipientJID, msg)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("failed to send message: %w", err)
 	}
@@ -1966,8 +2093,10 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 
 	if !a.client.IsConnected() {
 		if !a.client.WaitForConnection(4 * time.Second) {
-			go func() { _ = a.client.Connect() }()
-			return domain.Message{}, errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+			a.ResetConnection()
+			if !a.client.WaitForConnection(4 * time.Second) {
+				return domain.Message{}, errors.New("connection lost: reconnecting to WhatsApp, please retry in a moment")
+			}
 		}
 	}
 
@@ -2068,6 +2197,12 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 	}
 
 	resp, err := a.client.Upload(ctx, fileData, appInfo)
+	if err != nil && isConnectionOrTimeoutError(err) {
+		a.ResetConnection()
+		if a.client.WaitForConnection(5 * time.Second) {
+			resp, err = a.client.Upload(ctx, fileData, appInfo)
+		}
+	}
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("failed to upload media: %w", err)
 	}
@@ -2260,7 +2395,7 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 	}
 
 	waMsg = a.prepareOutgoingMessage(ctx, recipientJID, waMsg)
-	sendResp, err := a.client.SendMessage(ctx, recipientJID, waMsg)
+	sendResp, err := a.sendMessageWithRetry(ctx, recipientJID, waMsg)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("failed to send media message: %w", err)
 	}

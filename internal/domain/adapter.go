@@ -39,6 +39,9 @@ type WhatsAppAdapter interface {
 	// Disconnect gracefully closes the connection.
 	Disconnect()
 
+	// ResetConnection disconnects the current socket and forces an immediate reconnection.
+	ResetConnection()
+
 	// IsLoggedIn returns true if a valid session exists in local storage.
 	IsLoggedIn() bool
 

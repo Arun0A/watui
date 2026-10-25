@@ -563,6 +563,12 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			resp.Result = []byte(`"ok"`)
 		}
 
+	case "reset_connection":
+		if s.adapter != nil {
+			s.adapter.ResetConnection()
+		}
+		resp.Result = []byte(`"ok"`)
+
 	default:
 		resp.Error = fmt.Sprintf("unknown method: %s", req.Method)
 	}

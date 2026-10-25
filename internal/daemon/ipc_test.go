@@ -18,6 +18,7 @@ type mockAdapter struct {
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
 func (m *mockAdapter) Disconnect()                       {}
+func (m *mockAdapter) ResetConnection()                  {}
 func (m *mockAdapter) IsLoggedIn() bool                  { return true }
 func (m *mockAdapter) OnMessage(h domain.MessageHandler) { m.msgHandler = h }
 func (m *mockAdapter) OnStatus(h domain.StatusHandler)   { m.statusHandler = h }
