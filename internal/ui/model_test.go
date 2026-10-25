@@ -1478,6 +1478,163 @@ func TestResolvePickerAndTerminalPickerCmd(t *testing.T) {
 	if !hasChooserArg {
 		t.Errorf("Expected --chooser-file arg in %v", cmd.Args)
 	}
+
+	// ranger should use --choosefiles= (plural)
+	rCmd, rOut, rErr := buildTerminalPickerCmd("ranger", "ranger")
+	if rErr != nil {
+		t.Fatalf("buildTerminalPickerCmd ranger failed: %v", rErr)
+	}
+	defer func() { _ = os.Remove(rOut) }()
+	hasChooseFiles := false
+	for _, arg := range rCmd.Args {
+		if strings.HasPrefix(arg, "--choosefiles=") {
+			hasChooseFiles = true
+		}
+	}
+	if !hasChooseFiles {
+		t.Errorf("Expected --choosefiles= in ranger args: %v", rCmd.Args)
+	}
+
+	// fzf should have -m flag
+	fCmd, fOut, fErr := buildTerminalPickerCmd("fzf", "fzf")
+	if fErr != nil {
+		t.Fatalf("buildTerminalPickerCmd fzf failed: %v", fErr)
+	}
+	defer func() { _ = os.Remove(fOut) }()
+	hasMultiFlag := false
+	for _, arg := range fCmd.Args {
+		if strings.Contains(arg, "-m") {
+			hasMultiFlag = true
+		}
+	}
+	if !hasMultiFlag {
+		t.Errorf("Expected -m in fzf command: %v", fCmd.Args)
+	}
+}
+
+func TestMultiFilePickerAndSending(t *testing.T) {
+	// 1. Test parsePickedLines
+	testRaw := "file1.pdf\r\n\"file 2.png\"\n'file 3.jpg'\n\n"
+	lines := parsePickedLines(testRaw)
+	if len(lines) != 3 {
+		t.Fatalf("Expected 3 parsed lines, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != "file1.pdf" || lines[1] != "file 2.png" || lines[2] != "file 3.jpg" {
+		t.Errorf("Unexpected parsed lines: %v", lines)
+	}
+
+	// Test pipe separator (zenity fallback)
+	pipeLines := parsePickedLines("/tmp/a.pdf|/tmp/b.pdf")
+	if len(pipeLines) != 2 || pipeLines[0] != "/tmp/a.pdf" || pipeLines[1] != "/tmp/b.pdf" {
+		t.Errorf("Unexpected pipe parsed lines: %v", pipeLines)
+	}
+
+	// 2. Test ParseFileURIs
+	tmpDir := t.TempDir()
+	f1 := filepath.Join(tmpDir, "report1.pdf")
+	f2 := filepath.Join(tmpDir, "report2.pdf")
+	f3 := filepath.Join(tmpDir, "doc with spaces.pdf")
+	_ = os.WriteFile(f1, []byte("pdf1"), 0644)
+	_ = os.WriteFile(f2, []byte("pdf2"), 0644)
+	_ = os.WriteFile(f3, []byte("pdf3"), 0644)
+
+	// Multi-line
+	multiLineInput := fmt.Sprintf("file://%s\nfile://%s\nHere are both reports", f1, f2)
+	files, caption := ParseFileURIs(multiLineInput)
+	if len(files) != 2 || files[0] != f1 || files[1] != f2 {
+		t.Errorf("Expected files [%s, %s], got %v", f1, f2, files)
+	}
+	if caption != "Here are both reports" {
+		t.Errorf("Expected caption 'Here are both reports', got %q", caption)
+	}
+
+	// Quoted paths with spaces
+	quotedInput := fmt.Sprintf("file://%s\nfile://\"%s\"\nPlease review them", f1, f3)
+	qFiles, qCap := ParseFileURIs(quotedInput)
+	if len(qFiles) != 2 || qFiles[0] != f1 || qFiles[1] != f3 {
+		t.Errorf("Expected qFiles [%s, %s], got %v", f1, f3, qFiles)
+	}
+	if qCap != "Please review them" {
+		t.Errorf("Expected qCap 'Please review them', got %q", qCap)
+	}
+
+	// Single line multi-file
+	singleLineInput := fmt.Sprintf("file://%s file://%s Combined reports", f1, f2)
+	sFiles, sCap := ParseFileURIs(singleLineInput)
+	if len(sFiles) != 2 || sFiles[0] != f1 || sFiles[1] != f2 {
+		t.Errorf("Expected sFiles [%s, %s], got %v", f1, f2, sFiles)
+	}
+	if sCap != "Combined reports" {
+		t.Errorf("Expected sCap 'Combined reports', got %q", sCap)
+	}
+
+	// 3. Test Model with multi-file attachment and sending
+	mock := &mockAdapter{}
+	model := NewModel(context.Background(), mock)
+	model.activeChatID = "12345@s.whatsapp.net"
+	model.view = ViewChat
+
+	// Receive filePickedMsg with multiple paths
+	m, _ := model.Update(filePickedMsg{
+		Paths: []string{f1, f2, f3},
+	})
+	updated := m.(*Model)
+	if !strings.Contains(updated.previewStatus, "Attached 3 files") {
+		t.Errorf("Expected previewStatus to mention 'Attached 3 files', got %q", updated.previewStatus)
+	}
+	inputVal := updated.input.Value()
+	if !strings.Contains(inputVal, f1) || !strings.Contains(inputVal, f2) || !strings.Contains(inputVal, f3) {
+		t.Errorf("Expected input to contain all 3 file paths, got %q", inputVal)
+	}
+
+	// Add caption to the input
+	updated.input.InsertString("Monthly summaries")
+
+	// Press Enter to send
+	cmd := updated.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("Expected non-nil cmd on Enter for multi-file send")
+	}
+	msg := cmd()
+	multiSent, ok := msg.(multiMessagesSentMsg)
+	if !ok {
+		t.Fatalf("Expected multiMessagesSentMsg, got %T: %v", msg, msg)
+	}
+	if len(multiSent) != 3 {
+		t.Fatalf("Expected 3 sent messages, got %d", len(multiSent))
+	}
+	if !strings.Contains(multiSent[0].Body, "Monthly summaries") {
+		t.Errorf("Expected first message to have caption 'Monthly summaries', got %q", multiSent[0].Body)
+	}
+
+	// Process multiMessagesSentMsg in Update
+	m2, _ := updated.Update(multiSent)
+	finalModel := m2.(*Model)
+	if len(finalModel.activeMsgs) != 3 {
+		t.Errorf("Expected activeMsgs to have 3 messages, got %d", len(finalModel.activeMsgs))
+	}
+
+	// 4. Test appending additional files via Alt+F
+	singlePickModel := NewModel(context.Background(), mock)
+	singlePickModel.activeChatID = "12345@s.whatsapp.net"
+	singlePickModel.view = ViewChat
+
+	mFirst, _ := singlePickModel.Update(filePickedMsg{Paths: []string{f1}})
+	mFirstModel := mFirst.(*Model)
+	if !strings.Contains(mFirstModel.input.Value(), f1) {
+		t.Errorf("Expected f1 in input, got %q", mFirstModel.input.Value())
+	}
+
+	// Pick second file while first is already attached
+	mSecond, _ := mFirstModel.Update(filePickedMsg{Paths: []string{f2}})
+	mSecondModel := mSecond.(*Model)
+	val := mSecondModel.input.Value()
+	if !strings.Contains(val, f1) || !strings.Contains(val, f2) {
+		t.Errorf("Expected both f1 and f2 in input after second pick, got %q", val)
+	}
+	if !strings.Contains(mSecondModel.previewStatus, "Attached 2 files") {
+		t.Errorf("Expected previewStatus 'Attached 2 files', got %q", mSecondModel.previewStatus)
+	}
 }
 
 func TestChatHeaderDisplaysJIDOnlyInChatWindow(t *testing.T) {

@@ -54,7 +54,7 @@ var allKeybindGroups = []keybindGroup{
 			{key: "Shift+Enter", desc: "Insert newline in message input"},
 			{key: "Esc", desc: "Exit chat to list (or cancel active reply / prompt)"},
 			{key: "Ctrl+V / Alt+V", desc: "Paste image/file or text from clipboard into message box"},
-			{key: "Alt+F", desc: "Open file selector to attach and send media/file"},
+			{key: "Alt+F", desc: "Open file selector to attach and send media/file(s)"},
 			{key: "Alt+P", desc: "Preview latest media / document in chat"},
 			{key: "Ctrl+U", desc: "Fetch 5 older messages from history (multi-press)"},
 			{key: "@ (group chat)", desc: "Show group contact mention hints"},

@@ -224,8 +224,10 @@ type docFallbackSavedMsg struct {
 	OpenErr  error
 }
 type filePickedMsg struct {
-	Path string
+	Path  string
+	Paths []string
 }
+type multiMessagesSentMsg []domain.Message
 type filePickErrMsg struct {
 	Err error
 }
@@ -855,44 +857,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForContactsUpdated())
 
 	case messageSentMsg:
-		sent := domain.Message(msg)
-		if m.activeChatID == sent.ChatID {
-			m.activeMsgs = append(m.activeMsgs, sent)
-			m.chatScrollOffset = 0
+		m.recordSentMessage(domain.Message(msg))
+
+	case multiMessagesSentMsg:
+		for _, sent := range msg {
+			m.recordSentMessage(sent)
 		}
-		if m.previewStatus == "Sending..." {
-			m.previewStatus = ""
-		}
-		m.mu.Lock()
-		chat, exists := m.unreadChats[sent.ChatID]
-		if !exists {
-			name := m.activeName
-			if name == "" {
-				name, _ = m.resolveChatName(sent.ChatID, sent.ChatName, sent.SenderName)
-			}
-			chat = &UnreadChat{
-				ChatID:       sent.ChatID,
-				Name:         name,
-				IsGroup:      strings.Contains(sent.ChatID, "@g.us"),
-				IsPinned:     m.isPinned(sent.ChatID, name),
-				IsMuted:      m.isMuted(sent.ChatID, name),
-				UnreadCount:  0,
-				Sender:       sent.Sender,
-				Messages:     []domain.Message{sent},
-				LastReceived: sent.Timestamp,
-			}
-			m.unreadChats[sent.ChatID] = chat
-		} else {
-			if len(chat.Messages) < 50 {
-				chat.Messages = append(chat.Messages, sent)
-			} else {
-				copy(chat.Messages, chat.Messages[1:])
-				chat.Messages[len(chat.Messages)-1] = sent
-			}
-			chat.LastReceived = sent.Timestamp
-		}
-		m.sortChatOrderLocked()
-		m.mu.Unlock()
 
 	case sendErrMsg:
 		if m.previewStatus == "Sending..." {
@@ -1142,11 +1112,55 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewStatus = "Cannot attach files while editing a message"
 			return m, tea.ClearScreen
 		}
-		if msg.Path != "" {
-			cleanPath := strings.TrimSpace(msg.Path)
-			m.input.SetValue("file://" + cleanPath + " ")
+		paths := msg.Paths
+		if len(paths) == 0 && msg.Path != "" {
+			paths = parsePickedLines(msg.Path)
+		}
+
+		if len(paths) > 0 {
+			existing := strings.TrimSpace(m.input.Value())
+			var allFiles []string
+			var existingCaption string
+
+			if existing != "" && strings.Contains(existing, "file://") {
+				existingFiles, capText := parseFileURIs(existing)
+				allFiles = append(existingFiles, paths...)
+				existingCaption = capText
+			} else if existing != "" {
+				allFiles = paths
+				existingCaption = existing
+			} else {
+				allFiles = paths
+			}
+
+			var formattedItems []string
+			names := make([]string, 0, len(allFiles))
+			for _, p := range allFiles {
+				formattedItems = append(formattedItems, formatFileURI(p))
+				names = append(names, filepath.Base(p))
+			}
+
+			var newText string
+			if len(allFiles) == 1 {
+				newText = formattedItems[0] + " "
+			} else {
+				newText = strings.Join(formattedItems, "\n") + "\n"
+			}
+			if existingCaption != "" {
+				newText += existingCaption
+			}
+
+			m.input.SetValue(newText)
 			m.input.CursorEnd()
-			m.previewStatus = fmt.Sprintf("Attached %s (press Enter to send)", filepath.Base(cleanPath))
+			m.input.SetHeight(min(5, max(1, m.input.LineCount())))
+
+			if len(allFiles) == 1 {
+				m.previewStatus = fmt.Sprintf("Attached %s (press Enter to send)", names[0])
+			} else if len(allFiles) <= 3 {
+				m.previewStatus = fmt.Sprintf("Attached %d files: %s (press Enter to send)", len(allFiles), strings.Join(names, ", "))
+			} else {
+				m.previewStatus = fmt.Sprintf("Attached %d files: %s, %s, %s... (press Enter to send)", len(allFiles), names[0], names[1], names[2])
+			}
 		} else {
 			m.previewStatus = ""
 		}
@@ -2899,6 +2913,46 @@ func (m *Model) jumpToPrevMedia() bool {
 	return true
 }
 
+func (m *Model) recordSentMessage(sent domain.Message) {
+	if m.activeChatID == sent.ChatID {
+		m.activeMsgs = append(m.activeMsgs, sent)
+		m.chatScrollOffset = 0
+	}
+	if m.previewStatus == "Sending..." || strings.HasPrefix(m.previewStatus, "Attached ") {
+		m.previewStatus = ""
+	}
+	m.mu.Lock()
+	chat, exists := m.unreadChats[sent.ChatID]
+	if !exists {
+		name := m.activeName
+		if name == "" {
+			name, _ = m.resolveChatName(sent.ChatID, sent.ChatName, sent.SenderName)
+		}
+		chat = &UnreadChat{
+			ChatID:       sent.ChatID,
+			Name:         name,
+			IsGroup:      strings.Contains(sent.ChatID, "@g.us"),
+			IsPinned:     m.isPinned(sent.ChatID, name),
+			IsMuted:      m.isMuted(sent.ChatID, name),
+			UnreadCount:  0,
+			Sender:       sent.Sender,
+			Messages:     []domain.Message{sent},
+			LastReceived: sent.Timestamp,
+		}
+		m.unreadChats[sent.ChatID] = chat
+	} else {
+		if len(chat.Messages) < 50 {
+			chat.Messages = append(chat.Messages, sent)
+		} else {
+			copy(chat.Messages, chat.Messages[1:])
+			chat.Messages[len(chat.Messages)-1] = sent
+		}
+		chat.LastReceived = sent.Timestamp
+	}
+	m.sortChatOrderLocked()
+	m.mu.Unlock()
+}
+
 func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	if m.showReceiptModal {
 		switch msg.String() {
@@ -3640,20 +3694,45 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 		replyTarget := m.replyToMsg
 		m.replyToMsg = nil
 
-		if strings.HasPrefix(text, "file://") {
-			filePath, caption := parseFileURI(text)
-			return func() tea.Msg {
-				var sentMsg domain.Message
-				var err error
-				if replyTarget != nil {
-					sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption, replyTarget.ID, replyTarget.Body, replyTarget.Sender)
-				} else {
-					sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption)
+		if strings.Contains(text, "file://") {
+			files, caption := parseFileURIs(text)
+			if len(files) == 1 {
+				filePath := files[0]
+				return func() tea.Msg {
+					var sentMsg domain.Message
+					var err error
+					if replyTarget != nil {
+						sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption, replyTarget.ID, replyTarget.Body, replyTarget.Sender)
+					} else {
+						sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, filePath, caption)
+					}
+					if err != nil {
+						return sendErrMsg{ChatID: chatID, Text: text, Err: err}
+					}
+					return messageSentMsg(sentMsg)
 				}
-				if err != nil {
-					return sendErrMsg{ChatID: chatID, Text: text, Err: err}
+			} else if len(files) > 1 {
+				return func() tea.Msg {
+					var sentMsgs []domain.Message
+					for i, f := range files {
+						fileCap := ""
+						if i == 0 {
+							fileCap = caption
+						}
+						var sentMsg domain.Message
+						var err error
+						if i == 0 && replyTarget != nil {
+							sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, f, fileCap, replyTarget.ID, replyTarget.Body, replyTarget.Sender)
+						} else {
+							sentMsg, err = m.adapter.SendFileMessage(m.ctx, chatID, f, fileCap)
+						}
+						if err != nil {
+							return sendErrMsg{ChatID: chatID, Text: text, Err: err}
+						}
+						sentMsgs = append(sentMsgs, sentMsg)
+					}
+					return multiMessagesSentMsg(sentMsgs)
 				}
-				return messageSentMsg(sentMsg)
 			}
 		}
 
@@ -6504,14 +6583,14 @@ func buildTerminalPickerCmd(pickerType, customCmd string) (*exec.Cmd, string, er
 		return exec.Command("yazi", args...), outPath, nil
 
 	case "ranger":
-		args := []string{"--choosefile=" + outPath}
+		args := []string{"--choosefiles=" + outPath}
 		if customCmd != "" {
 			parts := strings.Split(customCmd, "&&")
 			firstPart := strings.TrimSpace(parts[0])
 			words := strings.Fields(firstPart)
 			for i := 1; i < len(words); i++ {
 				w := words[i]
-				if strings.HasPrefix(w, "--choosefile") {
+				if strings.HasPrefix(w, "--choosefile") || strings.HasPrefix(w, "--choosefiles") {
 					continue
 				}
 				args = append(args, w)
@@ -6539,7 +6618,7 @@ func buildTerminalPickerCmd(pickerType, customCmd string) (*exec.Cmd, string, er
 		return exec.Command("nnn", "-p", outPath), outPath, nil
 
 	case "fzf":
-		return exec.Command("sh", "-c", `fzf > "$1"`, "--", outPath), outPath, nil
+		return exec.Command("sh", "-c", `fzf -m > "$1"`, "--", outPath), outPath, nil
 
 	default:
 		cmd := exec.Command("sh", "-c", customCmd+` > "$1"`, "--", outPath)
@@ -6567,15 +6646,16 @@ func (m *Model) pickFileCmd() tea.Cmd {
 			if err != nil {
 				var exitErr *exec.ExitError
 				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-					return filePickedMsg{Path: ""}
+					return filePickedMsg{Path: "", Paths: nil}
 				}
 				data, readErr := os.ReadFile(outPath)
 				if readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
-					selected := strings.TrimSpace(string(data))
-					if idx := strings.Index(selected, "\n"); idx != -1 {
-						selected = strings.TrimSpace(selected[:idx])
+					paths := parsePickedLines(string(data))
+					first := ""
+					if len(paths) > 0 {
+						first = paths[0]
 					}
-					return filePickedMsg{Path: selected}
+					return filePickedMsg{Path: first, Paths: paths}
 				}
 				return filePickErrMsg{Err: err}
 			}
@@ -6583,21 +6663,60 @@ func (m *Model) pickFileCmd() tea.Cmd {
 			if readErr != nil {
 				return filePickErrMsg{Err: readErr}
 			}
-			selected := strings.TrimSpace(string(data))
-			if idx := strings.Index(selected, "\n"); idx != -1 {
-				selected = strings.TrimSpace(selected[:idx])
+			paths := parsePickedLines(string(data))
+			first := ""
+			if len(paths) > 0 {
+				first = paths[0]
 			}
-			return filePickedMsg{Path: selected}
+			return filePickedMsg{Path: first, Paths: paths}
 		})
 	}
 
 	return func() tea.Msg {
-		path, err := openFilePicker(customCmd)
+		paths, err := openFilePicker(customCmd)
 		if err != nil {
 			return filePickErrMsg{Err: err}
 		}
-		return filePickedMsg{Path: path}
+		first := ""
+		if len(paths) > 0 {
+			first = paths[0]
+		}
+		return filePickedMsg{Path: first, Paths: paths}
 	}
+}
+
+func parsePickedLines(raw string) []string {
+	var paths []string
+	clean := strings.ReplaceAll(raw, "\r\n", "\n")
+	clean = strings.ReplaceAll(clean, "\000", "\n")
+	if !strings.Contains(clean, "\n") && strings.Contains(clean, "|") {
+		clean = strings.ReplaceAll(clean, "|", "\n")
+	}
+
+	for _, line := range strings.Split(clean, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if (strings.HasPrefix(line, "\"") && strings.HasSuffix(line, "\"")) ||
+			(strings.HasPrefix(line, "'") && strings.HasSuffix(line, "'")) {
+			if len(line) >= 2 {
+				line = strings.TrimSpace(line[1 : len(line)-1])
+			}
+		}
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths
+}
+
+func formatFileURI(path string) string {
+	cleanPath := strings.TrimSpace(path)
+	if strings.Contains(cleanPath, " ") || strings.Contains(cleanPath, "\t") {
+		return fmt.Sprintf("file://\"%s\"", cleanPath)
+	}
+	return "file://" + cleanPath
 }
 
 type clipboardPasteMsg struct {
@@ -6614,7 +6733,7 @@ func (m *Model) pasteClipboardCmd() tea.Cmd {
 	}
 }
 
-func openFilePicker(customCmd string) (string, error) {
+func openFilePicker(customCmd string) ([]string, error) {
 	if strings.TrimSpace(customCmd) != "" {
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
@@ -6626,70 +6745,196 @@ func openFilePicker(customCmd string) (string, error) {
 		if err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 {
-				return "", nil
+				return nil, nil
 			}
-			return "", fmt.Errorf("picker failed: %w", err)
+			return nil, fmt.Errorf("picker failed: %w", err)
 		}
-		return strings.TrimSpace(string(out)), nil
+		return parsePickedLines(string(out)), nil
 	}
 
 	switch runtime.GOOS {
 	case "windows":
-		cmd := exec.Command("powershell", "-NoProfile", "-Command",
-			"[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select file to send'; if ($f.ShowDialog() -eq 'OK') { $f.FileName }")
+		psScript := `[System.Reflection.Assembly]::LoadWithPartialName('System.windows.forms') | Out-Null; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select file(s) to send'; $f.Multiselect = $true; if ($f.ShowDialog() -eq 'OK') { $f.FileNames }`
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
 		out, err := cmd.Output()
 		if err != nil {
-			return "", errNoFilePicker
+			return nil, errNoFilePicker
 		}
-		return strings.TrimSpace(string(out)), nil
+		return parsePickedLines(string(out)), nil
 
 	case "darwin":
-		cmd := exec.Command("osascript", "-e", "POSIX path of (choose file with prompt \"Select file to send:\")")
+		osaScript := `set fileList to choose file with prompt "Select file(s) to send:" with multiple selections allowed
+set out to ""
+repeat with aFile in fileList
+    set out to out & POSIX path of aFile & linefeed
+end repeat
+return out`
+		cmd := exec.Command("osascript", "-e", osaScript)
 		out, err := cmd.Output()
 		if err != nil {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-				return "", nil
+				return nil, nil
 			}
-			return "", errNoFilePicker
+			return nil, errNoFilePicker
 		}
-		return strings.TrimSpace(string(out)), nil
+		return parsePickedLines(string(out)), nil
 
 	default: // Linux / BSD
 		if _, err := exec.LookPath("zenity"); err == nil {
-			cmd := exec.Command("zenity", "--file-selection", "--title=Select file to send")
+			cmd := exec.Command("zenity", "--file-selection", "--multiple", "--separator=\n", "--title=Select file(s) to send")
 			out, err := cmd.Output()
 			if err != nil {
 				var exitErr *exec.ExitError
 				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-					return "", nil
+					return nil, nil
 				}
-				return "", fmt.Errorf("zenity failed: %w", err)
+				return nil, fmt.Errorf("zenity failed: %w", err)
 			}
-			return strings.TrimSpace(string(out)), nil
+			return parsePickedLines(string(out)), nil
 		}
 		if _, err := exec.LookPath("kdialog"); err == nil {
-			cmd := exec.Command("kdialog", "--getopenfilename", "--title", "Select file to send")
+			cmd := exec.Command("kdialog", "--getopenfilename", "--multiple", "--separate-output", "--title", "Select file(s) to send")
 			out, err := cmd.Output()
 			if err != nil {
 				var exitErr *exec.ExitError
 				if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-					return "", nil
+					return nil, nil
 				}
-				return "", fmt.Errorf("kdialog failed: %w", err)
+				return nil, fmt.Errorf("kdialog failed: %w", err)
 			}
-			return strings.TrimSpace(string(out)), nil
+			return parsePickedLines(string(out)), nil
 		}
 		if _, err := exec.LookPath("python3"); err == nil {
-			pyScript := "import tkinter as tk, tkinter.filedialog as fd; root = tk.Tk(); root.withdraw(); print(fd.askopenfilename() or '')"
+			pyScript := "import tkinter as tk, tkinter.filedialog as fd; root = tk.Tk(); root.withdraw(); files = fd.askopenfilenames(); [print(f) for f in files]"
 			cmd := exec.Command("python3", "-c", pyScript)
 			out, err := cmd.Output()
 			if err == nil {
-				return strings.TrimSpace(string(out)), nil
+				return parsePickedLines(string(out)), nil
 			}
 		}
-		return "", errNoFilePicker
+		return nil, errNoFilePicker
 	}
+}
+
+// ParseFileURIs extracts one or more local file paths and any remaining caption from text.
+func ParseFileURIs(input string) ([]string, string) {
+	return parseFileURIs(input)
+}
+
+func parseFileURIs(input string) ([]string, string) {
+	trimmed := strings.TrimSpace(input)
+	if !strings.Contains(trimmed, "file://") {
+		return nil, trimmed
+	}
+
+	var files []string
+	var captionParts []string
+
+	lines := strings.Split(trimmed, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "file://") {
+			captionParts = append(captionParts, line)
+			continue
+		}
+
+		rem := line
+		for {
+			rem = strings.TrimSpace(rem)
+			if rem == "" {
+				break
+			}
+			idx := strings.Index(rem, "file://")
+			if idx == -1 {
+				captionParts = append(captionParts, rem)
+				break
+			}
+			if idx > 0 {
+				prefix := strings.TrimSpace(rem[:idx])
+				if prefix != "" {
+					captionParts = append(captionParts, prefix)
+				}
+				rem = rem[idx:]
+			}
+
+			// rem now starts with "file://"
+			after := strings.TrimPrefix(rem, "file://")
+			after = strings.TrimSpace(after)
+
+			if strings.HasPrefix(after, "\"") {
+				if endIdx := strings.Index(after[1:], "\""); endIdx != -1 {
+					filePath := after[1 : endIdx+1]
+					files = append(files, expandPath(filePath))
+					rem = strings.TrimSpace(after[endIdx+2:])
+					continue
+				}
+			} else if strings.HasPrefix(after, "'") {
+				if endIdx := strings.Index(after[1:], "'"); endIdx != -1 {
+					filePath := after[1 : endIdx+1]
+					files = append(files, expandPath(filePath))
+					rem = strings.TrimSpace(after[endIdx+2:])
+					continue
+				}
+			}
+
+			nextFileIdx := strings.Index(after, "file://")
+			if nextFileIdx != -1 {
+				beforeNext := strings.TrimSpace(after[:nextFileIdx])
+				words := strings.Fields(beforeNext)
+				if len(words) > 0 {
+					files = append(files, expandPath(words[0]))
+					if len(words) > 1 {
+						captionParts = append(captionParts, strings.Join(words[1:], " "))
+					}
+				}
+				rem = after[nextFileIdx:]
+				continue
+			}
+
+			// No more file:// on this line.
+			if _, err := os.Stat(expandPath(after)); err == nil {
+				files = append(files, expandPath(after))
+				break
+			}
+
+			parts := strings.Split(after, " ")
+			matched := false
+			for i := len(parts); i >= 1; i-- {
+				cand := strings.Join(parts[:i], " ")
+				if _, err := os.Stat(expandPath(cand)); err == nil {
+					files = append(files, expandPath(cand))
+					capText := strings.TrimSpace(strings.Join(parts[i:], " "))
+					if capText != "" {
+						captionParts = append(captionParts, capText)
+					}
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+
+			spIdx := strings.Index(after, " ")
+			if spIdx != -1 {
+				files = append(files, expandPath(after[:spIdx]))
+				capText := strings.TrimSpace(after[spIdx+1:])
+				if capText != "" {
+					captionParts = append(captionParts, capText)
+				}
+			} else {
+				files = append(files, expandPath(after))
+			}
+			break
+		}
+	}
+
+	caption := strings.TrimSpace(strings.Join(captionParts, " "))
+	return files, caption
 }
 
 // ParseFileURI extracts the local file path and optional caption from a file:// URI.
@@ -6698,45 +6943,11 @@ func ParseFileURI(input string) (string, string) {
 }
 
 func parseFileURI(input string) (string, string) {
-	rem := strings.TrimPrefix(input, "file://")
-	rem = strings.TrimSpace(rem)
-
-	// If enclosed in quotes, e.g. "path/with spaces.pdf" caption here
-	if strings.HasPrefix(rem, "\"") {
-		if endIdx := strings.Index(rem[1:], "\""); endIdx != -1 {
-			filePath := rem[1 : endIdx+1]
-			caption := strings.TrimSpace(rem[endIdx+2:])
-			return expandPath(filePath), caption
-		}
-	} else if strings.HasPrefix(rem, "'") {
-		if endIdx := strings.Index(rem[1:], "'"); endIdx != -1 {
-			filePath := rem[1 : endIdx+1]
-			caption := strings.TrimSpace(rem[endIdx+2:])
-			return expandPath(filePath), caption
-		}
+	files, caption := parseFileURIs(input)
+	if len(files) > 0 {
+		return files[0], caption
 	}
-
-	// If the entire remainder exists as a file directly (e.g. unquoted path with spaces)
-	if _, err := os.Stat(expandPath(rem)); err == nil {
-		return expandPath(rem), ""
-	}
-
-	// Otherwise, find the split point between file path and caption
-	parts := strings.Split(rem, " ")
-	for i := len(parts); i >= 1; i-- {
-		candidate := strings.Join(parts[:i], " ")
-		if _, err := os.Stat(expandPath(candidate)); err == nil {
-			caption := strings.TrimSpace(strings.Join(parts[i:], " "))
-			return expandPath(candidate), caption
-		}
-	}
-
-	// Fallback: first word is file, rest is caption
-	idx := strings.Index(rem, " ")
-	if idx != -1 {
-		return expandPath(rem[:idx]), strings.TrimSpace(rem[idx+1:])
-	}
-	return expandPath(rem), ""
+	return "", caption
 }
 
 func expandPath(p string) string {
