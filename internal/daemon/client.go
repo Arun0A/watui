@@ -804,4 +804,3 @@ func (r *RemoteAdapter) ResetConnection() {
 		_ = r.call(ctx, "reset_connection", nil, nil)
 	}()
 }
-
