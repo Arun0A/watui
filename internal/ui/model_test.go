@@ -5825,3 +5825,48 @@ func TestHeaderPresenceDisplay(t *testing.T) {
 		t.Errorf("Expected presence badge to be hidden for privacy, got: %s", view)
 	}
 }
+
+func TestPinnedChatsShownEvenIfArchived(t *testing.T) {
+	cfg := &config.Config{
+		Pin: []string{"archived-group@g.us", "active-user@s.whatsapp.net"},
+	}
+	m := NewModel(context.Background(), &mockAdapter{}, cfg)
+	m.unreadChats = map[string]*UnreadChat{
+		"archived-group@g.us": {
+			ChatID:     "archived-group@g.us",
+			Name:       "Archived Pinned Group",
+			IsGroup:    true,
+			IsPinned:   true,
+			IsArchived: true,
+		},
+		"active-user@s.whatsapp.net": {
+			ChatID:     "active-user@s.whatsapp.net",
+			Name:       "Active User",
+			IsPinned:   true,
+			IsArchived: false,
+		},
+	}
+	m.sortChatOrderLocked()
+	m.width = 120
+	m.height = 40
+
+	if len(m.chatOrder) != 2 {
+		t.Fatalf("Expected 2 chats in chatOrder, got %d", len(m.chatOrder))
+	}
+	if m.chatOrder[0] != "archived-group@g.us" {
+		t.Errorf("Expected first chat to be archived-group@g.us, got %s", m.chatOrder[0])
+	}
+	if m.chatOrder[1] != "active-user@s.whatsapp.net" {
+		t.Errorf("Expected second chat to be active-user@s.whatsapp.net, got %s", m.chatOrder[1])
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "Archived Pinned Group") {
+		t.Errorf("Expected view to contain 'Archived Pinned Group', got: %s", view)
+	}
+	// Pinned chats should not have [Archived] prefix in normal view
+	if strings.Contains(view, "[Archived] Archived Pinned Group") {
+		t.Errorf("Did not expect '[Archived]' label on pinned chat in view, got: %s", view)
+	}
+}
+

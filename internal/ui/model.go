@@ -1890,7 +1890,7 @@ func (m *Model) sortChatOrderLocked() {
 	if !m.showArchived {
 		for _, rule := range pinnedRules {
 			for id, chat := range m.unreadChats {
-				if filterChat(chat) && chat.IsPinned && !used[id] {
+				if chat != nil && chat.IsPinned && !used[id] {
 					if config.MatchTarget(rule, id, chat.Name) {
 						pinned = append(pinned, id)
 						used[id] = true
@@ -1901,7 +1901,7 @@ func (m *Model) sortChatOrderLocked() {
 		}
 		// 2. Any other pinned chats
 		for id, chat := range m.unreadChats {
-			if filterChat(chat) && chat.IsPinned && !used[id] {
+			if chat != nil && chat.IsPinned && !used[id] {
 				pinned = append(pinned, id)
 				used[id] = true
 			}
@@ -4454,7 +4454,7 @@ func (m *Model) renderUnreadListView() []string {
 	archivedCount := 0
 	for _, chat := range m.unreadChats {
 		if chat != nil {
-			if chat.IsArchived {
+			if chat.IsArchived && !chat.IsPinned {
 				if chat.UnreadCount > 0 {
 					archivedCount++
 				}
@@ -4538,7 +4538,7 @@ func (m *Model) renderUnreadListView() []string {
 			if chat.IsGroup || strings.Contains(chat.ChatID, "@g.us") {
 				name = "[Group] " + name
 			}
-			if chat.IsArchived && !m.showArchived {
+			if chat.IsArchived && !m.showArchived && !chat.IsPinned {
 				name = "[Archived] " + name
 			}
 			if chat.IsMuted || m.isMuted(chat.ChatID, chat.Name) {
