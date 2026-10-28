@@ -685,6 +685,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 			quoted_text TEXT,
 			quoted_sender TEXT,
 			is_edit BOOLEAN,
+			is_revoke BOOLEAN,
 			raw_message BLOB,
 			status TEXT
 		);
@@ -705,11 +706,13 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_text TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN quoted_sender TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN is_edit BOOLEAN;")
+		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN is_revoke BOOLEAN;")
 		_, _ = localDB.Exec("ALTER TABLE watui_unread_messages ADD COLUMN status TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_id TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_text TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN quoted_sender TEXT;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN is_edit BOOLEAN;")
+		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN is_revoke BOOLEAN;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN raw_message BLOB;")
 		_, _ = localDB.Exec("ALTER TABLE watui_messages ADD COLUMN status TEXT;")
 
@@ -1713,8 +1716,13 @@ func (a *Adapter) DeleteMessage(ctx context.Context, chatID string, messageID st
 	}
 
 	if a.localDB != nil {
-		_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", messageID)
-		_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", messageID)
+		if deleteForEveryone {
+			_, _ = a.localDB.Exec("UPDATE watui_messages SET is_revoke = 1 WHERE id = ?", messageID)
+			_, _ = a.localDB.Exec("UPDATE watui_unread_messages SET is_revoke = 1 WHERE id = ?", messageID)
+		} else {
+			_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", messageID)
+			_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", messageID)
+		}
 	}
 
 	return nil
@@ -3043,9 +3051,9 @@ func (a *Adapter) saveUnreadMessage(msg domain.Message, rawMsg ...*waE2E.Message
 		rawBytes, _ = proto.Marshal(rawMsg[0])
 	}
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_unread_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, raw_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, rawBytes,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, is_revoke, raw_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.ChatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, msg.IsRevoke, rawBytes,
 	)
 
 	// Keep unread messages table lean by pruning older messages beyond 100 per chat
@@ -3112,9 +3120,9 @@ func (a *Adapter) saveHistoryMessage(msg domain.Message, raw ...*waE2E.Message) 
 	}
 
 	_, _ = a.localDB.Exec(`INSERT OR REPLACE INTO watui_messages
-		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, raw_message, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, rawBytes, statusVal,
+		(id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, is_revoke, raw_message, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, chatID, msg.ChatName, msg.Sender, msg.SenderName, msg.Timestamp.Unix(), msg.Body, string(msg.Type), msg.IsFromMe, msg.QuotedID, msg.QuotedText, msg.QuotedSender, msg.IsEdit, msg.IsRevoke, rawBytes, statusVal,
 	)
 
 	// Keep history table strictly bounded per chat according to cyclic limit (default: 30)
@@ -3157,13 +3165,13 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 	var query string
 	var args []interface{}
 	if beforeTimestamp.IsZero() {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, status 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, is_revoke, status 
 			FROM watui_messages 
 			WHERE chat_id = ? OR chat_id = ? OR chat_id = ? 
 			ORDER BY timestamp DESC LIMIT ?`
 		args = []interface{}{chatID, nonAD, altTarget, limit}
 	} else {
-		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, status 
+		query = `SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, is_revoke, status 
 			FROM watui_messages 
 			WHERE (chat_id = ? OR chat_id = ? OR chat_id = ?) AND timestamp < ? 
 			ORDER BY timestamp DESC LIMIT ?`
@@ -3183,8 +3191,8 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 		var chatName, senderName, body, qID, qText, qSender, status sql.NullString
 		var msgType string
 		var isFromMe bool
-		var isEdit sql.NullBool
-		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe, &qID, &qText, &qSender, &isEdit, &status); err != nil {
+		var isEdit, isRevoke sql.NullBool
+		if err := rows.Scan(&m.ID, &m.ChatID, &chatName, &m.Sender, &senderName, &ts, &body, &msgType, &isFromMe, &qID, &qText, &qSender, &isEdit, &isRevoke, &status); err != nil {
 			continue
 		}
 		if status.Valid && status.String != "" {
@@ -3209,6 +3217,7 @@ func (a *Adapter) GetChatHistory(ctx context.Context, chatID string, limit int, 
 		m.QuotedText = qText.String
 		m.QuotedSender = qSender.String
 		m.IsEdit = isEdit.Valid && isEdit.Bool
+		m.IsRevoke = isRevoke.Valid && isRevoke.Bool
 		result = append(result, m)
 	}
 	_ = rows.Close()
@@ -3294,16 +3303,16 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 
 	// Use partitioned window query to only pull the latest 50 unreads per chat, avoiding megabytes of stale backlog
 	rows, err := a.localDB.QueryContext(ctx, `
-		SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit
+		SELECT id, chat_id, chat_name, sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, is_revoke
 		FROM (
 			SELECT id, chat_id, COALESCE(chat_name, '') AS chat_name, sender, sender_name, timestamp, body, type, is_from_me,
-			       quoted_id, quoted_text, quoted_sender, is_edit,
+			       quoted_id, quoted_text, quoted_sender, is_edit, is_revoke,
 			       ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) as rn
 			FROM watui_unread_messages
 		) WHERE rn <= 50
 		ORDER BY timestamp ASC`)
 	if err != nil {
-		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit
+		rows, err = a.localDB.QueryContext(ctx, `SELECT id, chat_id, COALESCE(chat_name, ''), sender, sender_name, timestamp, body, type, is_from_me, quoted_id, quoted_text, quoted_sender, is_edit, is_revoke
 			FROM watui_unread_messages ORDER BY timestamp ASC`)
 		if err != nil {
 			return nil, err
@@ -3318,8 +3327,8 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 		var ts int64
 		var tStr string
 		var qID, qText, qSender sql.NullString
-		var isEdit sql.NullBool
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe, &qID, &qText, &qSender, &isEdit); err == nil {
+		var isEdit, isRevoke sql.NullBool
+		if err := rows.Scan(&m.ID, &m.ChatID, &m.ChatName, &m.Sender, &m.SenderName, &ts, &m.Body, &tStr, &m.IsFromMe, &qID, &qText, &qSender, &isEdit, &isRevoke); err == nil {
 			m.Timestamp = time.Unix(ts, 0)
 			m.Type = domain.MessageType(tStr)
 			m.Status = domain.MessageStatusDelivered
@@ -3327,6 +3336,7 @@ func (a *Adapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, erro
 			m.QuotedText = qText.String
 			m.QuotedSender = qSender.String
 			m.IsEdit = isEdit.Valid && isEdit.Bool
+			m.IsRevoke = isRevoke.Valid && isRevoke.Bool
 			if strings.HasSuffix(m.ChatID, "@lid") {
 				lidUser := strings.TrimSuffix(m.ChatID, "@lid")
 				if idx := strings.Index(lidUser, ":"); idx != -1 {
@@ -3879,10 +3889,100 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 
 	case *events.Message:
 		if targetID, isRevoke := extractRevokeProtocolInfo(evt); isRevoke && targetID != "" {
+			var origBody, origSender, origSenderName, origChatID, origChatName, origType string
+			var origTimestamp int64
+			var origIsFromMe bool
 			if a.localDB != nil {
-				_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", targetID)
-				_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", targetID)
+				row := a.localDB.QueryRow("SELECT chat_id, chat_name, body, sender, sender_name, timestamp, type, is_from_me FROM watui_messages WHERE id = ?", targetID)
+				_ = row.Scan(&origChatID, &origChatName, &origBody, &origSender, &origSenderName, &origTimestamp, &origType, &origIsFromMe)
+				if origBody == "" {
+					row2 := a.localDB.QueryRow("SELECT chat_id, chat_name, body, sender, sender_name, timestamp, type, is_from_me FROM watui_unread_messages WHERE id = ?", targetID)
+					_ = row2.Scan(&origChatID, &origChatName, &origBody, &origSender, &origSenderName, &origTimestamp, &origType, &origIsFromMe)
+				}
+				_, _ = a.localDB.Exec("UPDATE watui_messages SET is_revoke = 1 WHERE id = ?", targetID)
+				_, _ = a.localDB.Exec("UPDATE watui_unread_messages SET is_revoke = 1 WHERE id = ?", targetID)
 			}
+			if origBody == "" {
+				if origType != "" && origType != "text" {
+					origBody = fmt.Sprintf("[%s]", strings.ToUpper(origType))
+				} else {
+					origBody = "[Message]"
+				}
+			}
+
+			finalChatID := origChatID
+			if finalChatID == "" {
+				chatJID := evt.Info.Chat.ToNonAD()
+				if chatJID.Server == "lid" {
+					if pn := a.ResolveLIDToPhone(chatJID.User); pn != "" {
+						chatJID = types.NewJID(pn, types.DefaultUserServer)
+					}
+				}
+				finalChatID = chatJID.String()
+			}
+			if strings.HasSuffix(finalChatID, "@lid") {
+				lidUser := strings.TrimSuffix(finalChatID, "@lid")
+				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+					finalChatID = pn + "@s.whatsapp.net"
+				}
+			}
+
+			sender := origSender
+			if sender == "" {
+				senderJID := evt.Info.Sender.ToNonAD()
+				if senderJID.Server == "lid" {
+					if pn := a.ResolveLIDToPhone(senderJID.User); pn != "" {
+						senderJID = types.NewJID(pn, types.DefaultUserServer)
+					}
+				}
+				sender = senderJID.String()
+				if evt.Info.IsFromMe && (sender == "" || sender == "You") {
+					sender = "You"
+				}
+			}
+
+			senderName := origSenderName
+			if senderName == "" {
+				senderName = a.resolveParticipantName(evt.Info.Sender.String(), evt.Info.PushName)
+				if senderName == "" {
+					if evt.Info.PushName != "" {
+						senderName = evt.Info.PushName
+					} else if evt.Info.IsFromMe {
+						senderName = "You"
+					}
+				}
+			}
+
+			chatName := origChatName
+			if chatName == "" {
+				chatJIDParsed, _ := types.ParseJID(finalChatID)
+				chatName = a.resolveChatName(chatJIDParsed)
+			}
+
+			ts := evt.Info.Timestamp
+			if ts.IsZero() && origTimestamp > 0 {
+				ts = time.Unix(origTimestamp, 0)
+			} else if ts.IsZero() {
+				ts = time.Now()
+			}
+
+			revokeDMsg := domain.Message{
+				ID:           targetID,
+				ChatID:       finalChatID,
+				ChatName:     chatName,
+				Sender:       sender,
+				SenderName:   senderName,
+				Body:         origBody,
+				Timestamp:    ts,
+				IsFromMe:     origIsFromMe || evt.Info.IsFromMe,
+				Type:         domain.MessageTypeText,
+				QuotedID:     targetID,
+				QuotedText:   origBody,
+				QuotedSender: sender,
+				IsRevoke:     true,
+			}
+
+			a.notifyMessage(revokeDMsg)
 			return
 		}
 

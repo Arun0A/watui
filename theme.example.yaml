@@ -55,6 +55,7 @@ msg_text: "#CDD6F4"            # Message body text
 text_muted: "#A6ADC8"          # Blurred input text, date divider label, snippets
 quote_prefix: "#6C7086"        # Quoted message border (┌─) and snippet text
 edit_tag: "#FAB387"            # [EDIT] tag indicator
+revoke_tag: "#F38BA8"          # [Deleted for everyone] tag indicator
 
 # --- Input Box & Mentions ---
 input_text: "#CDD6F4"          # Text inside typing area

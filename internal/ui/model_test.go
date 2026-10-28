@@ -5049,6 +5049,96 @@ func TestIncomingMessageEditReflectsAsReplyWithEditTag(t *testing.T) {
 	}
 }
 
+func TestIncomingMessageRevokeReflectsAsReplyWithDeletedTag(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	model := NewModel(context.Background(), adapter)
+	model.width = 100
+	model.height = 30
+	model.view = ViewChat
+	model.activeChatID = "alice@s.whatsapp.net"
+	model.activeName = "Alice"
+
+	// 1. Initial message from Alice
+	m1 := domain.Message{
+		ID:         "M_REVOKE_1",
+		ChatID:     "alice@s.whatsapp.net",
+		ChatName:   "Alice",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Body:       "Top secret information",
+		Timestamp:  time.Now().Add(-5 * time.Minute),
+	}
+	model.handleIncomingMessage(m1)
+
+	if len(model.activeMsgs) != 1 {
+		t.Fatalf("Expected 1 active message, got %d", len(model.activeMsgs))
+	}
+
+	// 2. Incoming revoke (delete-for-everyone)
+	m1Revoke := domain.Message{
+		ID:         "M_REVOKE_1",
+		ChatID:     "alice@s.whatsapp.net",
+		ChatName:   "Alice",
+		Sender:     "alice@s.whatsapp.net",
+		SenderName: "Alice",
+		Body:       "Top secret information",
+		Timestamp:  time.Now(),
+		QuotedID:   "M_REVOKE_1",
+		IsRevoke:   true,
+	}
+	model.handleIncomingMessage(m1Revoke)
+
+	// Verify message in activeMsgs is marked IsRevoke=true and body is preserved
+	if !model.activeMsgs[0].IsRevoke {
+		t.Fatalf("Expected active message to have IsRevoke=true")
+	}
+	if model.activeMsgs[0].Body != "Top secret information" {
+		t.Errorf("Expected active message body to remain %q, got %q", "Top secret information", model.activeMsgs[0].Body)
+	}
+
+	// 3. Verify rendered chat view displays [Deleted for everyone] in reply style note
+	view := model.renderChatView()
+	joinedView := strings.Join(view, "\n")
+	if !strings.Contains(joinedView, "[Deleted for everyone]") {
+		t.Errorf("Expected rendered chat view to show '[Deleted for everyone]', got:\n%s", joinedView)
+	}
+	if !strings.Contains(joinedView, "Top secret information") {
+		t.Errorf("Expected rendered chat view to show deleted message text 'Top secret information', got:\n%s", joinedView)
+	}
+
+	// 4. Test unread list inbox snippet shows [Deleted for everyone] when chat is inactive
+	model.view = ViewUnreadList
+	m2 := domain.Message{
+		ID:         "M_REVOKE_2",
+		ChatID:     "bob@s.whatsapp.net",
+		ChatName:   "Bob",
+		Sender:     "bob@s.whatsapp.net",
+		SenderName: "Bob",
+		Body:       "Confidential file details",
+		Timestamp:  time.Now().Add(-2 * time.Minute),
+	}
+	model.handleIncomingMessage(m2)
+
+	m2Revoke := domain.Message{
+		ID:         "M_REVOKE_2",
+		ChatID:     "bob@s.whatsapp.net",
+		ChatName:   "Bob",
+		Sender:     "bob@s.whatsapp.net",
+		SenderName: "Bob",
+		Body:       "Confidential file details",
+		Timestamp:  time.Now(),
+		QuotedID:   "M_REVOKE_2",
+		IsRevoke:   true,
+	}
+	model.handleIncomingMessage(m2Revoke)
+
+	unreadView := model.renderUnreadListView()
+	joinedUnread := strings.Join(unreadView, "\n")
+	if !strings.Contains(joinedUnread, "[Deleted for everyone]") {
+		t.Errorf("Expected unread inbox view to display '[Deleted for everyone]', got:\n%s", joinedUnread)
+	}
+}
+
 func TestUnreadListMuteKeybindings(t *testing.T) {
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "watui.yaml")
@@ -5867,6 +5957,87 @@ func TestPinnedChatsShownEvenIfArchived(t *testing.T) {
 	// Pinned chats should not have [Archived] prefix in normal view
 	if strings.Contains(view, "[Archived] Archived Pinned Group") {
 		t.Errorf("Did not expect '[Archived]' label on pinned chat in view, got: %s", view)
+	}
+}
+
+func TestRevokeMessageDoesNotDuplicateOnExitAndReenterChat(t *testing.T) {
+	cfg := &config.Config{}
+	m := NewModel(context.Background(), &mockAdapter{}, cfg)
+	m.width = 100
+	m.height = 30
+
+	msg1 := domain.Message{
+		ID:         "MSG_REVOKE_1",
+		ChatID:     "user1@s.whatsapp.net",
+		ChatName:   "User One",
+		Sender:     "user1@s.whatsapp.net",
+		SenderName: "User One",
+		Body:       "Top secret message",
+		Timestamp:  time.Now(),
+	}
+
+	// 1. Receive message
+	m.handleIncomingMessage(msg1)
+	if len(m.chatOrder) != 1 {
+		t.Fatalf("Expected 1 chat in chatOrder, got %d", len(m.chatOrder))
+	}
+
+	// 2. Open chat and read it
+	m.updateUnreadList(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.view != ViewChat {
+		t.Fatalf("Expected view to be ViewChat, got %v", m.view)
+	}
+	if len(m.activeMsgs) != 1 {
+		t.Fatalf("Expected 1 message in activeMsgs, got %d", len(m.activeMsgs))
+	}
+
+	// 3. Return back to chats menu (ViewUnreadList)
+	m.updateChat(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != ViewUnreadList {
+		t.Fatalf("Expected view to be ViewUnreadList, got %v", m.view)
+	}
+
+	// 4. Sender revokes the message for everyone while user is in chats menu
+	revokeMsg := domain.Message{
+		ID:         "MSG_REVOKE_1",
+		ChatID:     "user1@s.whatsapp.net",
+		ChatName:   "User One",
+		Sender:     "user1@s.whatsapp.net",
+		SenderName: "User One",
+		Body:       "Top secret message",
+		QuotedID:   "MSG_REVOKE_1",
+		IsRevoke:   true,
+		Timestamp:  time.Now(),
+	}
+	m.handleIncomingMessage(revokeMsg)
+
+	// 5. User enters the chat again
+	m.updateUnreadList(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.view != ViewChat {
+		t.Fatalf("Expected view to be ViewChat, got %v", m.view)
+	}
+
+	// Verify no duplicates: exactly 1 message in activeMsgs and chat.Messages
+	if len(m.activeMsgs) != 1 {
+		t.Fatalf("Expected exactly 1 message in activeMsgs (no duplicate), but got %d", len(m.activeMsgs))
+	}
+	if !m.activeMsgs[0].IsRevoke {
+		t.Errorf("Expected activeMsgs[0].IsRevoke to be true")
+	}
+	if m.activeMsgs[0].Body != "Top secret message" {
+		t.Errorf("Expected activeMsgs[0].Body to be 'Top secret message', got %q", m.activeMsgs[0].Body)
+	}
+
+	chat := m.unreadChats["user1@s.whatsapp.net"]
+	if chat != nil && len(chat.Messages) != 1 {
+		t.Errorf("Expected exactly 1 message in chat.Messages, got %d", len(chat.Messages))
+	}
+
+	// 6. Verify rendered chat view has exactly one [Deleted for everyone] tag
+	view := m.View()
+	count := strings.Count(view, "[Deleted for everyone]")
+	if count != 1 {
+		t.Errorf("Expected exactly 1 '[Deleted for everyone]' tag in chat view, got %d (view:\n%s)", count, view)
 	}
 }
 

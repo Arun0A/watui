@@ -656,6 +656,9 @@ func runDaemonWorker(ctx context.Context, cancel context.CancelFunc, sigChan cha
 		if adapter.IsChatArchived(msg.ChatID) && !msg.MentionsMe() {
 			return
 		}
+		if msg.IsRevoke {
+			return
+		}
 		if loggingEnabled {
 			log.Printf("[watui daemon] Incoming message from %s (%s): %s\n", msg.SenderName, msg.ChatID, msg.Body)
 		}

@@ -222,6 +222,7 @@ func TestChatHistoryStorageAndCyclicPruning(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
 		raw_message BLOB,
 		status TEXT
 	);
@@ -324,12 +325,14 @@ func TestMediaCachePersistence(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
 		raw_message BLOB,
 		status TEXT
 	);
 	CREATE TABLE IF NOT EXISTS watui_unread_messages (
 		id TEXT PRIMARY KEY,
 		chat_id TEXT NOT NULL,
+		is_revoke BOOLEAN,
 		raw_message BLOB
 	);`)
 	if err != nil {
@@ -433,6 +436,7 @@ func TestUnreadReplyRetention(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
 		raw_message BLOB,
 		status TEXT
 	);
@@ -450,6 +454,7 @@ func TestUnreadReplyRetention(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
 		raw_message BLOB
 	);`)
 	if err != nil {
@@ -644,6 +649,7 @@ func TestReactMessageHistoryPersistence(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
 		raw_message BLOB,
 		status TEXT
 	);`)
@@ -655,7 +661,8 @@ func TestReactMessageHistoryPersistence(t *testing.T) {
 		chat_id TEXT NOT NULL,
 		quoted_id TEXT,
 		is_from_me BOOLEAN NOT NULL,
-		type TEXT NOT NULL
+		type TEXT NOT NULL,
+		is_revoke BOOLEAN
 	);`)
 	if err != nil {
 		t.Fatalf("Failed to create table: %v", err)
@@ -872,6 +879,130 @@ func TestExtractRevokeProtocolInfo(t *testing.T) {
 	id, isRevoke = extractRevokeProtocolInfo(evt2)
 	if !isRevoke || id != "REVOKE_2" {
 		t.Fatalf("Ephemeral revoke failed: got isRevoke=%v, id=%s", isRevoke, id)
+	}
+}
+
+func TestRevokeMessagePersistenceAndNotification(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to open memory db: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS watui_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT NOT NULL,
+		type TEXT NOT NULL,
+		is_from_me BOOLEAN NOT NULL,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
+		raw_message BLOB,
+		status TEXT
+	);
+	CREATE TABLE IF NOT EXISTS watui_unread_messages (
+		id TEXT PRIMARY KEY,
+		chat_id TEXT NOT NULL,
+		chat_name TEXT,
+		sender TEXT NOT NULL,
+		sender_name TEXT,
+		timestamp INTEGER NOT NULL,
+		body TEXT NOT NULL,
+		type TEXT NOT NULL,
+		is_from_me BOOLEAN NOT NULL,
+		quoted_id TEXT,
+		quoted_text TEXT,
+		quoted_sender TEXT,
+		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
+		raw_message BLOB
+	);`)
+	if err != nil {
+		t.Fatalf("Failed to create tables: %v", err)
+	}
+
+	persistTrue := true
+	cfg := &config.Config{
+		PersistChatHistory:   &persistTrue,
+		CycleMsgCountPerChat: 30,
+	}
+
+	adapter := &Adapter{
+		localDB:   db,
+		appConfig: cfg,
+	}
+
+	// Insert an initial message
+	initialMsg := domain.Message{
+		ID:         "MSG_DELETED",
+		ChatID:     "chat1@s.whatsapp.net",
+		ChatName:   "Friend",
+		Sender:     "friend@s.whatsapp.net",
+		SenderName: "Friend",
+		Body:       "Confidential Secret Message",
+		Timestamp:  time.Now(),
+		Type:       domain.MessageTypeText,
+	}
+	adapter.saveHistoryMessage(initialMsg)
+	adapter.saveUnreadMessage(initialMsg)
+
+	var notified domain.Message
+	adapter.OnMessage(func(m domain.Message) {
+		notified = m
+	})
+
+	// Dispatch REVOKE event
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			ID: "REVOKE_EVENT_ID",
+			MessageSource: types.MessageSource{
+				Chat:     types.NewJID("chat1", types.DefaultUserServer),
+				Sender:   types.NewJID("friend", types.DefaultUserServer),
+				IsFromMe: false,
+			},
+			Timestamp: time.Now(),
+		},
+		Message: &waE2E.Message{
+			ProtocolMessage: &waE2E.ProtocolMessage{
+				Key: &waCommon.MessageKey{
+					ID: proto.String("MSG_DELETED"),
+				},
+				Type: waE2E.ProtocolMessage_REVOKE.Enum(),
+			},
+		},
+	}
+	adapter.handleEvent(evt)
+
+	// Verify notification received
+	if !notified.IsRevoke {
+		t.Fatalf("Expected notified message to have IsRevoke=true, got %v", notified.IsRevoke)
+	}
+	if notified.ID != "MSG_DELETED" {
+		t.Errorf("Expected notified ID=MSG_DELETED, got %s", notified.ID)
+	}
+	if notified.Body != "Confidential Secret Message" {
+		t.Errorf("Expected notified Body to retain deleted text, got %s", notified.Body)
+	}
+
+	// Verify message in DB was marked is_revoke=1 and NOT deleted
+	var isRevoke bool
+	var body string
+	err = db.QueryRow("SELECT is_revoke, body FROM watui_messages WHERE id = ?", "MSG_DELETED").Scan(&isRevoke, &body)
+	if err != nil {
+		t.Fatalf("Expected message to remain in watui_messages: %v", err)
+	}
+	if !isRevoke {
+		t.Errorf("Expected is_revoke=true in watui_messages")
+	}
+	if body != "Confidential Secret Message" {
+		t.Errorf("Expected body to be preserved in watui_messages, got %s", body)
 	}
 }
 
@@ -1525,6 +1656,7 @@ func TestHistorySyncArchivedChats(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
 		raw_message BLOB
 	);`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS watui_messages (
@@ -1541,6 +1673,7 @@ func TestHistorySyncArchivedChats(t *testing.T) {
 		quoted_text TEXT,
 		quoted_sender TEXT,
 		is_edit BOOLEAN,
+		is_revoke BOOLEAN,
 		raw_message BLOB,
 		status TEXT
 	);`)

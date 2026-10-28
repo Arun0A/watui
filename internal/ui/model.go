@@ -1991,12 +1991,15 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 			}
 		}
 
-		if msg.IsEdit && msg.QuotedText == "" && msg.QuotedID != "" && chat != nil {
+		if (msg.IsEdit || msg.IsRevoke) && msg.QuotedText == "" && msg.QuotedID != "" && chat != nil {
 			for _, existing := range chat.Messages {
 				if existing.ID == msg.QuotedID {
 					msg.QuotedText = existing.Body
 					if msg.QuotedSender == "" {
 						msg.QuotedSender = existing.Sender
+					}
+					if msg.IsRevoke && msg.Body == "" {
+						msg.Body = existing.Body
 					}
 					break
 				}
@@ -2030,12 +2033,19 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 			for i, existing := range chat.Messages {
 				if existing.ID == msg.ID {
 					alreadyPresent = true
-					chat.Messages[i].Body = msg.Body
+					if msg.IsRevoke {
+						chat.Messages[i].IsRevoke = true
+						if msg.Body != "" {
+							chat.Messages[i].Body = msg.Body
+						}
+					} else {
+						chat.Messages[i].Body = msg.Body
+					}
 					break
 				}
 			}
 			if !alreadyPresent {
-				if !m.readChats[msg.ChatID] && msg.ChatID != m.activeChatID {
+				if !m.readChats[msg.ChatID] && msg.ChatID != m.activeChatID && !msg.IsRevoke {
 					chat.UnreadCount++
 				}
 				if len(chat.Messages) < 50 {
@@ -2093,9 +2103,9 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 	userActive := strings.Split(strings.Split(m.activeChatID, "@")[0], ":")[0]
 	userMsg := strings.Split(strings.Split(msg.ChatID, "@")[0], ":")[0]
 	isForActiveChat := (m.activeChatID == msg.ChatID) || (userActive != "" && userActive == userMsg)
-	if !isForActiveChat && m.view == ViewChat && msg.IsEdit && msg.QuotedID != "" {
+	if !isForActiveChat && m.view == ViewChat && (msg.IsEdit || msg.IsRevoke) && msg.QuotedID != "" {
 		for _, prev := range m.activeMsgs {
-			if prev.ID == msg.QuotedID {
+			if prev.ID == msg.QuotedID || prev.ID == msg.ID {
 				isForActiveChat = true
 				break
 			}
@@ -2144,12 +2154,43 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		}
 	}
 
+	// If message is a revoke (delete-for-everyone), mark the target message as revoked
+	if msg.IsRevoke {
+		for i, prev := range m.activeMsgs {
+			if prev.ID == msg.QuotedID || prev.ID == msg.ID {
+				m.activeMsgs[i].IsRevoke = true
+				if msg.Body != "" && m.activeMsgs[i].Body == "" {
+					m.activeMsgs[i].Body = msg.Body
+				}
+				break
+			}
+		}
+		if chat, ok := m.unreadChats[msg.ChatID]; ok && chat != nil {
+			for i, prev := range chat.Messages {
+				if prev.ID == msg.QuotedID || prev.ID == msg.ID {
+					chat.Messages[i].IsRevoke = true
+					if msg.Body != "" && chat.Messages[i].Body == "" {
+						chat.Messages[i].Body = msg.Body
+					}
+					break
+				}
+			}
+		}
+	}
+
 	// 2. If currently viewing this chat, update if already present or append directly
 	if m.view == ViewChat && isForActiveChat {
 		foundInActive := false
 		for i := range m.activeMsgs {
-			if m.activeMsgs[i].ID == msg.ID {
-				m.activeMsgs[i].Body = msg.Body
+			if m.activeMsgs[i].ID == msg.ID || (msg.IsRevoke && (m.activeMsgs[i].ID == msg.QuotedID || m.activeMsgs[i].ID == msg.ID)) {
+				if msg.IsRevoke {
+					m.activeMsgs[i].IsRevoke = true
+					if msg.Body != "" {
+						m.activeMsgs[i].Body = msg.Body
+					}
+				} else {
+					m.activeMsgs[i].Body = msg.Body
+				}
 				foundInActive = true
 				break
 			}
@@ -2164,8 +2205,15 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		if chat, exists := m.unreadChats[msg.ChatID]; exists {
 			foundInChat := false
 			for i := range chat.Messages {
-				if chat.Messages[i].ID == msg.ID {
-					chat.Messages[i].Body = msg.Body
+				if chat.Messages[i].ID == msg.ID || (msg.IsRevoke && (chat.Messages[i].ID == msg.QuotedID || chat.Messages[i].ID == msg.ID)) {
+					if msg.IsRevoke {
+						chat.Messages[i].IsRevoke = true
+						if msg.Body != "" {
+							chat.Messages[i].Body = msg.Body
+						}
+					} else {
+						chat.Messages[i].Body = msg.Body
+					}
 					foundInChat = true
 					break
 				}
@@ -2217,15 +2265,34 @@ func (m *Model) handleIncomingMessage(msg domain.Message) {
 		}
 		m.unreadChats[msg.ChatID] = chat
 	} else {
-		chat.UnreadCount++
-		if msg.MentionsMe() {
-			chat.HasMention = true
+		alreadyPresent := false
+		for i, existing := range chat.Messages {
+			if existing.ID == msg.ID || (msg.IsRevoke && (existing.ID == msg.QuotedID || existing.ID == msg.ID)) {
+				alreadyPresent = true
+				if msg.IsRevoke {
+					chat.Messages[i].IsRevoke = true
+					if msg.Body != "" {
+						chat.Messages[i].Body = msg.Body
+					}
+				} else {
+					chat.Messages[i].Body = msg.Body
+				}
+				break
+			}
 		}
-		if len(chat.Messages) < 50 {
-			chat.Messages = append(chat.Messages, msg)
-		} else {
-			copy(chat.Messages, chat.Messages[1:])
-			chat.Messages[len(chat.Messages)-1] = msg
+		if !alreadyPresent {
+			if !msg.IsRevoke {
+				chat.UnreadCount++
+			}
+			if msg.MentionsMe() {
+				chat.HasMention = true
+			}
+			if len(chat.Messages) < 50 {
+				chat.Messages = append(chat.Messages, msg)
+			} else {
+				copy(chat.Messages, chat.Messages[1:])
+				chat.Messages[len(chat.Messages)-1] = msg
+			}
 		}
 		chat.LastReceived = msg.Timestamp
 		if isPinned {
@@ -2468,9 +2535,16 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 			m.activeChatID = chatID
 			m.activeName = chat.Name
 			m.activeMsgs = nil
+			seenIDs := make(map[string]bool, len(chat.Messages))
 			for _, item := range chat.Messages {
 				if m.cfg.IsReactionsDisabled() && item.Type == domain.MessageTypeReaction {
 					continue
+				}
+				if item.ID != "" && seenIDs[item.ID] {
+					continue
+				}
+				if item.ID != "" {
+					seenIDs[item.ID] = true
 				}
 				m.activeMsgs = append(m.activeMsgs, item)
 			}
@@ -3796,9 +3870,16 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeMsgs = nil
 			m.mu.Lock()
 			if chat, exists := m.unreadChats[contact.JID]; exists {
+				seenIDs := make(map[string]bool, len(chat.Messages))
 				for _, item := range chat.Messages {
 					if m.cfg.IsReactionsDisabled() && item.Type == domain.MessageTypeReaction {
 						continue
+					}
+					if item.ID != "" && seenIDs[item.ID] {
+						continue
+					}
+					if item.ID != "" {
+						seenIDs[item.ID] = true
 					}
 					m.activeMsgs = append(m.activeMsgs, item)
 				}
@@ -3863,9 +3944,16 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 			m.activeMsgs = nil
 			m.mu.Lock()
 			if chat, exists := m.unreadChats[targetID]; exists {
+				seenIDs := make(map[string]bool, len(chat.Messages))
 				for _, item := range chat.Messages {
 					if m.cfg.IsReactionsDisabled() && item.Type == domain.MessageTypeReaction {
 						continue
+					}
+					if item.ID != "" && seenIDs[item.ID] {
+						continue
+					}
+					if item.ID != "" {
+						seenIDs[item.ID] = true
 					}
 					m.activeMsgs = append(m.activeMsgs, item)
 				}
@@ -4569,7 +4657,9 @@ func (m *Model) renderUnreadListView() []string {
 					}
 				}
 
-				if last.IsEdit {
+				if last.IsRevoke {
+					clean = "[Deleted for everyone] " + clean
+				} else if last.IsEdit {
 					clean = "[EDIT] " + clean
 				}
 
@@ -4836,7 +4926,7 @@ func (m *Model) renderChatView() []string {
 				bodyPrefix = "  " + m.styles.BodyPrefixSelect.Render("┃ ")
 			}
 
-			if msg.QuotedText != "" || msg.QuotedID != "" {
+			if msg.QuotedText != "" || msg.QuotedID != "" || msg.IsRevoke {
 				quoteContent := msg.QuotedText
 				quoteSender := msg.QuotedSender
 				if quoteContent == "" {
@@ -4871,7 +4961,9 @@ func (m *Model) renderChatView() []string {
 				}
 				if quoteContent == "" {
 					if quoteSender != "" {
-						if msg.IsEdit {
+						if msg.IsRevoke {
+							quoteContent = ""
+						} else if msg.IsEdit {
 							quoteContent = quoteSender
 						} else if msg.Type == domain.MessageTypeReaction {
 							quoteContent = "Reacted to " + quoteSender
@@ -4879,7 +4971,9 @@ func (m *Model) renderChatView() []string {
 							quoteContent = "Replying to " + quoteSender
 						}
 					} else {
-						if msg.IsEdit {
+						if msg.IsRevoke {
+							quoteContent = ""
+						} else if msg.IsEdit {
 							quoteContent = "message"
 						} else if msg.Type == domain.MessageTypeReaction {
 							quoteContent = "[Reacted to message]"
@@ -4888,7 +4982,9 @@ func (m *Model) renderChatView() []string {
 						}
 					}
 				} else if quoteSender != "" && !strings.HasPrefix(quoteContent, quoteSender+":") && !strings.HasPrefix(quoteContent, "Replying to ") && !strings.HasPrefix(quoteContent, "Reacted to ") {
-					quoteContent = quoteSender + ": " + quoteContent
+					if !msg.IsRevoke {
+						quoteContent = quoteSender + ": " + quoteContent
+					}
 				}
 
 				quotePreview := strings.ReplaceAll(m.formatMentions(quoteContent), "\n", " ")
@@ -4897,7 +4993,15 @@ func (m *Model) renderChatView() []string {
 					quotePreview = quotePreview[:maxQuoteW-3] + "..."
 				}
 				var quoteLine string
-				if msg.IsEdit {
+				if msg.IsRevoke {
+					revokeTag := m.styles.RevokeTag.Render("[Deleted for everyone]")
+					if quoteContent != "" && quoteContent != msg.Body {
+						cleanText := strings.TrimPrefix(quotePreview, "[Deleted for everyone] ")
+						quoteLine = m.styles.QuoteLinePrefix.Render("┌─ ") + revokeTag + " " + m.styles.QuoteLineClean.Render(cleanText)
+					} else {
+						quoteLine = m.styles.QuoteLinePrefix.Render("┌─ ") + revokeTag
+					}
+				} else if msg.IsEdit {
 					cleanText := strings.TrimPrefix(quotePreview, "[EDIT] ")
 					editTag := m.styles.EditTag.Render("[EDIT] ")
 					quoteLine = m.styles.QuoteLinePrefix.Render("┌─ ") + editTag + m.styles.QuoteLineClean.Render(cleanText)

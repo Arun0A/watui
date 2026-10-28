@@ -49,6 +49,7 @@ type Theme struct {
 	TextMuted   string `json:"text_muted" yaml:"text_muted"`
 	QuotePrefix string `json:"quote_prefix" yaml:"quote_prefix"`
 	EditTag     string `json:"edit_tag" yaml:"edit_tag"`
+	RevokeTag   string `json:"revoke_tag" yaml:"revoke_tag"`
 
 	// Input Box & Mentions
 	InputText        string `json:"input_text" yaml:"input_text"`
@@ -104,6 +105,7 @@ func DefaultTheme() Theme {
 		TextMuted:   "#A6ADC8",
 		QuotePrefix: "#6C7086",
 		EditTag:     "#FAB387",
+		RevokeTag:   "#F38BA8",
 
 		InputText:        "#CDD6F4",
 		InputPrompt:      "#89DCEB",
@@ -148,6 +150,7 @@ type Styles struct {
 	BodyPrefixCursor    lipgloss.Style
 	BodyPrefixSelect    lipgloss.Style
 	EditTag             lipgloss.Style
+	RevokeTag           lipgloss.Style
 	QuoteLinePrefix     lipgloss.Style
 	QuoteLineClean      lipgloss.Style
 	ReplyBarPrompt      lipgloss.Style
@@ -269,6 +272,10 @@ func MakeStyles(t Theme) Styles {
 		EditTag: lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color(t.EditTag)),
+
+		RevokeTag: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color(t.RevokeTag)),
 
 		QuoteLinePrefix: lipgloss.NewStyle().
 			Foreground(lipgloss.Color(t.QuotePrefix)),
@@ -534,6 +541,7 @@ func LoadTheme(cfg *config.Config) (Theme, string) {
 	assign(&theme.TextMuted, "text_muted")
 	assign(&theme.QuotePrefix, "quote_prefix")
 	assign(&theme.EditTag, "edit_tag")
+	assign(&theme.RevokeTag, "revoke_tag")
 
 	// Input Box & Mentions
 	assign(&theme.InputText, "input_text")
