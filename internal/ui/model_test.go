@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,9 +20,11 @@ import (
 )
 
 type mockAdapter struct {
+	mu                    sync.RWMutex
 	msgHandler            domain.MessageHandler
 	statusHandler         domain.StatusHandler
 	archivedChats         map[string]bool
+	archivedHandler       func(string, bool)
 	mutedChats            map[string]bool
 	lastMuteDuration      time.Duration
 	lastSentText          string
@@ -75,6 +78,8 @@ func (m *mockAdapter) GetUnreadMessages(ctx context.Context) ([]domain.Message, 
 	return nil, nil
 }
 func (m *mockAdapter) DismissUnread(ctx context.Context, chatID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.dismissedChats = append(m.dismissedChats, chatID)
 	return nil
 }
@@ -82,12 +87,16 @@ func (m *mockAdapter) Sync(ctx context.Context) error                      { ret
 func (m *mockAdapter) OnChatDismissed(h func(chatID string))               {}
 func (m *mockAdapter) EnsureGroupNames(ctx context.Context, jids []string) {}
 func (m *mockAdapter) IsChatArchived(chatID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if m.archivedChats != nil {
 		return m.archivedChats[chatID]
 	}
 	return false
 }
 func (m *mockAdapter) GetArchivedChats() map[string]bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	res := make(map[string]bool)
 	for k, v := range m.archivedChats {
 		res[k] = v
@@ -95,6 +104,7 @@ func (m *mockAdapter) GetArchivedChats() map[string]bool {
 	return res
 }
 func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
+	m.mu.Lock()
 	if m.archivedChats == nil {
 		m.archivedChats = make(map[string]bool)
 	}
@@ -103,22 +113,43 @@ func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archiv
 	} else {
 		delete(m.archivedChats, chatID)
 	}
+	handler := m.archivedHandler
+	m.mu.Unlock()
+	if handler != nil {
+		handler(chatID, archived)
+	}
 	return nil
 }
+func (m *mockAdapter) OnChatArchived(h func(chatID string, archived bool)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.archivedHandler = h
+}
 func (m *mockAdapter) IsChatMuted(chatID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if m.mutedChats != nil {
 		return m.mutedChats[chatID]
 	}
 	return false
 }
 func (m *mockAdapter) GetMutedChats() map[string]bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	res := make(map[string]bool)
 	for k, v := range m.mutedChats {
 		res[k] = v
 	}
 	return res
 }
+func (m *mockAdapter) getLastMuteDuration() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastMuteDuration
+}
 func (m *mockAdapter) SetChatMuted(ctx context.Context, chatID string, muted bool, duration time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.mutedChats == nil {
 		m.mutedChats = make(map[string]bool)
 	}
@@ -131,12 +162,16 @@ func (m *mockAdapter) SetChatMuted(ctx context.Context, chatID string, muted boo
 	return nil
 }
 func (m *mockAdapter) GetChatEphemeralTimer(chatID string) uint32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if m.ephemeralChats != nil {
 		return m.ephemeralChats[chatID]
 	}
 	return 0
 }
 func (m *mockAdapter) GetEphemeralChats() map[string]uint32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	res := make(map[string]uint32)
 	for k, v := range m.ephemeralChats {
 		res[k] = v
@@ -144,9 +179,12 @@ func (m *mockAdapter) GetEphemeralChats() map[string]uint32 {
 	return res
 }
 func (m *mockAdapter) OnChatEphemeral(h func(chatID string, timer uint32)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.ephemeralHandler = h
 }
 func (m *mockAdapter) SetChatDisappearingTimer(ctx context.Context, chatID string, timer time.Duration) error {
+	m.mu.Lock()
 	if m.ephemeralChats == nil {
 		m.ephemeralChats = make(map[string]uint32)
 	}
@@ -156,8 +194,10 @@ func (m *mockAdapter) SetChatDisappearingTimer(ctx context.Context, chatID strin
 	} else {
 		delete(m.ephemeralChats, chatID)
 	}
-	if m.ephemeralHandler != nil {
-		m.ephemeralHandler(chatID, timerSec)
+	handler := m.ephemeralHandler
+	m.mu.Unlock()
+	if handler != nil {
+		handler(chatID, timerSec)
 	}
 	return nil
 }
@@ -1982,6 +2022,132 @@ func TestArchiveUnarchiveShiftA(t *testing.T) {
 	}
 	if len(m.chatOrder) != 2 {
 		t.Fatalf("Expected both chats back in active unread view, got %d", len(m.chatOrder))
+	}
+}
+
+func TestRemoteArchiveReflectedInModel(t *testing.T) {
+	adapter := &mockAdapter{
+		archivedChats: make(map[string]bool),
+	}
+	m := NewModel(context.Background(), adapter)
+	m.width = 100
+	m.height = 30
+
+	m.handleIncomingMessage(domain.Message{
+		ID:         "M1",
+		ChatID:     "friend@s.whatsapp.net",
+		ChatName:   "Friend",
+		Body:       "Hello",
+		Timestamp:  time.Now(),
+		Sender:     "friend@s.whatsapp.net",
+		SenderName: "Friend",
+	})
+
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != "friend@s.whatsapp.net" {
+		t.Fatalf("Expected friend in active chat list")
+	}
+
+	// 1. WhatsApp official client archives the chat remotely
+	adapter.archivedChats["friend@s.whatsapp.net"] = true
+	_, _ = m.Update(archiveUpdateMsg{
+		ChatID:   "friend@s.whatsapp.net",
+		Archived: true,
+	})
+
+	// Model should immediately reflect the archived state
+	if !m.unreadChats["friend@s.whatsapp.net"].IsArchived {
+		t.Errorf("Expected chat to have IsArchived=true")
+	}
+	if len(m.chatOrder) != 0 {
+		t.Errorf("Expected 0 active chats after remote archive, got %d", len(m.chatOrder))
+	}
+
+	// In archived view ('a'), chat is present
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.showArchived {
+		t.Fatalf("Expected showArchived to be true")
+	}
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != "friend@s.whatsapp.net" {
+		t.Fatalf("Expected friend in archived view")
+	}
+
+	// 2. WhatsApp official client unarchives the chat remotely
+	adapter.archivedChats["friend@s.whatsapp.net"] = false
+	_, _ = m.Update(archiveUpdateMsg{
+		ChatID:   "friend@s.whatsapp.net",
+		Archived: false,
+	})
+
+	// Model should immediately reflect the unarchived state
+	if m.unreadChats["friend@s.whatsapp.net"].IsArchived {
+		t.Errorf("Expected chat to have IsArchived=false")
+	}
+	// In archived view, it should no longer be present
+	if len(m.chatOrder) != 0 {
+		t.Errorf("Expected 0 chats in archived view after remote unarchive, got %d", len(m.chatOrder))
+	}
+
+	// Exit archived view back to normal view
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != "friend@s.whatsapp.net" {
+		t.Fatalf("Expected friend back in normal chat list after remote unarchive")
+	}
+}
+
+func TestArchiveZeroMessagesChat(t *testing.T) {
+	adapter := &mockAdapter{
+		archivedChats: make(map[string]bool),
+	}
+	m := NewModel(context.Background(), adapter)
+	m.width = 100
+	m.height = 30
+
+	// Pinned chat with 0 unread messages
+	m.unreadChats["pinned@s.whatsapp.net"] = &UnreadChat{
+		ChatID:   "pinned@s.whatsapp.net",
+		Name:     "Pinned Friend",
+		IsPinned: true,
+	}
+	m.sortChatOrderLocked()
+
+	if len(m.chatOrder) != 1 {
+		t.Fatalf("Expected 1 chat in active list")
+	}
+
+	// Archive with Shift+A
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+
+	// Chat should NOT be deleted from m.unreadChats!
+	chat, exists := m.unreadChats["pinned@s.whatsapp.net"]
+	if !exists || chat == nil {
+		t.Fatalf("Expected chat to remain in unreadChats after archiving, even with 0 messages")
+	}
+	if !chat.IsArchived {
+		t.Errorf("Expected chat.IsArchived to be true")
+	}
+	if chat.IsPinned {
+		t.Errorf("Expected chat.IsPinned to be false")
+	}
+	if len(m.chatOrder) != 0 {
+		t.Errorf("Expected active list to be empty after archiving")
+	}
+
+	// Press 'a' to enter archived view
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != "pinned@s.whatsapp.net" {
+		t.Fatalf("Expected archived chat in archived list")
+	}
+
+	// Unarchive with Shift+A
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	if chat.IsArchived {
+		t.Errorf("Expected chat.IsArchived to be false after unarchiving")
+	}
+
+	// Exit archived view
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(m.chatOrder) != 1 || m.chatOrder[0] != "pinned@s.whatsapp.net" {
+		t.Fatalf("Expected chat back in active list after unarchiving")
 	}
 }
 
@@ -5246,11 +5412,11 @@ theme: dark
 	if model.promptGlobalMute {
 		t.Errorf("Expected promptGlobalMute to be false after choosing 1")
 	}
-	if !mock.mutedChats[testChatID] {
+	if !mock.IsChatMuted(testChatID) {
 		t.Errorf("Expected mock.mutedChats to contain %s", testChatID)
 	}
-	if mock.lastMuteDuration != 1*time.Hour {
-		t.Errorf("Expected lastMuteDuration to be 1h, got %v", mock.lastMuteDuration)
+	if mock.getLastMuteDuration() != 1*time.Hour {
+		t.Errorf("Expected lastMuteDuration to be 1h, got %v", mock.getLastMuteDuration())
 	}
 	if !strings.Contains(model.previewStatus, "1 hour globally") {
 		t.Errorf("Expected previewStatus to mention '1 hour globally', got %q", model.previewStatus)
@@ -5262,7 +5428,7 @@ theme: dark
 	if model.promptGlobalMute {
 		t.Errorf("Expected pressing Shift+M on muted chat to toggle off directly without prompt")
 	}
-	if mock.mutedChats[testChatID] {
+	if mock.IsChatMuted(testChatID) {
 		t.Errorf("Expected mock.mutedChats to not contain %s after toggle off", testChatID)
 	}
 	if !strings.Contains(model.previewStatus, "Unmuted Alice globally") {
@@ -5275,8 +5441,8 @@ theme: dark
 	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
 	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	time.Sleep(10 * time.Millisecond)
-	if mock.lastMuteDuration != 8*time.Hour {
-		t.Errorf("Expected lastMuteDuration to be 8h, got %v", mock.lastMuteDuration)
+	if mock.getLastMuteDuration() != 8*time.Hour {
+		t.Errorf("Expected lastMuteDuration to be 8h, got %v", mock.getLastMuteDuration())
 	}
 	if !strings.Contains(model.previewStatus, "8 hours globally") {
 		t.Errorf("Expected previewStatus to mention '8 hours globally', got %q", model.previewStatus)
@@ -5290,8 +5456,8 @@ theme: dark
 	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
 	model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
 	time.Sleep(10 * time.Millisecond)
-	if mock.lastMuteDuration != 0 {
-		t.Errorf("Expected lastMuteDuration to be 0 (forever), got %v", mock.lastMuteDuration)
+	if mock.getLastMuteDuration() != 0 {
+		t.Errorf("Expected lastMuteDuration to be 0 (forever), got %v", mock.getLastMuteDuration())
 	}
 	if !strings.Contains(model.previewStatus, "permanently globally") {
 		t.Errorf("Expected previewStatus to mention 'permanently globally', got %q", model.previewStatus)

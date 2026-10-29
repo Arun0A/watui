@@ -101,6 +101,10 @@ func NewServer(adapter domain.WhatsAppAdapter, dbPath string) (*Server, error) {
 		s.BroadcastEvent("dismiss", chatID)
 	})
 
+	adapter.OnChatArchived(func(chatID string, archived bool) {
+		s.BroadcastEvent("archived", SetChatArchivedParams{ChatID: chatID, Archived: archived})
+	})
+
 	adapter.OnChatEphemeral(func(chatID string, timer uint32) {
 		s.BroadcastEvent("ephemeral", SetChatEphemeralParams{ChatID: chatID, Timer: timer})
 	})

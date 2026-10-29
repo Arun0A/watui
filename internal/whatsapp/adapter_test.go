@@ -1744,6 +1744,15 @@ func TestEventsArchiveHandling(t *testing.T) {
 
 	targetJID := types.NewJID("111222333", "s.whatsapp.net")
 
+	var notifiedChat string
+	var notifiedArchived bool
+	var notifyCount int
+	adapter.OnChatArchived(func(chatID string, archived bool) {
+		notifiedChat = chatID
+		notifiedArchived = archived
+		notifyCount++
+	})
+
 	// 1. Archive event (true)
 	evtTrue := &events.Archive{
 		JID: targetJID,
@@ -1755,6 +1764,9 @@ func TestEventsArchiveHandling(t *testing.T) {
 
 	if !adapter.IsChatArchived(targetJID.String()) {
 		t.Errorf("Expected %s to be archived after Archive(true) event", targetJID.String())
+	}
+	if notifyCount == 0 || notifiedChat != targetJID.String() || !notifiedArchived {
+		t.Errorf("Expected OnChatArchived(%s, true), got count=%d, chat=%s, arch=%v", targetJID.String(), notifyCount, notifiedChat, notifiedArchived)
 	}
 
 	// 2. Archive event (false)
@@ -1768,6 +1780,9 @@ func TestEventsArchiveHandling(t *testing.T) {
 
 	if adapter.IsChatArchived(targetJID.String()) {
 		t.Errorf("Expected %s to NOT be archived after Archive(false) event", targetJID.String())
+	}
+	if notifyCount < 2 || notifiedChat != targetJID.String() || notifiedArchived {
+		t.Errorf("Expected OnChatArchived(%s, false), got count=%d, chat=%s, arch=%v", targetJID.String(), notifyCount, notifiedChat, notifiedArchived)
 	}
 }
 

@@ -103,6 +103,7 @@ func (m *mockCLIAdapter) GetArchivedChats() map[string]bool                   { 
 func (m *mockCLIAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
 	return nil
 }
+func (m *mockCLIAdapter) OnChatArchived(handler func(chatID string, archived bool)) {}
 func (m *mockCLIAdapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {
 	return nil
 }

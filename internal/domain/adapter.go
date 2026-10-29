@@ -93,6 +93,9 @@ type WhatsAppAdapter interface {
 	// SetChatArchived archives or unarchives the specified chat JID in WhatsApp.
 	SetChatArchived(ctx context.Context, chatID string, archived bool) error
 
+	// OnChatArchived registers a listener triggered when a chat's archive status changes.
+	OnChatArchived(handler func(chatID string, archived bool))
+
 	// IsChatMuted checks whether the specified chat JID is muted globally in WhatsApp.
 	IsChatMuted(chatID string) bool
 

@@ -35,8 +35,9 @@ type RemoteAdapter struct {
 	statusMu      sync.RWMutex
 	currentStatus domain.ConnectionStatus
 
-	archivedMu    sync.RWMutex
-	archivedChats map[string]bool
+	archivedMu       sync.RWMutex
+	archivedChats    map[string]bool
+	archivedHandlers []func(chatID string, archived bool)
 
 	mutedMu    sync.RWMutex
 	mutedChats map[string]bool
@@ -203,7 +204,14 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 		if err := json.Unmarshal(resp.Result, &arch); err == nil && len(arch) > 0 {
 			r.archivedMu.Lock()
 			r.archivedChats = arch
+			handlers := make([]func(string, bool), len(r.archivedHandlers))
+			copy(handlers, r.archivedHandlers)
 			r.archivedMu.Unlock()
+			for k, v := range arch {
+				for _, h := range handlers {
+					h(k, v)
+				}
+			}
 		} else {
 			var p SetChatArchivedParams
 			if err := json.Unmarshal(resp.Result, &p); err == nil && p.ChatID != "" {
@@ -216,7 +224,12 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 				} else {
 					delete(r.archivedChats, p.ChatID)
 				}
+				handlers := make([]func(string, bool), len(r.archivedHandlers))
+				copy(handlers, r.archivedHandlers)
 				r.archivedMu.Unlock()
+				for _, h := range handlers {
+					h(p.ChatID, p.Archived)
+				}
 			}
 		}
 
@@ -551,6 +564,13 @@ func (r *RemoteAdapter) SetChatArchived(ctx context.Context, chatID string, arch
 	r.archivedMu.Unlock()
 
 	return r.call(ctx, "set_chat_archived", SetChatArchivedParams{ChatID: chatID, Archived: archived}, nil)
+}
+
+// OnChatArchived registers a listener for chat archive status updates.
+func (r *RemoteAdapter) OnChatArchived(handler func(chatID string, archived bool)) {
+	r.archivedMu.Lock()
+	defer r.archivedMu.Unlock()
+	r.archivedHandlers = append(r.archivedHandlers, handler)
 }
 
 func (r *RemoteAdapter) DeleteMessage(ctx context.Context, chatID string, messageID string, deleteForEveryone bool, sender ...string) error {

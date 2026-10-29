@@ -14,6 +14,7 @@ type mockAdapter struct {
 	statusHandler   domain.StatusHandler
 	contactsHandler func([]domain.Contact)
 	dismissHandler  func(string)
+	archivedHandler func(string, bool)
 }
 
 func (m *mockAdapter) Connect(ctx context.Context) error { return nil }
@@ -60,6 +61,7 @@ func (m *mockAdapter) GetArchivedChats() map[string]bool {
 func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archived bool) error {
 	return nil
 }
+func (m *mockAdapter) OnChatArchived(h func(string, bool)) { m.archivedHandler = h }
 func (m *mockAdapter) IsChatMuted(chatID string) bool { return chatID == "muted@g.us" }
 func (m *mockAdapter) GetMutedChats() map[string]bool {
 	return map[string]bool{"muted@g.us": true}
@@ -297,5 +299,67 @@ func TestIPCReloadConfig(t *testing.T) {
 
 	if !reloaded {
 		t.Errorf("Expected reloaded to be true, got false")
+	}
+}
+
+func TestIPCOnChatArchived(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "watui.db")
+
+	mock := &mockAdapter{}
+	server, err := NewServer(mock, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	client, err := ConnectRemote(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.Disconnect()
+
+	type archEvt struct {
+		chatID   string
+		archived bool
+	}
+	archivedCh := make(chan archEvt, 2)
+
+	client.OnChatArchived(func(chatID string, archived bool) {
+		archivedCh <- archEvt{chatID, archived}
+	})
+
+	// Simulate WhatsApp archiving chat remotely (e.g. from official client)
+	if mock.archivedHandler != nil {
+		mock.archivedHandler("remotegroup@g.us", true)
+	} else {
+		t.Fatal("mock.archivedHandler was not registered by daemon server")
+	}
+
+	select {
+	case evt := <-archivedCh:
+		if evt.chatID != "remotegroup@g.us" || !evt.archived {
+			t.Errorf("Unexpected archive event: %+v", evt)
+		}
+		if !client.IsChatArchived("remotegroup@g.us") {
+			t.Errorf("Expected client.IsChatArchived to be true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for remote archive event")
+	}
+
+	// Simulate unarchiving remotely
+	mock.archivedHandler("remotegroup@g.us", false)
+
+	select {
+	case evt := <-archivedCh:
+		if evt.chatID != "remotegroup@g.us" || evt.archived {
+			t.Errorf("Unexpected unarchive event: %+v", evt)
+		}
+		if client.IsChatArchived("remotegroup@g.us") {
+			t.Errorf("Expected client.IsChatArchived to be false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for remote unarchive event")
 	}
 }

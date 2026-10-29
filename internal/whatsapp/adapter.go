@@ -82,8 +82,9 @@ type Adapter struct {
 	mediaMu    sync.RWMutex
 	mediaCache map[string]*waE2E.Message
 
-	archivedMu    sync.RWMutex
-	archivedChats map[string]bool
+	archivedMu       sync.RWMutex
+	archivedChats    map[string]bool
+	archivedHandlers []func(chatID string, archived bool)
 
 	mutedMu    sync.RWMutex
 	mutedChats map[string]time.Time
@@ -633,6 +634,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	client.InitialAutoReconnect = true
 	client.EnableAutoReconnect = true
+	client.EmitAppStateEventsOnFullSync = true
 	localDB := sharedDB
 
 	security.EnsureSecurePermissions(cfg.DBPath)
@@ -794,6 +796,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 	}
 
 	go adapter.startSleepWakeMonitor(adapterCtx)
+	go adapter.startAppStateSyncMonitor(adapterCtx)
 
 	return adapter, nil
 }
@@ -955,6 +958,22 @@ func (a *Adapter) startSleepWakeMonitor(ctx context.Context) {
 	}
 }
 
+func (a *Adapter) startAppStateSyncMonitor(ctx context.Context) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if a.client != nil && a.client.IsConnected() {
+				_ = a.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularLow)
+			}
+		}
+	}
+}
+
 func (a *Adapter) handleSystemResume(elapsedMs int64) {
 	if a.client == nil || !a.IsLoggedIn() {
 		return
@@ -1065,13 +1084,44 @@ func (a *Adapter) loadArchivedChats() {
 	_ = rows.Err()
 
 	a.archivedMu.Lock()
-	if a.archivedChats == nil {
-		a.archivedChats = make(map[string]bool)
-	}
-	for k, v := range archived {
-		a.archivedChats[k] = v
-	}
+	oldArchived := a.archivedChats
+	a.archivedChats = archived
 	a.archivedMu.Unlock()
+
+	// Notify any status changes discovered during load/sync
+	if oldArchived != nil {
+		for cID := range oldArchived {
+			if !archived[cID] {
+				a.notifyChatArchived(cID, false)
+			}
+		}
+		for cID := range archived {
+			if !oldArchived[cID] {
+				a.notifyChatArchived(cID, true)
+			}
+		}
+	}
+}
+
+// OnChatArchived registers a listener triggered when a chat's archive status changes.
+func (a *Adapter) OnChatArchived(handler func(chatID string, archived bool)) {
+	a.archivedMu.Lock()
+	defer a.archivedMu.Unlock()
+	a.archivedHandlers = append(a.archivedHandlers, handler)
+}
+
+func (a *Adapter) notifyChatArchived(chatID string, archived bool) {
+	if chatID == "" {
+		return
+	}
+	a.archivedMu.RLock()
+	handlers := make([]func(chatID string, archived bool), len(a.archivedHandlers))
+	copy(handlers, a.archivedHandlers)
+	a.archivedMu.RUnlock()
+
+	for _, h := range handlers {
+		h(chatID, archived)
+	}
 }
 
 // IsChatArchived checks whether the specified chat JID is archived in WhatsApp.
@@ -1130,10 +1180,25 @@ func (a *Adapter) SetChatArchived(ctx context.Context, chatID string, archived b
 	if err != nil {
 		return err
 	}
+	jid = jid.ToNonAD()
 	clean := jid.String()
+	rawJID := chatID
 	if idx := strings.Index(clean, ":"); idx != -1 {
 		if atIdx := strings.Index(clean, "@"); atIdx != -1 {
 			clean = clean[:idx] + clean[atIdx:]
+		}
+	}
+
+	var altJID types.JID
+	if strings.HasSuffix(clean, "@lid") {
+		lidUser := strings.TrimSuffix(clean, "@lid")
+		if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+			altJID = types.NewJID(pn, types.DefaultUserServer)
+		}
+	} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+		phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+		if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+			altJID = types.NewJID(lid, types.HiddenUserServer)
 		}
 	}
 
@@ -1144,18 +1209,84 @@ func (a *Adapter) SetChatArchived(ctx context.Context, chatID string, archived b
 	if archived {
 		a.archivedChats[chatID] = true
 		a.archivedChats[clean] = true
+		if !altJID.IsEmpty() {
+			a.archivedChats[altJID.String()] = true
+		}
 	} else {
 		delete(a.archivedChats, chatID)
 		delete(a.archivedChats, clean)
+		if !altJID.IsEmpty() {
+			delete(a.archivedChats, altJID.String())
+		}
 	}
 	a.archivedMu.Unlock()
+
+	if a.client != nil && a.client.Store != nil && a.client.Store.ChatSettings != nil {
+		_ = a.client.Store.ChatSettings.PutArchived(ctx, jid, archived)
+		if !altJID.IsEmpty() {
+			_ = a.client.Store.ChatSettings.PutArchived(ctx, altJID, archived)
+		}
+	}
+	if a.localDB != nil {
+		archivedVal := 0
+		if archived {
+			archivedVal = 1
+		}
+		_, _ = a.localDB.Exec(`UPDATE whatsmeow_chat_settings SET archived = ? WHERE chat_jid = ? OR chat_jid = ?`, archivedVal, clean, chatID)
+		if !altJID.IsEmpty() {
+			_, _ = a.localDB.Exec(`UPDATE whatsmeow_chat_settings SET archived = ? WHERE chat_jid = ?`, archivedVal, altJID.String())
+		}
+		if archived {
+			var count int
+			_ = a.localDB.QueryRow(`SELECT COUNT(*) FROM whatsmeow_chat_settings WHERE chat_jid = ?`, clean).Scan(&count)
+			if count == 0 {
+				var ourJID string
+				if a.client != nil && a.client.Store != nil && a.client.Store.ID != nil {
+					ourJID = a.client.Store.ID.ToNonAD().String()
+				} else {
+					_ = a.localDB.QueryRow(`SELECT our_jid FROM whatsmeow_chat_settings LIMIT 1`).Scan(&ourJID)
+				}
+				if ourJID != "" {
+					_, _ = a.localDB.Exec(`INSERT OR IGNORE INTO whatsmeow_chat_settings (our_jid, chat_jid, archived) VALUES (?, ?, 1)`, ourJID, clean)
+				}
+			}
+		}
+	}
+
+	a.notifyChatArchived(clean, archived)
+	if rawJID != clean {
+		a.notifyChatArchived(rawJID, archived)
+	}
+	if !altJID.IsEmpty() {
+		a.notifyChatArchived(altJID.String(), archived)
+	}
 
 	if a.client == nil {
 		return errors.New("whatsapp client not initialized")
 	}
 
 	patch := appstate.BuildArchive(jid, archived, time.Time{}, nil)
-	return a.client.SendAppState(ctx, patch)
+	sendErr := a.client.SendAppState(ctx, patch)
+	if sendErr != nil {
+		// If SendAppState failed (e.g. 409 conflict, version mismatch, or LTHash desync),
+		// resync app state to catch up on latest version/hash and retry sending the patch.
+		_ = a.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularLow)
+		sendErr = a.client.SendAppState(ctx, patch)
+	}
+	if sendErr != nil && strings.Contains(sendErr.Error(), "failed to fetch app state after sending update") {
+		// The patch was accepted by WhatsApp server, post-send fetch failed
+		_ = a.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularLow)
+		sendErr = nil
+	}
+	if !altJID.IsEmpty() {
+		patchAlt := appstate.BuildArchive(altJID, archived, time.Time{}, nil)
+		altErr := a.client.SendAppState(ctx, patchAlt)
+		if altErr != nil {
+			_ = a.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularLow)
+			_ = a.client.SendAppState(ctx, patchAlt)
+		}
+	}
+	return sendErr
 }
 
 func (a *Adapter) loadMutedChats() {
@@ -3035,9 +3166,87 @@ func (a *Adapter) Sync(ctx context.Context) error {
 			return errors.New("client is reconnecting")
 		}
 	}
-	// Fetch regular_low (contains read/unread statuses) and regular_high
-	_ = a.client.FetchAppState(ctx, appstate.WAPatchRegularLow, false, false)
-	_ = a.client.FetchAppState(ctx, appstate.WAPatchRegularHigh, false, false)
+	// Fetch regular_low (contains read/unread statuses and archive status) and regular_high
+	_ = a.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularLow)
+	_ = a.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularHigh)
+	a.loadArchivedChats()
+	return nil
+}
+
+// FetchAppStateCollection fetches a specific app state patch collection from WhatsApp.
+func (a *Adapter) FetchAppStateCollection(ctx context.Context, name appstate.WAPatchName, fullSync bool) error {
+	if a.client == nil {
+		return errors.New("client not initialized")
+	}
+	err := a.client.FetchAppState(ctx, name, fullSync, false)
+	a.loadArchivedChats()
+	return err
+}
+
+func (a *Adapter) GetRawClient() *whatsmeow.Client {
+	return a.client
+}
+
+
+// SyncAppStateRelaxed attempts standard FetchAppState, and if it fails due to LTHash verification failure or mismatch,
+// decodes both snapshot and delta patch mutations directly without aborting on LTHash mismatch so that chat archives,
+// unarchives, and read states are reconciled across clients.
+func (a *Adapter) SyncAppStateRelaxed(ctx context.Context, name appstate.WAPatchName) error {
+	if a.client == nil {
+		return errors.New("client not initialized")
+	}
+	err := a.client.FetchAppState(ctx, name, false, false)
+	if err == nil {
+		a.loadArchivedChats()
+		return nil
+	}
+
+	dangerous := a.client.DangerousInternals()
+	proc := appstate.NewProcessor(a.client.Store, a.client.Log)
+
+	version, hash, _ := a.client.Store.AppState.GetAppStateVersion(ctx, string(name))
+	state := appstate.HashState{Version: version, Hash: hash}
+	wantSnapshot := (version == 0)
+
+	hasMore := true
+	for hasMore {
+		patches, err := dangerous.FetchAppStatePatches(ctx, name, state.Version, wantSnapshot)
+		if err != nil {
+			if !wantSnapshot && version > 0 {
+				// Delta fetch from current version failed, fallback to full snapshot
+				wantSnapshot = true
+				state = appstate.HashState{}
+				continue
+			}
+			return fmt.Errorf("failed to fetch patches for %s: %w", name, err)
+		}
+		if patches == nil {
+			break
+		}
+		wantSnapshot = false
+		hasMore = patches.HasMorePatches
+
+		mutations, newState, err := proc.DecodePatches(ctx, patches, state, false)
+		if err != nil {
+			if !wantSnapshot && version > 0 {
+				// Delta decode failed, fallback to snapshot
+				wantSnapshot = true
+				state = appstate.HashState{}
+				continue
+			}
+			return fmt.Errorf("failed to decode patches for %s: %w", name, err)
+		}
+		state = newState
+
+		for _, mut := range mutations {
+			evt := dangerous.DispatchAppState(ctx, name, mut, true)
+			if evt != nil {
+				a.handleEvent(evt)
+			}
+		}
+	}
+
+	_ = a.client.Store.AppState.PutAppStateVersion(ctx, string(name), state.Version, state.Hash)
 	a.loadArchivedChats()
 	return nil
 }
@@ -3450,8 +3659,8 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		go a.refreshContactsCache(a.ctx)
 		go func() {
 			// Catch up on any app state mutations (e.g. chats read on other devices)
-			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularLow, false, false)
-			_ = a.client.FetchAppState(a.ctx, appstate.WAPatchRegularHigh, false, false)
+			_ = a.SyncAppStateRelaxed(a.ctx, appstate.WAPatchRegularLow)
+			_ = a.SyncAppStateRelaxed(a.ctx, appstate.WAPatchRegularHigh)
 			a.loadArchivedChats()
 			a.loadMutedChats()
 			a.loadEphemeralChats()
@@ -3473,6 +3682,13 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 		go a.loadMutedChats()
 		go a.loadEphemeralChats()
 		go a.refreshContactsCache(a.ctx)
+
+	case *events.AppStateSyncError:
+		if evt.Name == appstate.WAPatchRegularLow || evt.Name == appstate.WAPatchRegularHigh {
+			go func() {
+				_ = a.SyncAppStateRelaxed(a.ctx, evt.Name)
+			}()
+		}
 
 	case *events.Archive:
 		if evt.Action != nil {
@@ -3531,7 +3747,39 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 					archivedVal = 1
 				}
 				_, _ = a.localDB.Exec(`UPDATE whatsmeow_chat_settings SET archived = ? WHERE chat_jid = ? OR chat_jid = ?`, archivedVal, chatID, rawJID)
+				if isArchived {
+					var count int
+					_ = a.localDB.QueryRow(`SELECT COUNT(*) FROM whatsmeow_chat_settings WHERE chat_jid = ?`, chatID).Scan(&count)
+					if count == 0 {
+						var ourJID string
+						if a.client != nil && a.client.Store != nil && a.client.Store.ID != nil {
+							ourJID = a.client.Store.ID.ToNonAD().String()
+						} else {
+							_ = a.localDB.QueryRow(`SELECT our_jid FROM whatsmeow_chat_settings LIMIT 1`).Scan(&ourJID)
+						}
+						if ourJID != "" {
+							_, _ = a.localDB.Exec(`INSERT OR IGNORE INTO whatsmeow_chat_settings (our_jid, chat_jid, archived) VALUES (?, ?, 1)`, ourJID, chatID)
+						}
+					}
+				}
 			}
+
+			a.notifyChatArchived(clean, isArchived)
+			if rawJID != clean {
+				a.notifyChatArchived(rawJID, isArchived)
+			}
+			if strings.HasSuffix(clean, "@lid") {
+				lidUser := strings.TrimSuffix(clean, "@lid")
+				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+					a.notifyChatArchived(pn+"@s.whatsapp.net", isArchived)
+				}
+			} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+				phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+				if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+					a.notifyChatArchived(lid+"@lid", isArchived)
+				}
+			}
+
 			go a.refreshContactsCache(a.ctx)
 		}
 
@@ -3827,6 +4075,16 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 							}
 						}
 					}
+				}
+				a.notifyChatArchived(clean, isArchived)
+				if rawJID != clean {
+					a.notifyChatArchived(rawJID, isArchived)
+				}
+				if conv.GetPnJID() != "" {
+					a.notifyChatArchived(conv.GetPnJID(), isArchived)
+				}
+				if conv.GetLidJID() != "" {
+					a.notifyChatArchived(conv.GetLidJID(), isArchived)
 				}
 			}
 
