@@ -803,7 +803,7 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 // IsLoggedIn checks whether valid session credentials exist in SQLite.
 func (a *Adapter) IsLoggedIn() bool {
-	return a.client.Store.ID != nil
+	return a.client != nil && a.client.Store != nil && a.client.Store.ID != nil
 }
 
 // OnMessage registers an incoming message handler.
@@ -913,6 +913,31 @@ func (a *Adapter) Disconnect() {
 	a.setStatus(domain.StatusDisconnected)
 }
 
+// Logout unlinks the device session with WhatsApp servers, disconnects, and clears local session data.
+func (a *Adapter) Logout(ctx context.Context) error {
+	var logoutErr error
+	if a.client != nil && a.IsLoggedIn() {
+		if !a.client.IsConnected() {
+			_ = a.client.Connect()
+			_ = a.client.WaitForConnection(5 * time.Second)
+		}
+		if a.client.IsConnected() {
+			logoutErr = a.client.Logout(ctx)
+		}
+		if logoutErr != nil || !a.client.IsConnected() {
+			// If server-side unlink failed or client is offline, force delete the device store
+			if a.client.Store != nil {
+				_ = a.client.Store.Delete(ctx)
+			}
+			a.client.Disconnect()
+		}
+	}
+
+	a.Disconnect()
+	a.setStatus(domain.StatusLoggedOut)
+	return logoutErr
+}
+
 // ResetConnection disconnects the current socket and forces an immediate reconnection.
 func (a *Adapter) ResetConnection() {
 	if a.client == nil || !a.IsLoggedIn() {
@@ -967,7 +992,7 @@ func (a *Adapter) startAppStateSyncMonitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if a.client != nil && a.client.IsConnected() {
+			if a.client != nil && a.client.IsConnected() && a.IsLoggedIn() {
 				_ = a.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularLow)
 			}
 		}
@@ -3009,7 +3034,7 @@ func (a *Adapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]
 }
 
 func (a *Adapter) refreshContactsCache(ctx context.Context) {
-	if a.client == nil {
+	if a.client == nil || !a.IsLoggedIn() {
 		return
 	}
 
@@ -3157,7 +3182,7 @@ func (a *Adapter) notifyMessage(msg domain.Message) {
 
 // Sync explicitly pulls server updates (such as read state mutations) from WhatsApp.
 func (a *Adapter) Sync(ctx context.Context) error {
-	if a.client == nil {
+	if a.client == nil || !a.IsLoggedIn() {
 		return nil
 	}
 	if !a.client.IsConnected() {
@@ -3175,8 +3200,8 @@ func (a *Adapter) Sync(ctx context.Context) error {
 
 // FetchAppStateCollection fetches a specific app state patch collection from WhatsApp.
 func (a *Adapter) FetchAppStateCollection(ctx context.Context, name appstate.WAPatchName, fullSync bool) error {
-	if a.client == nil {
-		return errors.New("client not initialized")
+	if a.client == nil || !a.IsLoggedIn() {
+		return errors.New("client not initialized or not logged in")
 	}
 	err := a.client.FetchAppState(ctx, name, fullSync, false)
 	a.loadArchivedChats()
@@ -3192,8 +3217,8 @@ func (a *Adapter) GetRawClient() *whatsmeow.Client {
 // decodes both snapshot and delta patch mutations directly without aborting on LTHash mismatch so that chat archives,
 // unarchives, and read states are reconciled across clients.
 func (a *Adapter) SyncAppStateRelaxed(ctx context.Context, name appstate.WAPatchName) error {
-	if a.client == nil {
-		return errors.New("client not initialized")
+	if a.client == nil || !a.IsLoggedIn() {
+		return errors.New("client not initialized or not logged in")
 	}
 	err := a.client.FetchAppState(ctx, name, false, false)
 	if err == nil {
@@ -3655,6 +3680,10 @@ func (a *Adapter) DismissUnread(ctx context.Context, chatID string) error {
 func (a *Adapter) handleEvent(rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
+		if !a.IsLoggedIn() {
+			// Websocket connected for QR pairing, but device is not authenticated yet.
+			return
+		}
 		a.setStatus(domain.StatusConnected)
 		go a.refreshContactsCache(a.ctx)
 		go func() {
@@ -3668,22 +3697,40 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			_ = a.client.SendPresence(a.ctx, types.PresenceAvailable)
 		}()
 
+	case *events.PairSuccess:
+		a.setStatus(domain.StatusConnected)
+		go func() {
+			a.loadArchivedChats()
+			a.loadMutedChats()
+			a.loadEphemeralChats()
+			go a.refreshContactsCache(a.ctx)
+		}()
+
 	case *events.Disconnected:
 		a.setStatus(domain.StatusDisconnected)
 
 	case *events.AppState:
+		if !a.IsLoggedIn() {
+			return
+		}
 		go a.loadArchivedChats()
 		go a.loadMutedChats()
 		go a.loadEphemeralChats()
 		go a.refreshContactsCache(a.ctx)
 
 	case *events.AppStateSyncComplete:
+		if !a.IsLoggedIn() {
+			return
+		}
 		go a.loadArchivedChats()
 		go a.loadMutedChats()
 		go a.loadEphemeralChats()
 		go a.refreshContactsCache(a.ctx)
 
 	case *events.AppStateSyncError:
+		if !a.IsLoggedIn() {
+			return
+		}
 		if evt.Name == appstate.WAPatchRegularLow || evt.Name == appstate.WAPatchRegularHigh {
 			go func() {
 				_ = a.SyncAppStateRelaxed(a.ctx, evt.Name)

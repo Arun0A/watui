@@ -383,6 +383,11 @@ func (r *RemoteAdapter) Disconnect() {
 	_ = r.conn.Close()
 }
 
+func (r *RemoteAdapter) Logout(ctx context.Context) error {
+	defer r.Disconnect()
+	return r.call(ctx, "logout", nil, nil)
+}
+
 func (r *RemoteAdapter) IsLoggedIn() bool {
 	return true
 }

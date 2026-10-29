@@ -39,6 +39,9 @@ type WhatsAppAdapter interface {
 	// Disconnect gracefully closes the connection.
 	Disconnect()
 
+	// Logout unlinks the device session with WhatsApp servers, disconnects, and clears local session data.
+	Logout(ctx context.Context) error
+
 	// ResetConnection disconnects the current socket and forces an immediate reconnection.
 	ResetConnection()
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
@@ -1809,5 +1810,33 @@ func TestBiDirectionalLIDArchiveLookup(t *testing.T) {
 	}
 	if !adapter.IsChatArchived(lidChat) {
 		t.Errorf("Expected lidChat %s to be archived via reverse lookup", lidChat)
+	}
+}
+
+func TestSyncAppStateWhenNotLoggedIn(t *testing.T) {
+	// Adapter with no logged-in client
+	adapter := &Adapter{
+		currentStatus: domain.StatusWaitingQR,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := adapter.SyncAppStateRelaxed(ctx, appstate.WAPatchRegularLow); err == nil {
+		t.Errorf("expected error when calling SyncAppStateRelaxed while not logged in, got nil")
+	}
+
+	if err := adapter.FetchAppStateCollection(ctx, appstate.WAPatchRegularLow, false); err == nil {
+		t.Errorf("expected error when calling FetchAppStateCollection while not logged in, got nil")
+	}
+
+	if err := adapter.Sync(ctx); err != nil {
+		t.Errorf("expected nil when calling Sync while not logged in, got: %v", err)
+	}
+
+	// Connected event when not logged in must NOT overwrite StatusWaitingQR
+	adapter.handleEvent(&events.Connected{})
+	if adapter.currentStatus != domain.StatusWaitingQR {
+		t.Errorf("expected currentStatus to remain StatusWaitingQR, got %v", adapter.currentStatus)
 	}
 }

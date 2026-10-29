@@ -36,6 +36,12 @@ func (m *mockCLIAdapter) Disconnect() {
 	m.status = domain.StatusDisconnected
 }
 
+func (m *mockCLIAdapter) Logout(ctx context.Context) error {
+	m.status = domain.StatusLoggedOut
+	m.isLoggedIn = false
+	return nil
+}
+
 func (m *mockCLIAdapter) IsLoggedIn() bool {
 	return m.isLoggedIn
 }

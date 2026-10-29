@@ -44,6 +44,7 @@ func main() {
 	flag.BoolVar(daemonMode, "d", false, "Run in background notification daemon mode (shorthand)")
 	daemonWorker := flag.Bool("daemon-worker", false, "Internal background worker process")
 	clearClipboard := flag.Bool("clear-clipboard", false, "Clear all cached clipboard files and exit")
+	logoutFlag := flag.Bool("logout", false, "Log out the user, unlink the session, and clean up database and cached data")
 
 	configHelp := "Path to optional YAML or JSON config file (default: ./watui.yaml"
 	if runtime.GOOS != "windows" {
@@ -57,6 +58,7 @@ func main() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
 		fmt.Fprintf(out, "  -v, --version\n    \tPrint watui version and exit\n")
+		fmt.Fprintf(out, "  --logout\n    \tLog out of WhatsApp, unlink session, and clean up all database and cached data\n")
 		fmt.Fprintf(out, "  --clear-clipboard\n    \tClear all cached clipboard files and exit\n")
 		fmt.Fprintf(out, "  --no-tui <jid> <msg>\n    \tSend a message directly via CLI without launching TUI\n")
 		fmt.Fprintf(out, "  -cli\n    \tRun in headless CLI stream mode instead of interactive TUI\n")
@@ -90,6 +92,16 @@ func main() {
 		}
 	}
 	finalDBPath = config.ResolveDBPath(finalDBPath)
+
+	if *logoutFlag || (len(flag.Args()) > 0 && flag.Args()[0] == "logout") {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := runLogout(ctx, finalDBPath, appCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Logout failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *clearClipboard {
 		if err := ui.ClearClipboardCache(); err != nil {

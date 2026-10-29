@@ -494,6 +494,11 @@ func (s *Server) executeRequest(req RPCRequest) RPCResponse {
 			resp.Error = err.Error()
 		}
 
+	case "logout":
+		if err := s.adapter.Logout(reqCtx); err != nil {
+			resp.Error = err.Error()
+		}
+
 	case "get_chat_history":
 		var p GetChatHistoryParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
