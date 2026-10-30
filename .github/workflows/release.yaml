@@ -42,6 +42,8 @@ jobs:
             target: linux-arm64
             binary_name: watui
             ext: tar.gz
+            use_zig: true
+            zig_target: aarch64-linux-gnu
           - os: macos-latest
             goos: darwin
             goarch: amd64
@@ -66,6 +68,8 @@ jobs:
             target: windows-arm64
             binary_name: watui.exe
             ext: zip
+            use_zig: true
+            zig_target: aarch64-windows-gnu
 
     steps:
       - name: Checkout repository
@@ -76,6 +80,12 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+
+      - name: Set up Zig for cross-compilation
+        if: matrix.use_zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
 
       - name: Determine Version
         id: version
@@ -95,7 +105,14 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
           VERSION="${VERSION#v}"
-          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X watui/internal/version.Version=${VERSION}" -o "${{ matrix.binary_name }}" ./cmd/watui
+          export CGO_ENABLED=1
+          export GOOS="${{ matrix.goos }}"
+          export GOARCH="${{ matrix.goarch }}"
+          if [ "${{ matrix.use_zig }}" = "true" ]; then
+            export CC="zig cc -target ${{ matrix.zig_target }}"
+            export CXX="zig c++ -target ${{ matrix.zig_target }}"
+          fi
+          go build -trimpath -ldflags="-s -w -X watui/internal/version.Version=${VERSION}" -o "${{ matrix.binary_name }}" ./cmd/watui
 
       # -----------------------------------------------------------
       # Linux Packaging (.tar.gz)
