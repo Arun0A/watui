@@ -1944,6 +1944,68 @@ func TestArchivedChatsFilteringAndToggle(t *testing.T) {
 	}
 }
 
+func TestArchivedCountMatchesInsideAndOutside(t *testing.T) {
+	archivedMap := make(map[string]bool)
+	// 17 archived chats that have unread messages
+	for i := 1; i <= 17; i++ {
+		archivedMap[fmt.Sprintf("archived_%d@g.us", i)] = true
+	}
+	// 200 other archived chats that have NO unread messages
+	for i := 18; i <= 217; i++ {
+		archivedMap[fmt.Sprintf("ghost_archived_%d@g.us", i)] = true
+	}
+
+	adapter := &mockAdapter{
+		archivedChats: archivedMap,
+	}
+	m := NewModel(context.Background(), adapter)
+	m.width = 100
+	m.height = 30
+
+	// 17 unread messages arrive for the 17 unread archived chats
+	for i := 1; i <= 17; i++ {
+		m.handleIncomingMessage(domain.Message{
+			ID:         fmt.Sprintf("M_%d", i),
+			ChatID:     fmt.Sprintf("archived_%d@g.us", i),
+			ChatName:   fmt.Sprintf("Archived Chat %d", i),
+			Body:       "Hello unread",
+			Timestamp:  time.Now(),
+			Sender:     "sender@s.whatsapp.net",
+			SenderName: "Sender",
+		})
+	}
+
+	// In default view: outside shows 17 archived
+	viewStr := strings.Join(m.renderUnreadListView(), "\n")
+	if !strings.Contains(viewStr, "[a] 17 archived") {
+		t.Fatalf("Expected '[a] 17 archived' outside, got view:\n%s", viewStr)
+	}
+
+	// Press 'a' to enter archived view
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.showArchived {
+		t.Fatalf("Expected showArchived to be true")
+	}
+
+	// Inside count MUST match outside count (exactly 17, NOT 217!)
+	if len(m.chatOrder) != 17 {
+		t.Fatalf("Expected exactly 17 chats in archived unread menu, got %d", len(m.chatOrder))
+	}
+
+	archivedViewStr := strings.Join(m.renderUnreadListView(), "\n")
+	if !strings.Contains(archivedViewStr, "[ARCHIVED CHATS]") || !strings.Contains(archivedViewStr, "(17)") {
+		t.Fatalf("Expected header to show '[ARCHIVED CHATS] (17)', got view:\n%s", archivedViewStr)
+	}
+
+	// Ghost chats must not pollute unreadChats
+	for i := 18; i <= 217; i++ {
+		ghostID := fmt.Sprintf("ghost_archived_%d@g.us", i)
+		if _, exists := m.unreadChats[ghostID]; exists {
+			t.Errorf("Ghost chat %s should NOT exist in unreadChats", ghostID)
+		}
+	}
+}
+
 func TestArchiveUnarchiveShiftA(t *testing.T) {
 	adapter := &mockAdapter{
 		archivedChats: make(map[string]bool),

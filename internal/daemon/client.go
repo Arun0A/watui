@@ -219,6 +219,7 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 				if r.archivedChats == nil {
 					r.archivedChats = make(map[string]bool)
 				}
+				prev := r.archivedChats[p.ChatID]
 				if p.Archived {
 					r.archivedChats[p.ChatID] = true
 				} else {
@@ -227,8 +228,10 @@ func (r *RemoteAdapter) handleEvent(resp RPCResponse) {
 				handlers := make([]func(string, bool), len(r.archivedHandlers))
 				copy(handlers, r.archivedHandlers)
 				r.archivedMu.Unlock()
-				for _, h := range handlers {
-					h(p.ChatID, p.Archived)
+				if prev != p.Archived {
+					for _, h := range handlers {
+						h(p.ChatID, p.Archived)
+					}
 				}
 			}
 		}

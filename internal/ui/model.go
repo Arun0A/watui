@@ -42,17 +42,18 @@ const (
 
 // UnreadChat represents a conversation with pending unread messages or a pinned chat.
 type UnreadChat struct {
-	ChatID       string
-	Name         string
-	IsGroup      bool
-	IsPinned     bool
-	IsArchived   bool
-	IsMuted      bool
-	HasMention   bool
-	UnreadCount  int
-	Sender       string
-	Messages     []domain.Message
-	LastReceived time.Time
+	ChatID           string
+	Name             string
+	IsGroup          bool
+	IsPinned         bool
+	IsArchived       bool
+	IsMuted          bool
+	HasMention       bool
+	UnreadCount      int
+	Sender           string
+	Messages         []domain.Message
+	LastReceived     time.Time
+	ManuallyArchived bool
 }
 
 // Model is the top-level Bubble Tea model for watui.
@@ -1935,7 +1936,15 @@ func (m *Model) sortChatOrderLocked() {
 			return false
 		}
 		if m.showArchived {
-			return chat.IsArchived
+			cleanID := chat.ChatID
+			if idx := strings.Index(cleanID, ":"); idx != -1 {
+				if atIdx := strings.Index(cleanID, "@"); atIdx != -1 {
+					cleanID = cleanID[:idx] + cleanID[atIdx:]
+				}
+			}
+			isReadOrActive := m.readChats[chat.ChatID] || m.readChats[cleanID] || chat.ChatID == m.activeChatID || cleanID == m.activeChatID
+			hasActivity := chat.UnreadCount > 0 || len(chat.Messages) > 0 || isReadOrActive || chat.ManuallyArchived
+			return chat.IsArchived && hasActivity
 		}
 		return !chat.IsArchived || chat.HasMention
 	}
@@ -2145,6 +2154,7 @@ func (m *Model) rebuildUnreadChats(msgs []domain.Message) {
 		m.adapter.EnsureGroupNames(m.ctx, unknownGroups)
 	}
 
+	m.syncArchivedChatsLocked()
 	m.sortChatOrderLocked()
 }
 
@@ -2383,7 +2393,6 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.stopActiveViewer()
-		m.CleanupOnExit()
 		return tea.Quit
 
 	case "j", "down", "ctrl+n":
@@ -2685,8 +2694,10 @@ func (m *Model) updateUnreadList(msg tea.KeyMsg) tea.Cmd {
 				chat.IsArchived = targetArchived
 				if targetArchived {
 					chat.IsPinned = false
+					chat.ManuallyArchived = true
 					m.previewStatus = fmt.Sprintf("Archiving %s globally...", chat.Name)
 				} else {
+					chat.ManuallyArchived = false
 					if m.isPinned(chat.ChatID, chat.Name) {
 						chat.IsPinned = true
 					}
@@ -2773,6 +2784,17 @@ func (m *Model) findChatLocked(chatID string) (*UnreadChat, bool) {
 			}
 		}
 	}
+	if m.contactsByUser != nil {
+		user := clean
+		if idx := strings.Index(user, "@"); idx != -1 {
+			user = user[:idx]
+		}
+		if c := m.contactsByUser[user]; c != nil && c.JID != "" {
+			if chat, ok := m.unreadChats[c.JID]; ok && chat != nil {
+				return chat, true
+			}
+		}
+	}
 	return nil, false
 }
 
@@ -2814,26 +2836,6 @@ func (m *Model) applyArchiveStatus(chatID string, archived bool) {
 		}
 		return
 	}
-
-	if archived {
-		name, isGroup := m.resolveChatName(clean, "", "")
-		m.unreadChats[clean] = &UnreadChat{
-			ChatID:     clean,
-			Name:       name,
-			IsGroup:    isGroup,
-			IsPinned:   false,
-			IsArchived: true,
-			IsMuted:    m.isMuted(clean, name),
-		}
-		m.sortChatOrderLocked()
-		if m.cursor >= len(m.chatOrder) {
-			if len(m.chatOrder) > 0 {
-				m.cursor = len(m.chatOrder) - 1
-			} else {
-				m.cursor = 0
-			}
-		}
-	}
 }
 
 func (m *Model) syncArchivedChatsLocked() {
@@ -2857,16 +2859,8 @@ func (m *Model) syncArchivedChatsLocked() {
 		}
 		if exists && chat != nil {
 			chat.IsArchived = true
-			chat.IsPinned = false
-		} else {
-			name, isGroup := m.resolveChatName(clean, "", "")
-			m.unreadChats[clean] = &UnreadChat{
-				ChatID:     clean,
-				Name:       name,
-				IsGroup:    isGroup,
-				IsPinned:   false,
-				IsArchived: true,
-				IsMuted:    m.isMuted(clean, name),
+			if !m.isPinned(chat.ChatID, chat.Name) {
+				chat.IsPinned = false
 			}
 		}
 	}
@@ -2976,23 +2970,20 @@ func (m *Model) LocalMuteToggled() bool {
 // CleanupOnExit dismisses all read chats from persistent storage when the TUI quits.
 func (m *Model) CleanupOnExit() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.cleanupDone || m.adapter == nil {
+		m.mu.Unlock()
 		return
 	}
 	m.cleanupDone = true
-
-	m.stopActiveViewer()
-
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
+	localMuteToggled := m.localMuteToggled
+	adapter := m.adapter
+	cfg := m.cfg
 
 	dismissed := make(map[string]bool)
 	var targets []string
 
 	for id, chat := range m.unreadChats {
-		if chat != nil && chat.UnreadCount == 0 && !chat.IsPinned {
+		if chat != nil && chat.UnreadCount == 0 && !chat.IsPinned && len(chat.Messages) > 0 {
 			if !dismissed[id] {
 				targets = append(targets, id)
 				dismissed[id] = true
@@ -3005,14 +2996,18 @@ func (m *Model) CleanupOnExit() {
 			dismissed[id] = true
 		}
 	}
+	m.mu.Unlock()
 
-	if len(targets) > 0 {
+	m.stopActiveViewer()
+
+	if len(targets) > 0 && adapter != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		var wg sync.WaitGroup
 		for _, id := range targets {
 			wg.Add(1)
 			go func(cID string) {
 				defer wg.Done()
-				_ = m.adapter.DismissUnread(cleanupCtx, cID)
+				_ = adapter.DismissUnread(cleanupCtx, cID)
 			}(id)
 		}
 		done := make(chan struct{})
@@ -3024,17 +3019,22 @@ func (m *Model) CleanupOnExit() {
 		case <-done:
 		case <-cleanupCtx.Done():
 		}
+		cancel()
 	}
-	if m.localMuteToggled && m.adapter != nil {
-		_ = m.adapter.ReloadConfig(cleanupCtx)
+
+	if localMuteToggled && adapter != nil {
+		reloadCtx, reloadCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_ = adapter.ReloadConfig(reloadCtx)
+		reloadCancel()
 	}
+
 	_ = ClearClipboardCache()
-	if m.cfg != nil && m.cfg.IsClearOnExitEnabled() {
+	if cfg != nil && cfg.IsClearOnExitEnabled() {
 		_ = media.ClearMediaCache()
 	} else {
 		expireHours := 72
-		if m.cfg != nil {
-			expireHours = m.cfg.GetExpireMediaHours()
+		if cfg != nil {
+			expireHours = cfg.GetExpireMediaHours()
 		}
 		if expireHours > 0 {
 			_, _ = media.CleanExpiredMedia(expireHours)
@@ -3272,7 +3272,6 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "ctrl+c":
 		m.stopActiveViewer()
-		m.CleanupOnExit()
 		return tea.Quit
 
 	case "alt+x":
@@ -4047,7 +4046,6 @@ func (m *Model) updateContactPicker(msg tea.KeyMsg) tea.Cmd {
 
 	case "ctrl+c":
 		m.stopActiveViewer()
-		m.CleanupOnExit()
 		return tea.Quit
 
 	case "down", "ctrl+n":
@@ -4363,7 +4361,6 @@ func (m *Model) updateEmojiPicker(msg tea.KeyMsg) tea.Cmd {
 
 	case "ctrl+c":
 		m.stopActiveViewer()
-		m.CleanupOnExit()
 		return tea.Quit
 
 	case "down", "ctrl+n", "tab":
@@ -4750,7 +4747,7 @@ func (m *Model) renderUnreadListView() []string {
 	for _, chat := range m.unreadChats {
 		if chat != nil {
 			if chat.IsArchived && !chat.IsPinned {
-				if chat.UnreadCount > 0 {
+				if chat.UnreadCount > 0 || chat.ManuallyArchived {
 					archivedCount++
 				}
 			} else {

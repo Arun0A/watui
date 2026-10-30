@@ -89,9 +89,10 @@ type Adapter struct {
 	mutedMu    sync.RWMutex
 	mutedChats map[string]time.Time
 
-	lidMapMu       sync.RWMutex
-	lidMapCache    map[string]string
-	lidMapCachedAt time.Time
+	lidMapMu        sync.RWMutex
+	lidMapCache     map[string]string
+	phoneToLIDCache map[string]string
+	lidMapCachedAt  time.Time
 
 	groupParticipantsMu sync.RWMutex
 	groupParticipants   map[string][]domain.Contact
@@ -784,15 +785,16 @@ func NewAdapter(ctx context.Context, cfg Config) (*Adapter, error) {
 
 	// Preload local SQLite contacts, cached groups, and archived chats immediately
 	if adapter.IsLoggedIn() {
-		adapter.loadArchivedChats()
-		adapter.loadMutedChats()
-		adapter.loadEphemeralChats()
+		adapter.ensureLIDMap()
 		initial := adapter.fetchLocalContacts(adapterCtx)
 		if len(initial) > 0 {
 			adapter.contactsMu.Lock()
 			adapter.updateContactsIndexLocked(initial)
 			adapter.contactsMu.Unlock()
 		}
+		adapter.loadArchivedChats()
+		adapter.loadMutedChats()
+		adapter.loadEphemeralChats()
 	}
 
 	go adapter.startSleepWakeMonitor(adapterCtx)
@@ -881,7 +883,7 @@ func (a *Adapter) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Disconnect gracefully shuts down the connection within 1 second.
+// Disconnect gracefully shuts down the connection.
 func (a *Adapter) Disconnect() {
 	if a.cancel != nil {
 		a.cancel()
@@ -902,7 +904,7 @@ func (a *Adapter) Disconnect() {
 
 	select {
 	case <-done:
-	case <-time.After(1 * time.Second):
+	case <-time.After(50 * time.Millisecond):
 		if a.container != nil {
 			_ = a.container.Close()
 		} else if a.localDB != nil {
@@ -1046,11 +1048,14 @@ func (a *Adapter) ResolveLIDToPhone(lidUser string) string {
 	if idx := strings.Index(lidUser, ":"); idx != -1 {
 		lidUser = lidUser[:idx]
 	}
-	lm := a.getLIDMap()
-	if pn, ok := lm[lidUser]; ok && pn != "" {
-		return pn
+	a.ensureLIDMap()
+	a.lidMapMu.RLock()
+	var pn string
+	if a.lidMapCache != nil {
+		pn = a.lidMapCache[lidUser]
 	}
-	return ""
+	a.lidMapMu.RUnlock()
+	return pn
 }
 
 // ResolvePhoneToLID maps a phone number user to its internal WhatsApp LID using SQLite/in-memory cache.
@@ -1061,13 +1066,14 @@ func (a *Adapter) ResolvePhoneToLID(phoneUser string) string {
 	if idx := strings.Index(phoneUser, ":"); idx != -1 {
 		phoneUser = phoneUser[:idx]
 	}
-	lm := a.getLIDMap()
-	for lid, pn := range lm {
-		if pn == phoneUser {
-			return lid
-		}
+	a.ensureLIDMap()
+	a.lidMapMu.RLock()
+	var lid string
+	if a.phoneToLIDCache != nil {
+		lid = a.phoneToLIDCache[phoneUser]
 	}
-	return ""
+	a.lidMapMu.RUnlock()
+	return lid
 }
 
 func (a *Adapter) loadArchivedChats() {
@@ -1080,7 +1086,11 @@ func (a *Adapter) loadArchivedChats() {
 	}
 	defer func() { _ = rows.Close() }()
 
-	lidMap := a.getLIDMap()
+	a.ensureLIDMap()
+	a.lidMapMu.RLock()
+	lidMap := a.lidMapCache
+	phoneMap := a.phoneToLIDCache
+
 	archived := make(map[string]bool)
 	for rows.Next() {
 		var jid string
@@ -1100,12 +1110,13 @@ func (a *Adapter) loadArchivedChats() {
 				}
 			} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
 				phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
-				if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+				if lid, ok := phoneMap[phoneUser]; ok && lid != "" {
 					archived[lid+"@lid"] = true
 				}
 			}
 		}
 	}
+	a.lidMapMu.RUnlock()
 	_ = rows.Err()
 
 	a.archivedMu.Lock()
@@ -1324,7 +1335,9 @@ func (a *Adapter) loadMutedChats() {
 	}
 	defer func() { _ = rows.Close() }()
 
-	lidMap := a.getLIDMap()
+	a.ensureLIDMap()
+	a.lidMapMu.RLock()
+	lidMap := a.lidMapCache
 	muted := make(map[string]time.Time)
 	for rows.Next() {
 		var jid string
@@ -1344,7 +1357,7 @@ func (a *Adapter) loadMutedChats() {
 				}
 			}
 			muted[clean] = until
-			if strings.HasSuffix(clean, "@lid") {
+			if strings.HasSuffix(clean, "@lid") && lidMap != nil {
 				lidUser := strings.TrimSuffix(clean, "@lid")
 				if pn, ok := lidMap[lidUser]; ok && pn != "" {
 					muted[pn+"@s.whatsapp.net"] = until
@@ -1352,6 +1365,7 @@ func (a *Adapter) loadMutedChats() {
 			}
 		}
 	}
+	a.lidMapMu.RUnlock()
 	a.mutedMu.Lock()
 	a.mutedChats = muted
 	a.mutedMu.Unlock()
@@ -1697,7 +1711,7 @@ func (a *Adapter) getChatEphemeralTimer(ctx context.Context, chatID string) (uin
 	}
 	a.ephemeralMu.RUnlock()
 
-	if ok && timer > 0 {
+	if ok {
 		return timer, settingTS
 	}
 
@@ -1709,17 +1723,6 @@ func (a *Adapter) getChatEphemeralTimer(ctx context.Context, chatID string) (uin
 		if err == nil && dbTimer > 0 {
 			a.updateChatEphemeralTimer(clean, dbTimer, dbTS)
 			return dbTimer, dbTS
-		}
-	}
-
-	// For groups, query GetGroupInfo if connected and not cached
-	if chatJID.Server == types.GroupServer && a.client != nil && a.client.IsConnected() {
-		groupInfo, err := a.client.GetGroupInfo(ctx, chatJID)
-		if err == nil && groupInfo != nil {
-			gTimer := groupInfo.DisappearingTimer
-			now := time.Now().Unix()
-			a.updateChatEphemeralTimer(clean, gTimer, now)
-			return gTimer, now
 		}
 	}
 
@@ -1748,6 +1751,8 @@ func (a *Adapter) getChatEphemeralTimer(ctx context.Context, chatID string) (uin
 		}
 	}
 
+	// Cache zero timer so subsequent outgoing messages do not re-query
+	a.updateChatEphemeralTimer(clean, 0, 0)
 	return 0, 0
 }
 
@@ -2089,7 +2094,7 @@ func (a *Adapter) SendTextMessage(ctx context.Context, chatID string, text strin
 	wireText := text
 	var mentionedJIDs []string
 
-	if strings.Contains(chatID, "@g.us") {
+	if strings.Contains(chatID, "@g.us") && strings.Contains(wireText, "@") {
 		participants, _ := a.GetGroupParticipants(ctx, chatID)
 		// Sort participants by Name length descending so longer matches take precedence
 		sort.Slice(participants, func(i, j int) bool {
@@ -2373,7 +2378,7 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 
 	wireCaption := caption
 	var mentionedJIDs []string
-	if caption != "" && strings.Contains(chatID, "@g.us") {
+	if caption != "" && strings.Contains(chatID, "@g.us") && strings.Contains(caption, "@") {
 		participants, _ := a.GetGroupParticipants(ctx, chatID)
 		sort.Slice(participants, func(i, j int) bool {
 			return len(participants[i].Name) > len(participants[j].Name)
@@ -2724,21 +2729,21 @@ func (a *Adapter) saveLocalGroups(groups []*types.GroupInfo) {
 	_ = tx.Commit()
 }
 
-func (a *Adapter) getLIDMap() map[string]string {
+func (a *Adapter) ensureLIDMap() {
 	a.lidMapMu.RLock()
-	if a.lidMapCache != nil && time.Since(a.lidMapCachedAt) < 30*time.Second {
-		res := make(map[string]string, len(a.lidMapCache))
-		for k, v := range a.lidMapCache {
-			res[k] = v
-		}
+	if a.lidMapCache != nil && time.Since(a.lidMapCachedAt) < 2*time.Minute {
 		a.lidMapMu.RUnlock()
-		return res
+		return
 	}
 	a.lidMapMu.RUnlock()
 
-	m := make(map[string]string)
+	a.lidMapMu.Lock()
+	defer a.lidMapMu.Unlock()
+	if a.lidMapCache != nil && time.Since(a.lidMapCachedAt) < 2*time.Minute {
+		return
+	}
 	if a.localDB == nil {
-		return m
+		return
 	}
 
 	queryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -2746,25 +2751,33 @@ func (a *Adapter) getLIDMap() map[string]string {
 
 	rows, err := a.localDB.QueryContext(queryCtx, "SELECT lid, pn FROM whatsmeow_lid_map")
 	if err != nil {
-		return m
+		return
 	}
 	defer func() { _ = rows.Close() }()
+
+	lidToPhone := make(map[string]string)
+	phoneToLID := make(map[string]string)
 	for rows.Next() {
 		var lid, pn string
 		if err := rows.Scan(&lid, &pn); err == nil && lid != "" && pn != "" {
-			m[lid] = pn
+			lidToPhone[lid] = pn
+			phoneToLID[pn] = lid
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return m
-	}
-
-	a.lidMapMu.Lock()
-	a.lidMapCache = m
+	a.lidMapCache = lidToPhone
+	a.phoneToLIDCache = phoneToLID
 	a.lidMapCachedAt = time.Now()
-	a.lidMapMu.Unlock()
+}
 
-	return m
+func (a *Adapter) getLIDMap() map[string]string {
+	a.ensureLIDMap()
+	a.lidMapMu.RLock()
+	defer a.lidMapMu.RUnlock()
+	res := make(map[string]string, len(a.lidMapCache))
+	for k, v := range a.lidMapCache {
+		res[k] = v
+	}
+	return res
 }
 
 func (a *Adapter) fetchLocalContacts(ctx context.Context) []domain.Contact {
@@ -2958,7 +2971,7 @@ func (a *Adapter) GetGroupParticipants(ctx context.Context, groupJID string) ([]
 	seen := make(map[string]bool)
 
 	if a.client != nil {
-		reqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		reqCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 		info, err := a.client.GetGroupInfo(reqCtx, parsedJID.ToNonAD())
 		cancel()
 		if err == nil && info != nil {
@@ -3752,6 +3765,8 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 			if a.archivedChats == nil {
 				a.archivedChats = make(map[string]bool)
 			}
+			prev := a.archivedChats[clean] || a.archivedChats[chatID]
+			statusChanged := (prev != isArchived)
 			if isArchived {
 				a.archivedChats[chatID] = true
 				a.archivedChats[rawJID] = true
@@ -3811,19 +3826,21 @@ func (a *Adapter) handleEvent(rawEvt interface{}) {
 				}
 			}
 
-			a.notifyChatArchived(clean, isArchived)
-			if rawJID != clean {
-				a.notifyChatArchived(rawJID, isArchived)
-			}
-			if strings.HasSuffix(clean, "@lid") {
-				lidUser := strings.TrimSuffix(clean, "@lid")
-				if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
-					a.notifyChatArchived(pn+"@s.whatsapp.net", isArchived)
+			if statusChanged {
+				a.notifyChatArchived(clean, isArchived)
+				if rawJID != clean {
+					a.notifyChatArchived(rawJID, isArchived)
 				}
-			} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
-				phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
-				if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
-					a.notifyChatArchived(lid+"@lid", isArchived)
+				if strings.HasSuffix(clean, "@lid") {
+					lidUser := strings.TrimSuffix(clean, "@lid")
+					if pn := a.ResolveLIDToPhone(lidUser); pn != "" {
+						a.notifyChatArchived(pn+"@s.whatsapp.net", isArchived)
+					}
+				} else if strings.HasSuffix(clean, "@s.whatsapp.net") {
+					phoneUser := strings.TrimSuffix(clean, "@s.whatsapp.net")
+					if lid := a.ResolvePhoneToLID(phoneUser); lid != "" {
+						a.notifyChatArchived(lid+"@lid", isArchived)
+					}
 				}
 			}
 

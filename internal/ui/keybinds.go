@@ -223,7 +223,6 @@ func (m *Model) updateKeybindsHelp(msg tea.KeyMsg) tea.Cmd {
 
 	case "ctrl+c":
 		m.stopActiveViewer()
-		m.CleanupOnExit()
 		return tea.Quit
 
 	case "j", "down", "ctrl+n":
