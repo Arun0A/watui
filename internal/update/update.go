@@ -691,7 +691,7 @@ func PerformSelfUpdate(ctx context.Context, currentVersion, dbPath string) error
 		daemon.CleanupIPC(dbPath)
 		cmd := exec.Command(realExe, "daemon", "start", "--db", dbPath)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			fmt.Printf("⚠️ Warning: could not restart daemon automatically: %v\n%s\n", err, string(out))
+			fmt.Printf("! Warning: could not restart daemon automatically: %v\n%s\n", err, string(out))
 			fmt.Println("You can start it manually with: watui daemon start")
 		} else {
 			fmt.Print(string(out))
