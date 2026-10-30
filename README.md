@@ -128,6 +128,8 @@ nix develop github:Arun0A/watui
 4. Scan the QR code in your terminal.
 5. You're in! Your session credentials are saved in your local encrypted database. Future launches connect immediately.
 
+Note: Give it some time to sync, it might seem a bit laggy in the first startup (might even crash), do not panic, just give it some time. Also, it is suggested to start the daemon after pairing for the first time to sync the state in the background (so that you dont have to keep it open while it does), post that, it is up to you whether you wish to use the daemon or not.
+
 ---
 
 ## Keybindings
