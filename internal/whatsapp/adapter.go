@@ -3238,6 +3238,7 @@ func (a *Adapter) SyncAppStateRelaxed(ctx context.Context, name appstate.WAPatch
 		return nil
 	}
 
+	//lint:ignore SA1019 DangerousInternals is needed for low-level app state patch recovery on LTHash mismatch
 	dangerous := a.client.DangerousInternals()
 	proc := appstate.NewProcessor(a.client.Store, a.client.Log)
 

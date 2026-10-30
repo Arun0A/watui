@@ -25,14 +25,25 @@ import (
 	"watui/internal/media"
 	"watui/internal/notify"
 	"watui/internal/ui"
+	"watui/internal/update"
 	"watui/internal/version"
 	"watui/internal/whatsapp"
 )
 
 func main() {
+	if exe, err := os.Executable(); err == nil {
+		if realExe, err := filepath.EvalSymlinks(exe); err == nil {
+			update.CleanupOldBinaries(filepath.Dir(realExe))
+		} else {
+			update.CleanupOldBinaries(filepath.Dir(exe))
+		}
+	}
+
 	defaultDB := config.DefaultDBPath()
 	versionFlag := flag.Bool("version", false, "Print watui version and exit")
 	flag.BoolVar(versionFlag, "v", false, "Print watui version and exit (shorthand)")
+	updateFlag := flag.Bool("update", false, "Check and update watui to the latest release")
+	flag.BoolVar(updateFlag, "u", false, "Check and update watui to the latest release (shorthand)")
 	dbPath := flag.String("db", "", "Path to SQLite session and cache database (default: "+defaultDB+")")
 	logFile := flag.String("log-file", "", "File to write protocol and network logs to (disabled by default)")
 	logLevel := flag.String("log", "WARN", "Protocol log level (DEBUG, INFO, WARN, ERROR)")
@@ -58,6 +69,7 @@ func main() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
 		fmt.Fprintf(out, "  -v, --version\n    \tPrint watui version and exit\n")
+		fmt.Fprintf(out, "  -u, --update\n    \tCheck and update watui to the latest release\n")
 		fmt.Fprintf(out, "  --logout\n    \tLog out of WhatsApp, unlink session, and clean up all database and cached data\n")
 		fmt.Fprintf(out, "  --clear-clipboard\n    \tClear all cached clipboard files and exit\n")
 		fmt.Fprintf(out, "  --no-tui <jid> <msg>\n    \tSend a message directly via CLI without launching TUI\n")
@@ -72,7 +84,8 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag || (len(flag.Args()) > 0 && flag.Args()[0] == "version") {
-		fmt.Printf("watui %s\n", strings.TrimPrefix(version.Version, "v"))
+		notice := update.CheckUpdateNotice(version.Version)
+		fmt.Printf("watui %s%s\n", strings.TrimPrefix(version.Version, "v"), notice)
 		os.Exit(0)
 	}
 
@@ -92,6 +105,16 @@ func main() {
 		}
 	}
 	finalDBPath = config.ResolveDBPath(finalDBPath)
+
+	if *updateFlag || (len(flag.Args()) > 0 && flag.Args()[0] == "update") {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := update.PerformSelfUpdate(ctx, version.Version, finalDBPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *logoutFlag || (len(flag.Args()) > 0 && flag.Args()[0] == "logout") {
 		ctx, cancel := context.WithCancel(context.Background())
