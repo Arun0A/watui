@@ -3225,7 +3225,6 @@ func (a *Adapter) GetRawClient() *whatsmeow.Client {
 	return a.client
 }
 
-
 // SyncAppStateRelaxed attempts standard FetchAppState, and if it fails due to LTHash verification failure or mismatch,
 // decodes both snapshot and delta patch mutations directly without aborting on LTHash mismatch so that chat archives,
 // unarchives, and read states are reconciled across clients.

@@ -49,10 +49,10 @@ Pre-built binaries are available on the [**Releases Page**](https://github.com/A
 
 ### Linux
 
-1. Download `watui-linux-amd64.tar.gz` from the latest release:
+1. Download `watui-linux-amd64.tar.gz` (x86_64) or `watui-linux-arm64.tar.gz` (ARM64) from the latest release:
    ```bash
-   tar -xzf watui-linux-amd64.tar.gz
-   cd watui-linux-amd64
+   tar -xzf watui-linux-amd64.tar.gz # or watui-linux-arm64.tar.gz
+   cd watui-linux-*
    ```
 2. Move the binary into your `PATH`:
    ```bash
@@ -78,7 +78,7 @@ nix develop github:Arun0A/watui
 
 ### Windows
 
-1. Download `watui-windows-amd64-portable.zip` from the latest release.
+1. Download `watui-windows-amd64-portable.zip` (x86_64) or `watui-windows-arm64-portable.zip` (ARM64) from the latest release.
 2. Extract the zip file anywhere (e.g. `C:\Tools\watui` or your preferred location).
 3. The folder contains `watui.exe` and `watui.yaml`.
 4. Launch `watui.exe` from PowerShell, Command Prompt, or Windows Terminal:
@@ -93,10 +93,10 @@ nix develop github:Arun0A/watui
 
 [I don't own a macOS machine, reporting any reviews/issues is appreciated]
 
-1. Download `watui-darwin-arm64.tar.gz` (Apple Silicon) from the Releases page:
+1. Download `watui-darwin-arm64.tar.gz` (Apple Silicon) or `watui-darwin-amd64.tar.gz` (Intel) from the Releases page:
    ```bash
-   tar -xzf watui-darwin-arm64.tar.gz
-   cd watui-darwin-arm64
+   tar -xzf watui-darwin-arm64.tar.gz # or watui-darwin-amd64.tar.gz
+   cd watui-darwin-*
    ```
 2. Move the binary into your `PATH`:
    ```bash

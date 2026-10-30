@@ -31,15 +31,39 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
             target: linux-amd64
             binary_name: watui
             ext: tar.gz
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            target: linux-arm64
+            binary_name: watui
+            ext: tar.gz
           - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            target: darwin-amd64
+            binary_name: watui
+            ext: tar.gz
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
             target: darwin-arm64
             binary_name: watui
             ext: tar.gz
           - os: windows-latest
+            goos: windows
+            goarch: amd64
             target: windows-amd64
+            binary_name: watui.exe
+            ext: zip
+          - os: windows-latest
+            goos: windows
+            goarch: arm64
+            target: windows-arm64
             binary_name: watui.exe
             ext: zip
 
@@ -71,7 +95,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
           VERSION="${VERSION#v}"
-          go build -trimpath -ldflags="-s -w -X watui/internal/version.Version=${VERSION}" -o "${{ matrix.binary_name }}" ./cmd/watui
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X watui/internal/version.Version=${VERSION}" -o "${{ matrix.binary_name }}" ./cmd/watui
 
       # -----------------------------------------------------------
       # Linux Packaging (.tar.gz)

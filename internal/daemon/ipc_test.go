@@ -63,7 +63,7 @@ func (m *mockAdapter) SetChatArchived(ctx context.Context, chatID string, archiv
 	return nil
 }
 func (m *mockAdapter) OnChatArchived(h func(string, bool)) { m.archivedHandler = h }
-func (m *mockAdapter) IsChatMuted(chatID string) bool { return chatID == "muted@g.us" }
+func (m *mockAdapter) IsChatMuted(chatID string) bool      { return chatID == "muted@g.us" }
 func (m *mockAdapter) GetMutedChats() map[string]bool {
 	return map[string]bool{"muted@g.us": true}
 }

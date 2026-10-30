@@ -168,3 +168,12 @@ jobs:
       - name: Smoke test CLI help
         run: |
           ./watui --help
+
+      - name: Cross-compile verification for all 6 platforms
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          for target in 'linux/amd64' 'linux/arm64' 'darwin/amd64' 'darwin/arm64' 'windows/amd64' 'windows/arm64'; do
+            echo "Verifying compilation for $target..."
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -trimpath -o /dev/null ./cmd/watui
+          done
+          echo "✔ All 6 target platforms compiled successfully."

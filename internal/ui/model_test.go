@@ -1725,10 +1725,8 @@ func TestPinnedGroupJIDResolution(t *testing.T) {
 	}
 
 	var requestedJIDs []string
-	adapter := &mockAdapter{}
 	// Custom adapter tracking EnsureGroupNames
 	adapterTracker := &mockGroupAdapter{
-		mockAdapter: *adapter,
 		onEnsure: func(jids []string) {
 			requestedJIDs = append(requestedJIDs, jids...)
 		},
@@ -6269,4 +6267,3 @@ func TestRevokeMessageDoesNotDuplicateOnExitAndReenterChat(t *testing.T) {
 		t.Errorf("Expected exactly 1 '[Deleted for everyone]' tag in chat view, got %d (view:\n%s)", count, view)
 	}
 }
-
