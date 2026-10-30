@@ -1878,8 +1878,38 @@ func (a *Adapter) DeleteMessage(ctx context.Context, chatID string, messageID st
 
 	if a.localDB != nil {
 		if deleteForEveryone {
+			var origBody, origSender, origSenderName, origChatName string
+			var origTimestamp int64
+			var origIsFromMe bool
+			row := a.localDB.QueryRow("SELECT chat_name, body, sender, sender_name, timestamp, is_from_me FROM watui_messages WHERE id = ?", messageID)
+			_ = row.Scan(&origChatName, &origBody, &origSender, &origSenderName, &origTimestamp, &origIsFromMe)
+			if origBody == "" {
+				row2 := a.localDB.QueryRow("SELECT chat_name, body, sender, sender_name, timestamp, is_from_me FROM watui_unread_messages WHERE id = ?", messageID)
+				_ = row2.Scan(&origChatName, &origBody, &origSender, &origSenderName, &origTimestamp, &origIsFromMe)
+			}
 			_, _ = a.localDB.Exec("UPDATE watui_messages SET is_revoke = 1 WHERE id = ?", messageID)
 			_, _ = a.localDB.Exec("UPDATE watui_unread_messages SET is_revoke = 1 WHERE id = ?", messageID)
+
+			ts := time.Now()
+			if origTimestamp > 0 {
+				ts = time.Unix(origTimestamp, 0)
+			}
+			revokeDMsg := domain.Message{
+				ID:           messageID,
+				ChatID:       chatID,
+				ChatName:     origChatName,
+				Sender:       origSender,
+				SenderName:   origSenderName,
+				Body:         origBody,
+				Timestamp:    ts,
+				IsFromMe:     origIsFromMe,
+				Type:         domain.MessageTypeText,
+				QuotedID:     messageID,
+				QuotedText:   origBody,
+				QuotedSender: origSender,
+				IsRevoke:     true,
+			}
+			a.notifyMessage(revokeDMsg)
 		} else {
 			_, _ = a.localDB.Exec("DELETE FROM watui_messages WHERE id = ?", messageID)
 			_, _ = a.localDB.Exec("DELETE FROM watui_unread_messages WHERE id = ?", messageID)

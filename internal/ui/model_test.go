@@ -4477,8 +4477,15 @@ func TestDeleteMessageForEveryone_OwnMessage(t *testing.T) {
 		t.Fatalf("Expected non-nil cmd after confirming 'y'")
 	}
 
-	if len(model.activeMsgs) != 1 || model.activeMsgs[0].ID != "msg-other" {
-		t.Errorf("Expected own message to be removed from activeMsgs, got: %+v", model.activeMsgs)
+	if len(model.activeMsgs) != 2 || !model.activeMsgs[0].IsRevoke {
+		t.Errorf("Expected own message to remain in activeMsgs with IsRevoke=true, got: %+v", model.activeMsgs)
+	}
+	rendered := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(rendered, "[Deleted for everyone]") {
+		t.Errorf("Expected rendered view to contain '[Deleted for everyone]', got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "My message") {
+		t.Errorf("Expected rendered view to contain 'My message', got:\n%s", rendered)
 	}
 
 	res := confirmCmd()
@@ -4528,6 +4535,10 @@ func TestDeleteMessageForEveryone_GroupAdmin(t *testing.T) {
 	confirmCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
 	if confirmCmd == nil {
 		t.Fatalf("Expected non-nil cmd after confirming 'Y' in group chat")
+	}
+
+	if len(model.activeMsgs) != 1 || !model.activeMsgs[0].IsRevoke {
+		t.Errorf("Expected group message to remain in activeMsgs with IsRevoke=true, got: %+v", model.activeMsgs)
 	}
 
 	res := confirmCmd()
@@ -5102,8 +5113,8 @@ func TestMultiSelect_DeleteForEveryone(t *testing.T) {
 			}
 		}
 	}
-	if len(model.activeMsgs) != 1 || model.activeMsgs[0].ID != "m2" {
-		t.Errorf("Expected m1 deleted and m2 remaining, got %+v", model.activeMsgs)
+	if len(model.activeMsgs) != 2 || !model.activeMsgs[0].IsRevoke {
+		t.Errorf("Expected m1 revoked and remaining in activeMsgs, got %+v", model.activeMsgs)
 	}
 	if !adapter.lastDeleteForEveryone {
 		t.Errorf("Expected adapter to be called with deleteForEveryone=true")
@@ -6265,5 +6276,96 @@ func TestRevokeMessageDoesNotDuplicateOnExitAndReenterChat(t *testing.T) {
 	count := strings.Count(view, "[Deleted for everyone]")
 	if count != 1 {
 		t.Errorf("Expected exactly 1 '[Deleted for everyone]' tag in chat view, got %d (view:\n%s)", count, view)
+	}
+}
+
+func TestOutgoingMessageDeleteForEveryoneReflectsAsReplyWithDeletedTag(t *testing.T) {
+	adapter := &mockAdapter{archivedChats: make(map[string]bool)}
+	cfg := &config.Config{}
+	model := NewModel(context.Background(), adapter, cfg)
+	model.width = 100
+	model.height = 30
+	model.view = ViewChat
+	model.activeChatID = "friend@s.whatsapp.net"
+	model.activeName = "Friend"
+
+	// 1. Own sent message
+	m1 := domain.Message{
+		ID:         "OUTGOING_REVOKE_1",
+		ChatID:     model.activeChatID,
+		ChatName:   "Friend",
+		Sender:     "You",
+		SenderName: "You",
+		Body:       "Important proposal details",
+		Timestamp:  time.Now().Add(-1 * time.Minute),
+		IsFromMe:   true,
+	}
+	model.activeMsgs = []domain.Message{m1}
+	model.selectedMsgIdx = 0
+
+	// 2. Press 'D' (Shift+D) to trigger delete for everyone
+	cmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd != nil {
+		t.Fatalf("Expected nil cmd awaiting confirmation for 'D'")
+	}
+	if !model.confirmDelete || !model.pendingDeleteForEveryone {
+		t.Fatalf("Expected confirmDelete=true and pendingDeleteForEveryone=true")
+	}
+
+	// 3. Confirm with 'y'
+	confirmCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if confirmCmd == nil {
+		t.Fatalf("Expected non-nil cmd after confirming 'y'")
+	}
+
+	// 4. Verify message is NOT removed from activeMsgs, but marked IsRevoke=true with Body preserved
+	if len(model.activeMsgs) != 1 {
+		t.Fatalf("Expected message to remain in activeMsgs, got len=%d", len(model.activeMsgs))
+	}
+	if !model.activeMsgs[0].IsRevoke {
+		t.Fatalf("Expected activeMsgs[0].IsRevoke to be true")
+	}
+	if model.activeMsgs[0].Body != "Important proposal details" {
+		t.Fatalf("Expected active message body to be preserved as 'Important proposal details', got %q", model.activeMsgs[0].Body)
+	}
+
+	// 5. Verify rendered chat view displays [Deleted for everyone] reply-type artifact and original body
+	chatView := strings.Join(model.renderChatView(), "\n")
+	if !strings.Contains(chatView, "[Deleted for everyone]") {
+		t.Errorf("Expected chat view to contain '[Deleted for everyone]', got:\n%s", chatView)
+	}
+	if !strings.Contains(chatView, "Important proposal details") {
+		t.Errorf("Expected chat view to display original body 'Important proposal details', got:\n%s", chatView)
+	}
+
+	// 6. Verify cannot edit deleted message
+	editCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if editCmd != nil {
+		t.Errorf("Expected nil cmd when editing deleted message")
+	}
+	if model.previewStatus != "Cannot edit deleted message" {
+		t.Errorf("Expected previewStatus 'Cannot edit deleted message', got %q", model.previewStatus)
+	}
+
+	// 7. Verify cannot delete for everyone again
+	delEveryoneCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if delEveryoneCmd != nil {
+		t.Errorf("Expected nil cmd when deleting already revoked message for everyone")
+	}
+	if model.previewStatus != "Message already deleted for everyone (press 'd' to delete for you)" {
+		t.Errorf("Expected previewStatus 'Message already deleted for everyone (press 'd' to delete for you)', got %q", model.previewStatus)
+	}
+
+	// 8. Press 'd' to delete for me -> now it should be removed completely
+	delForMeCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if delForMeCmd != nil {
+		t.Fatalf("Expected nil cmd awaiting confirmation for 'd'")
+	}
+	confirmForMeCmd := model.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if confirmForMeCmd == nil {
+		t.Fatalf("Expected non-nil cmd after confirming 'y' for 'd'")
+	}
+	if len(model.activeMsgs) != 0 {
+		t.Errorf("Expected message to be removed from activeMsgs after delete for me, got len=%d", len(model.activeMsgs))
 	}
 }

@@ -575,11 +575,15 @@ func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (bool, tea.Cmd) {
 				if m.replyToMsg != nil && m.replyToMsg.ID == target.ID {
 					m.replyToMsg = nil
 				}
-				m.removeMessageFromActive(target.ID)
-				m.removeMessageFromUnread(m.activeChatID, target.ID)
 				delForEveryone := forEveryone
 				if delForEveryone && !isGroup && !target.IsFromMe {
 					delForEveryone = false
+				}
+				if delForEveryone {
+					m.markMessageAsRevoked(m.activeChatID, target.ID)
+				} else {
+					m.removeMessageFromActive(target.ID)
+					m.removeMessageFromUnread(m.activeChatID, target.ID)
 				}
 				cmds = append(cmds, m.deleteMessageCmd(m.activeChatID, target, delForEveryone))
 			}
@@ -608,8 +612,12 @@ func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (bool, tea.Cmd) {
 			if m.replyToMsg != nil && m.replyToMsg.ID == target.ID {
 				m.replyToMsg = nil
 			}
-			m.removeMessageFromActive(target.ID)
-			m.removeMessageFromUnread(m.activeChatID, target.ID)
+			if forEveryone {
+				m.markMessageAsRevoked(m.activeChatID, target.ID)
+			} else {
+				m.removeMessageFromActive(target.ID)
+				m.removeMessageFromUnread(m.activeChatID, target.ID)
+			}
 			if len(m.activeMsgs) == 0 {
 				m.selectedMsgIdx = -1
 				m.input.Focus()
@@ -1054,6 +1062,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messageDeletedMsg:
 		if msg.Err != nil {
 			m.previewStatus = fmt.Sprintf("Error deleting message: %v", msg.Err)
+			if msg.DeleteForEveryone {
+				m.unmarkMessageAsRevoked(msg.ChatID, msg.MessageID)
+			}
 			return m, nil
 		}
 		if msg.DeleteForEveryone {
@@ -2960,6 +2971,54 @@ func (m *Model) removeMessageFromUnread(chatID, msgID string) {
 	}
 }
 
+func (m *Model) markMessageAsRevoked(chatID, msgID string) {
+	if msgID == "" {
+		return
+	}
+	if m.activeChatID == chatID {
+		for i := range m.activeMsgs {
+			if m.activeMsgs[i].ID == msgID {
+				m.activeMsgs[i].IsRevoke = true
+				break
+			}
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if chat, exists := m.unreadChats[chatID]; exists && chat != nil {
+		for i := range chat.Messages {
+			if chat.Messages[i].ID == msgID {
+				chat.Messages[i].IsRevoke = true
+				break
+			}
+		}
+	}
+}
+
+func (m *Model) unmarkMessageAsRevoked(chatID, msgID string) {
+	if msgID == "" {
+		return
+	}
+	if m.activeChatID == chatID {
+		for i := range m.activeMsgs {
+			if m.activeMsgs[i].ID == msgID {
+				m.activeMsgs[i].IsRevoke = false
+				break
+			}
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if chat, exists := m.unreadChats[chatID]; exists && chat != nil {
+		for i := range chat.Messages {
+			if chat.Messages[i].ID == msgID {
+				chat.Messages[i].IsRevoke = false
+				break
+			}
+		}
+	}
+}
+
 // LocalMuteToggled returns true if a chat was locally muted or unmuted during this session.
 func (m *Model) LocalMuteToggled() bool {
 	m.mu.RLock()
@@ -3339,6 +3398,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			m.multiSelectedMsgs = make(map[string]struct{})
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
+				if target.IsRevoke {
+					m.previewStatus = "Cannot edit deleted message"
+					return nil
+				}
 				if !target.IsFromMe {
 					m.previewStatus = "Cannot edit: only your own sent messages can be edited"
 					return nil
@@ -3579,6 +3642,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) tea.Cmd {
 			}
 			if m.selectedMsgIdx < len(m.activeMsgs) {
 				target := m.activeMsgs[m.selectedMsgIdx]
+				if target.IsRevoke {
+					m.previewStatus = "Message already deleted for everyone (press 'd' to delete for you)"
+					return nil
+				}
 				if !target.IsFromMe && !strings.Contains(m.activeChatID, "@g.us") {
 					m.previewStatus = "Cannot delete for all: only sender can delete for everyone in direct chats (press 'd' to delete for you)"
 					return nil
