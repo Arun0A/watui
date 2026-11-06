@@ -17,7 +17,7 @@
 
           subPackages = [ "cmd/watui" ];
 
-          vendorHash = "sha256-9WDjkXwjEUylcBdAxinsycNOl9z4siG9AxmeoV9NYdQ=";
+          vendorHash = "sha256-6Jq983mCso4luOdCZ68AQ28npxtznbKtPOKlToSCWAg=";
 
           env.CGO_ENABLED = 1;
           doCheck = false;

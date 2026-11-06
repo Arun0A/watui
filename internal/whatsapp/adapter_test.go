@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/gif"
+	"image/png"
 	"os/exec"
 	"strings"
 	"testing"
@@ -28,6 +29,47 @@ import (
 	"watui/internal/config"
 	"watui/internal/domain"
 )
+
+func TestBuildImageThumbnail(t *testing.T) {
+	source := image.NewRGBA(image.Rect(0, 0, 1600, 1000))
+	for y := 0; y < source.Bounds().Dy(); y++ {
+		for x := 0; x < source.Bounds().Dx(); x++ {
+			source.SetRGBA(x, y, color.RGBA{
+				R: uint8(x * 255 / source.Bounds().Dx()),
+				G: uint8(y * 255 / source.Bounds().Dy()),
+				B: 96,
+				A: 255,
+			})
+		}
+	}
+
+	var sourceData bytes.Buffer
+	if err := png.Encode(&sourceData, source); err != nil {
+		t.Fatalf("encode source image: %v", err)
+	}
+
+	thumbnail, width, height, err := buildImageThumbnail(sourceData.Bytes())
+	if err != nil {
+		t.Fatalf("build image thumbnail: %v", err)
+	}
+	if width != 1600 || height != 1000 {
+		t.Fatalf("expected original dimensions 1600x1000, got %dx%d", width, height)
+	}
+	if len(thumbnail) == 0 || len(thumbnail) > maxImageThumbnailBytes {
+		t.Fatalf("expected non-empty thumbnail <= %d bytes, got %d", maxImageThumbnailBytes, len(thumbnail))
+	}
+
+	decoded, format, err := image.Decode(bytes.NewReader(thumbnail))
+	if err != nil {
+		t.Fatalf("decode generated thumbnail: %v", err)
+	}
+	if format != "jpeg" {
+		t.Fatalf("expected JPEG thumbnail, got %q", format)
+	}
+	if max(decoded.Bounds().Dx(), decoded.Bounds().Dy()) > maxImageThumbnailDimension {
+		t.Fatalf("thumbnail dimensions too large: %v", decoded.Bounds())
+	}
+}
 
 func TestExtractDomainMessage(t *testing.T) {
 	// Adapter instance with dummy fields for testing extraction

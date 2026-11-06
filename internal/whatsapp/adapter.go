@@ -6,8 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"image"
+	stdDraw "image/draw"
 	"image/gif"
 	"image/jpeg"
+	_ "image/png"
 	"mime"
 	"net/http"
 	"os"
@@ -35,6 +38,8 @@ import (
 	"go.mau.fi/whatsmeow/util/gcmutil"
 	"go.mau.fi/whatsmeow/util/hkdfutil"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	_ "golang.org/x/image/bmp"
+	xdraw "golang.org/x/image/draw"
 	"google.golang.org/protobuf/proto"
 
 	"watui/internal/config"
@@ -2284,6 +2289,54 @@ func convertGifToMp4(ctx context.Context, gifData []byte) ([]byte, error) {
 	return os.ReadFile(outputPath)
 }
 
+const (
+	maxImageThumbnailDimension = 256
+	maxImageThumbnailBytes     = 32 * 1024
+)
+
+// buildImageThumbnail creates the small JPEG preview WhatsApp clients use
+// before the full image is downloaded. The original dimensions are returned
+// separately because WhatsApp uses them to lay out the preview correctly.
+func buildImageThumbnail(fileData []byte) ([]byte, uint32, uint32, error) {
+	img, format, err := image.Decode(bytes.NewReader(fileData))
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("decode %s image: %w", format, err)
+	}
+
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return nil, 0, 0, errors.New("image has no dimensions")
+	}
+
+	// Keep the preview lightweight even when the source image is very large.
+	// Retry with smaller dimensions/quality if a detailed image still exceeds
+	// WhatsApp's thumbnail size limit.
+	for maxDimension := maxImageThumbnailDimension; maxDimension >= 64; maxDimension /= 2 {
+		thumb := img
+		if width > maxDimension || height > maxDimension {
+			scale := float64(maxDimension) / float64(max(width, height))
+			thumbWidth := max(1, int(float64(width)*scale))
+			thumbHeight := max(1, int(float64(height)*scale))
+			resized := image.NewRGBA(image.Rect(0, 0, thumbWidth, thumbHeight))
+			xdraw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, stdDraw.Over, nil)
+			thumb = resized
+		}
+
+		for quality := 75; quality >= 30; quality -= 15 {
+			var buf bytes.Buffer
+			if err := jpeg.Encode(&buf, thumb, &jpeg.Options{Quality: quality}); err != nil {
+				return nil, 0, 0, fmt.Errorf("encode image thumbnail: %w", err)
+			}
+			if buf.Len() <= maxImageThumbnailBytes {
+				return buf.Bytes(), uint32(width), uint32(height), nil
+			}
+		}
+	}
+
+	return nil, uint32(width), uint32(height), nil
+}
+
 // SendFileMessage uploads and sends a file attachment to a WhatsApp chat JID or raw phone number, optionally quoting a message.
 func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath string, caption string, quotedMsg ...string) (domain.Message, error) {
 	if a.client == nil {
@@ -2357,7 +2410,7 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 
 			var thumbBuf bytes.Buffer
 			if err := jpeg.Encode(&thumbBuf, firstFrame, &jpeg.Options{Quality: 60}); err == nil {
-				if len(thumbBuf.Bytes()) <= 32768 {
+				if len(thumbBuf.Bytes()) <= maxImageThumbnailBytes {
 					gifThumb = thumbBuf.Bytes()
 				}
 			}
@@ -2392,6 +2445,16 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 			// are safely uploaded as DocumentMessage so WhatsApp doesn't drop them.
 			appInfo = whatsmeow.MediaDocument
 			msgType = domain.MessageTypeDocument
+		}
+	}
+
+	var imageThumb []byte
+	var imageWidth, imageHeight uint32
+	if msgType == domain.MessageTypeImage {
+		if thumb, width, height, err := buildImageThumbnail(fileData); err == nil {
+			imageThumb = thumb
+			imageWidth = width
+			imageHeight = height
 		}
 	}
 
@@ -2517,6 +2580,13 @@ func (a *Adapter) SendFileMessage(ctx context.Context, chatID string, filePath s
 			FileEncSHA256: resp.FileEncSHA256,
 			FileSHA256:    resp.FileSHA256,
 			FileLength:    &resp.FileLength,
+		}
+		if len(imageThumb) > 0 {
+			imgMsg.JPEGThumbnail = imageThumb
+		}
+		if imageWidth > 0 && imageHeight > 0 {
+			imgMsg.Width = proto.Uint32(imageWidth)
+			imgMsg.Height = proto.Uint32(imageHeight)
 		}
 		if wireCaption != "" {
 			imgMsg.Caption = proto.String(wireCaption)
