@@ -40,6 +40,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "golang.org/x/image/bmp"
 	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
 	"google.golang.org/protobuf/proto"
 
 	"watui/internal/config"
@@ -2300,7 +2301,10 @@ const (
 func buildImageThumbnail(fileData []byte) ([]byte, uint32, uint32, error) {
 	img, format, err := image.Decode(bytes.NewReader(fileData))
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("decode %s image: %w", format, err)
+		if format != "" {
+			return nil, 0, 0, fmt.Errorf("decode %s image: %w", format, err)
+		}
+		return nil, 0, 0, fmt.Errorf("decode image: %w", err)
 	}
 
 	bounds := img.Bounds()
