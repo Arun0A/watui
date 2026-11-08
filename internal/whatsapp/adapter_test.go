@@ -71,6 +71,38 @@ func TestBuildImageThumbnail(t *testing.T) {
 	}
 }
 
+func TestBuildImageThumbnail_TransparentPNG(t *testing.T) {
+	// 50x50 transparent image with nothing drawn (all transparent alpha=0)
+	source := image.NewRGBA(image.Rect(0, 0, 50, 50))
+	var sourceData bytes.Buffer
+	if err := png.Encode(&sourceData, source); err != nil {
+		t.Fatalf("encode transparent image: %v", err)
+	}
+
+	thumbnail, width, height, err := buildImageThumbnail(sourceData.Bytes())
+	if err != nil {
+		t.Fatalf("build thumbnail: %v", err)
+	}
+	if width != 50 || height != 50 {
+		t.Fatalf("expected dimensions 50x50, got %dx%d", width, height)
+	}
+
+	decoded, format, err := image.Decode(bytes.NewReader(thumbnail))
+	if err != nil {
+		t.Fatalf("decode thumbnail: %v", err)
+	}
+	if format != "jpeg" {
+		t.Fatalf("expected format jpeg, got %s", format)
+	}
+
+	// Verify transparent pixel defaults to black in JPEG
+	r, g, b, _ := decoded.At(10, 10).RGBA()
+	// RGBA() returns 16-bit colors [0, 0xffff]. Black is close to 0.
+	if r > 0x2000 || g > 0x2000 || b > 0x2000 {
+		t.Errorf("expected black background for transparent image in JPEG thumbnail, got R:%d G:%d B:%d", r, g, b)
+	}
+}
+
 func TestExtractDomainMessage(t *testing.T) {
 	// Adapter instance with dummy fields for testing extraction
 	adapter := &Adapter{}
